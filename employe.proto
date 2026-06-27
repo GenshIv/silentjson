@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package employee;
+
+// Указываем путь для генерации Go-кода
+option go_package = "github.com/GenshIv/silentjson/pb";
+
+message Address {
+  string city = 1;
+  int32 zip = 2; // В Proto лучше указывать конкретный размер (int32 или int64)
+}
+
+message Employee {
+  int32 id = 1;
+  bool is_active = 2;
+  double balance = 3;
+  Address address = 4;
+  repeated string tags = 5;
+  repeated int64 scores = 6;
+}
+
+// Обертка для списка (для бенчмарка)
+message Employees {
+  repeated Employee list = 1;
+}

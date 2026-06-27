@@ -8,6 +8,9 @@ import (
 	"reflect"
 	"testing"
 	"unsafe"
+
+	"github.com/GenshIv/silentjson/pb"
+	"google.golang.org/protobuf/proto"
 )
 
 // --- STRUCTURES AND GENERATOR ---
@@ -225,4 +228,55 @@ func BenchmarkUnmarshalArrayParallel(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+func BenchmarkLargeScaleComparison(b *testing.B) {
+	// Сериализуем один раз для всех, чтобы не учитывать это в тесте
+	pbEmployees := &pb.Employees{
+		List: make([]*pb.Employee, len(benchEmpSlice)),
+	}
+
+	for i, emp := range benchEmpSlice {
+		pbEmployees.List[i] = &pb.Employee{
+			Id:       int32(emp.ID),
+			IsActive: emp.IsActive,
+			Balance:  emp.Balance,
+			Address: &pb.Address{
+				City: emp.Address.City,
+				Zip:  int32(emp.Address.Zip),
+			},
+			Tags:   emp.Tags,
+			Scores: sliceIntToInt64(emp.Scores), // Небольшая конвертация int -> int64
+		}
+	}
+	rawPB, _ := proto.Marshal(pbEmployees)
+
+	b.Run("SilentJSON", func(b *testing.B) {
+		reg := BuildRegistry(reflect.TypeOf(Employee{}))
+		b.SetBytes(int64(len(rawPB)))
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			// Твой параллельный парсер
+			_, _ = UnmarshalArrayParallel[Employee](rawPB, reg)
+		}
+	})
+
+	b.Run("Protobuf", func(b *testing.B) {
+		b.SetBytes(int64(len(rawPB)))
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			var e pb.Employees
+			_ = proto.Unmarshal(rawPB, &e)
+		}
+	})
+}
+
+// Вспомогательная функция для конвертации типов
+func sliceIntToInt64(s []int) []int64 {
+	res := make([]int64, len(s))
+	for i, v := range s {
+		res[i] = int64(v)
+	}
+	return res
 }
