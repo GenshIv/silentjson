@@ -40,6 +40,9 @@ func findObjectBoundariesASM(data []byte, chunks []Chunk) (ret0 int, ret1 int)
 func skipValueASM(raw []byte, start int) int
 
 //go:noescape
+func skipSpaceASM(data []byte, start int) int
+
+//go:noescape
 func findQuoteOrEscapeASM(b []byte) (idx int, isEscape bool)
 
 var (
@@ -122,6 +125,8 @@ type MarshalFunc func(ptr unsafe.Pointer, buf []byte) []byte
 type FieldInfo struct {
 	EncodedKey []byte // Pre-serialized key, e.g., `"key":`
 	Key        string
+	KeyLen     int
+	KeyUint64  uint64
 	Offset     uintptr
 	Hash       int64
 	Type       FieldType
@@ -158,10 +163,36 @@ func BuildRegistry(typ reflect.Type) *Registry {
 
 		parts := strings.Split(tag, ",")
 		key := parts[0]
+		
+		keyLen := len(key)
+		var keyU64 uint64
+		if keyLen > 0 && keyLen <= 8 {
+			b := unsafe.SliceData([]byte(key))
+			switch keyLen {
+			case 1:
+				keyU64 = uint64(*b)
+			case 2:
+				keyU64 = uint64(*(*uint16)(unsafe.Pointer(b)))
+			case 3:
+				keyU64 = uint64(*(*uint16)(unsafe.Pointer(b))) | (uint64(*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 2))) << 16)
+			case 4:
+				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b)))
+			case 5:
+				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b))) | (uint64(*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 4))) << 32)
+			case 6:
+				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b))) | (uint64(*(*uint16)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 4))) << 32)
+			case 7:
+				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b))) | (uint64(*(*uint16)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 4))) << 32) | (uint64(*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 6))) << 48)
+			case 8:
+				keyU64 = *(*uint64)(unsafe.Pointer(b))
+			}
+		}
 
 		info := FieldInfo{
 			EncodedKey: []byte(`"` + key + `":`),
 			Key:        key,
+			KeyLen:     keyLen,
+			KeyUint64:  keyU64,
 			Offset:     field.Offset,
 		}
 
@@ -407,8 +438,8 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 
 	for {
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
-			i++
-		}
+		i++
+	}
 		if i >= len(raw) {
 			return 0, ErrUnexpectedEOF
 		}
@@ -429,28 +460,60 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 		i += int(consumed)
 
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
-			i++
-		}
+		i++
+	}
 		if i >= len(raw) || (charTable[raw[i]]&charColon) == 0 {
 			return 0, ErrTypeMismatch
 		}
 		i++
 
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
-			i++
-		}
+		i++
+	}
 		if i >= len(raw) {
 			return 0, ErrUnexpectedEOF
 		}
 
 		var info FieldInfo
 		var ok bool
+		keyLen := len(decoded)
+		var keyU64 uint64
+		if keyLen > 0 && keyLen <= 8 {
+			b := unsafe.SliceData(decoded)
+			switch keyLen {
+			case 1:
+				keyU64 = uint64(*b)
+			case 2:
+				keyU64 = uint64(*(*uint16)(unsafe.Pointer(b)))
+			case 3:
+				keyU64 = uint64(*(*uint16)(unsafe.Pointer(b))) | (uint64(*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 2))) << 16)
+			case 4:
+				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b)))
+			case 5:
+				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b))) | (uint64(*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 4))) << 32)
+			case 6:
+				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b))) | (uint64(*(*uint16)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 4))) << 32)
+			case 7:
+				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b))) | (uint64(*(*uint16)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 4))) << 32) | (uint64(*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 6))) << 48)
+			case 8:
+				keyU64 = *(*uint64)(unsafe.Pointer(b))
+			}
+		}
+
 		if len(reg.Fields) <= 16 {
 			for idx := 0; idx < len(reg.Fields); idx++ {
-				if reg.Fields[idx].Key == keySlice {
-					info = reg.Fields[idx]
-					ok = true
-					break
+				if keyLen <= 8 {
+					if reg.Fields[idx].KeyLen == keyLen && reg.Fields[idx].KeyUint64 == keyU64 {
+						info = reg.Fields[idx]
+						ok = true
+						break
+					}
+				} else {
+					if reg.Fields[idx].Key == keySlice {
+						info = reg.Fields[idx]
+						ok = true
+						break
+					}
 				}
 			}
 		} else {
@@ -537,13 +600,13 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 		}
 
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
-			i++
-		}
+		i++
+	}
 		if i < len(raw) && (charTable[raw[i]]&(charComma|charCloseBrace)) == 0 {
 			i = skipValue(raw, i)
 			for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
-				i++
-			}
+		i++
+	}
 		}
 		if i >= len(raw) {
 			return 0, ErrUnexpectedEOF
@@ -569,8 +632,8 @@ func parseStringSliceAt(raw []byte, start int, dst []string) ([]string, int, err
 
 	for {
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
-			i++
-		}
+		i++
+	}
 		if i >= len(raw) {
 			return nil, 0, ErrUnexpectedEOF
 		}
@@ -608,8 +671,8 @@ func parseStringSliceAt(raw []byte, start int, dst []string) ([]string, int, err
 		i += int(consumed)
 
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
-			i++
-		}
+		i++
+	}
 		if i >= len(raw) {
 			return nil, 0, ErrUnexpectedEOF
 		}
@@ -634,8 +697,8 @@ func parseIntSliceAt(raw []byte, start int, dst []int) ([]int, int, error) {
 
 	for {
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
-			i++
-		}
+		i++
+	}
 		if i >= len(raw) {
 			return nil, 0, ErrUnexpectedEOF
 		}
@@ -669,8 +732,8 @@ func parseIntSliceAt(raw []byte, start int, dst []int) ([]int, int, error) {
 		dst = append(dst, fastParseInt(raw[startNum:i]))
 
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
-			i++
-		}
+		i++
+	}
 		if i >= len(raw) {
 			return nil, 0, ErrUnexpectedEOF
 		}

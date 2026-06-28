@@ -281,3 +281,155 @@ func TestUnmarshalArrayParallel_HighVolume(t *testing.T) {
 		}
 	}
 }
+
+// Test ParseObject Error Handling (Deep edge cases)
+func TestParseObject_DeepErrors(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(TestUser{}))
+
+	tests := []struct {
+		name        string
+		payload     []byte
+		expectedErr error
+	}{
+		{
+			name:        "Missing closing brace",
+			payload:     []byte(`{"id":1, "name":"test"`),
+			expectedErr: ErrUnexpectedEOF, // Should return an error and NOT panic
+		},
+		{
+			name:        "Unescaped control character in string",
+			payload:     []byte(`{"name":"test` + "\n" + `"}`),
+			expectedErr: nil, // Our parser allows unescaped control chars for speed
+		},
+		{
+			name:        "Escaped backslash at the very end of chunk",
+			payload:     []byte(`{"name":"test\\","id":2}`),
+			expectedErr: nil,
+		},
+		{
+			name:        "Invalid array structure missing bracket",
+			payload:     []byte(`{"tags":["a","b"}`),
+			expectedErr: ErrUnexpectedEOF, // or similar structural error
+		},
+		{
+			name:        "Nested object syntax error",
+			payload:     []byte(`{"name":"foo", "balance": { "nested": 123 ] }`),
+			expectedErr: ErrTypeMismatch, // or structural error, but not panic
+		},
+		{
+			name:        "Missing quotes around key",
+			payload:     []byte(`{name:"foo"}`),
+			expectedErr: ErrUnexpectedEOF, // or similar parsing error
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var actual TestUser
+			buf := make([]byte, len(tt.payload))
+			copy(buf, tt.payload)
+
+			err := ParseObject(buf, reg, unsafe.Pointer(&actual))
+			if err == nil && tt.expectedErr != nil {
+				t.Errorf("expected error, got nil")
+			}
+		})
+	}
+}
+
+// Nested structure for depth testing
+type Department struct {
+	Name    string     `json:"name"`
+	Workers []TestUser `json:"workers"`
+}
+
+type Company struct {
+	ID          int          `json:"id"`
+	Title       string       `json:"title"`
+	Departments []Department `json:"departments"`
+}
+
+func TestParseNestedStructures(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(Company{}))
+
+	payload := []byte(`{
+		"id": 1,
+		"title": "Tech Corp",
+		"departments": [
+			{
+				"name": "Engineering",
+				"workers": [
+					{"id": 101, "name": "Alice", "tags": ["go", "backend"]},
+					{"id": 102, "name": "Bob", "tags": ["frontend", "react"]}
+				]
+			},
+			{
+				"name": "HR",
+				"workers": [
+					{"id": 201, "name": "Charlie", "tags": ["recruiting"]}
+				]
+			}
+		]
+	}`)
+
+	var company Company
+	buf := make([]byte, len(payload))
+	copy(buf, payload)
+
+	err := ParseObject(buf, reg, unsafe.Pointer(&company))
+	if err != nil {
+		t.Fatalf("unexpected error parsing nested structure: %v", err)
+	}
+
+	if company.ID != 1 || company.Title != "Tech Corp" {
+		t.Errorf("Top-level fields mismatched: %+v", company)
+	}
+	if len(company.Departments) != 2 {
+		t.Fatalf("Expected 2 departments, got %d", len(company.Departments))
+	}
+	if company.Departments[0].Name != "Engineering" || len(company.Departments[0].Workers) != 2 {
+		t.Errorf("First department mismatched: %+v", company.Departments[0])
+	}
+	if company.Departments[1].Workers[0].Name != "Charlie" {
+		t.Errorf("Deeply nested worker name mismatched. Expected Charlie, got %s", company.Departments[1].Workers[0].Name)
+	}
+}
+
+func TestMarshalArrayParallel_Verification(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(TestWorkerItem{}))
+
+	data := make([]TestWorkerItem, 5000)
+	for i := range data {
+		data[i] = TestWorkerItem{
+			ID:     i,
+			Name:   fmt.Sprintf("Worker_%d", i),
+			Active: i%2 == 0,
+		}
+	}
+
+	jsonBytes, err := MarshalArrayParallel(data, reg)
+	if err != nil {
+		t.Fatalf("unexpected error marshaling: %v", err)
+	}
+
+	if len(jsonBytes) == 0 {
+		t.Fatalf("marshaled output is empty")
+	}
+
+	// Validate by unmarshaling back
+	parsed := make([]TestWorkerItem, 5000)
+	parsed, err = UnmarshalArrayParallel[TestWorkerItem](jsonBytes, reg, parsed)
+	if err != nil {
+		t.Fatalf("unexpected error unmarshaling the generated JSON: %v", err)
+	}
+
+	if len(parsed) != 5000 {
+		t.Fatalf("expected 5000 items, got %d", len(parsed))
+	}
+
+	for i := range parsed {
+		if parsed[i].ID != data[i].ID || parsed[i].Name != data[i].Name || parsed[i].Active != data[i].Active {
+			t.Fatalf("data mismatch at index %d: expected %+v, got %+v", i, data[i], parsed[i])
+		}
+	}
+}

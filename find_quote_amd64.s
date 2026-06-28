@@ -245,6 +245,36 @@ TEXT ·parseShortStringASM2(SB), NOSPLIT, $0-40
 
     XORQ CX, CX // readIdx
     XORQ DX, DX // writeIdx
+
+    MOVQ $0x2222222222222222, R8
+    MOVQ R8, X1
+    VPBROADCASTQ X1, Y1
+    MOVQ $0x5c5c5c5c5c5c5c5c, R8
+    MOVQ R8, X2
+    VPBROADCASTQ X2, Y2
+
+pss_avx_loop:
+    MOVQ BX, AX
+    SUBQ CX, AX
+    CMPQ AX, $32
+    JL loop
+
+    VMOVDQU (SI)(CX*1), Y0
+    VPCMPEQB Y1, Y0, Y3
+    VPCMPEQB Y2, Y0, Y4
+    VPOR Y3, Y4, Y5
+    VPMOVMSKB Y5, R8
+    TESTL R8, R8
+    JNZ loop
+
+    CMPQ CX, DX
+    JEQ pss_skip_copy
+    VMOVDQU Y0, (SI)(DX*1)
+pss_skip_copy:
+    ADDQ $32, CX
+    ADDQ $32, DX
+    JMP pss_avx_loop
+
 loop:
     CMPQ CX, BX                // Check: read everything?
     JGE eof
@@ -590,7 +620,7 @@ copy_eof:
     RET
 
 // func findObjectBoundariesASM(data []byte, chunks []Chunk) (ret0 int, ret1 int)
-TEXT ·findObjectBoundariesASM(SB), NOSPLIT, $0-64
+TEXT ·findObjectBoundariesASM(SB), NOSPLIT, $8-64
     // 1. Arguments:
     // data_ptr (0), data_len (8), data_cap (16)
     // chunks_ptr (24), chunks_len (32), chunks_cap (40)
@@ -633,75 +663,204 @@ TEXT ·findObjectBoundariesASM(SB), NOSPLIT, $0-64
     XORQ R11, R11      // inString
     XORQ R13, R13      // storedCount
 
+    MOVQ $0, 0(SP)     // escape_carry = 0
+
     // Protection against nil
     TESTQ SI, SI
     JZ    done
     TESTQ DI, DI
     JZ    done
 
-loop:
-    CMPQ CX, BX
-    JGE  done
+avx_loop:
+    MOVQ BX, R15
+    SUBQ CX, R15
+    CMPQ R15, $32
+    JL   scalar_tail
+
+    VMOVDQU (SI)(CX*1), Y0
+    
+    // Compare against special characters
+    VPCMPEQB Y1, Y0, Y7   // "
+    VPCMPEQB Y2, Y0, Y8   // \
+    VPOR Y7, Y8, Y7
+    VPCMPEQB Y3, Y0, Y8   // {
+    VPOR Y7, Y8, Y7
+    VPCMPEQB Y4, Y0, Y8   // }
+    VPOR Y7, Y8, Y7
+    VPCMPEQB Y5, Y0, Y8   // [
+    VPOR Y7, Y8, Y7
+    VPCMPEQB Y6, Y0, Y8   // ]
+    VPOR Y7, Y8, Y7
+
+    VPMOVMSKB Y7, R15     // R15 = 32-bit mask of special characters
+
+    // Apply escape carry from previous chunk
+    CMPQ 0(SP), $0
+    JEQ  no_carry
+    BTRL $0, R15          // Clear bit 0
+    MOVQ $0, 0(SP)        // Clear carry flag
+no_carry:
+
+    TESTL R15, R15
+    JZ    avx_advance
+
+mask_loop:
+    BSFL R15, R14         // R14 = index of lowest set bit
+    MOVQ CX, AX
+    ADDQ R14, AX
+    MOVB (SI)(AX*1), AL
+
     TESTQ R11, R11
-    JNZ   string_scan
+    JNZ   inside_string
 
-outside_scan:
-    MOVB (SI)(CX*1), AL
-    CMPB AL, $34
-    JL   not_special
-    CMPB AL, $125
-    JG   not_special
-
+    // --- OUTSIDE STRING ---
     CMPB AL, $0x22
-    JEQ  outside_quote
-    CMPB AL, $0x5C
-    JEQ  outside_backslash
+    JEQ  quote_found
     CMPB AL, $0x7B
-    JEQ  outside_open_brace
+    JEQ  brace_open_found
     CMPB AL, $0x7D
-    JEQ  outside_close_brace
+    JEQ  brace_close_found
     CMPB AL, $0x5B
-    JEQ  outside_open_bracket
+    JEQ  bracket_open_found
     CMPB AL, $0x5D
-    JEQ  outside_close_bracket
+    JEQ  bracket_close_found
+    JMP  next_bit
 
-not_special:
-    INCQ CX
-    JMP  loop
+    // --- INSIDE STRING ---
+inside_string:
+    CMPB AL, $0x22
+    JEQ  quote_found
+    CMPB AL, $0x5C
+    JEQ  backslash_found
+    JMP  next_bit
 
-outside_quote:
+quote_found:
     XORQ $1, R11
-    INCQ CX
-    JMP  loop
+    JMP  next_bit
 
-outside_backslash:
-    INCQ CX
-    JMP  loop
+backslash_found:
+    CMPL R14, $31
+    JEQ  escape_carry
+    // Clear next bit
+    MOVL R14, AX
+    INCL AX
+    BTRL AX, R15
+    JMP  next_bit
+escape_carry:
+    MOVQ $1, 0(SP)
+    JMP  next_bit
 
-outside_open_brace:
+brace_open_found:
     INCQ R9
     INCQ R12
     CMPQ R9, $1
-    JNE  outside_open_brace_step
+    JNE  next_bit
     MOVQ CX, R10
+    ADDQ R14, R10
+    JMP  next_bit
 
-outside_open_brace_step:
-    INCQ CX
-    JMP  loop
-
-outside_close_brace:
+brace_close_found:
     TESTQ R9, R9
-    JZ   outside_close_bracket
+    JZ   bracket_close_found
     DECQ R9
     TESTQ R12, R12
-    JZ   outside_close_brace_advance
+    JZ   next_bit
     DECQ R12
     TESTQ R9, R9
-    JNZ  outside_close_brace_advance
+    JNZ  next_bit
 
     INCQ R8
     CMPQ R13, DX
-    JGE  outside_close_brace_reset
+    JGE  reset_start
+
+    MOVQ R13, AX
+    SHLQ $4, AX
+    MOVQ R10, 0(DI)(AX*1)
+    MOVQ CX, 8(DI)(AX*1)
+    ADDQ R14, 8(DI)(AX*1)
+    INCQ 8(DI)(AX*1)
+    INCQ R13
+reset_start:
+    MOVQ $-1, R10
+    JMP  next_bit
+
+bracket_open_found:
+    INCQ R12
+    JMP  next_bit
+
+bracket_close_found:
+    TESTQ R12, R12
+    JZ   next_bit
+    DECQ R12
+    JMP  next_bit
+
+next_bit:
+    LEAL -1(R15), AX
+    ANDL AX, R15
+    JNZ  mask_loop
+
+avx_advance:
+    ADDQ $32, CX
+    JMP  avx_loop
+
+scalar_tail:
+    CMPQ CX, BX
+    JGE  done
+    MOVB (SI)(CX*1), AL
+    
+    TESTQ R11, R11
+    JNZ  tail_inside_string
+
+    CMPB AL, $0x22
+    JEQ  tail_quote_found
+    CMPB AL, $0x5C
+    JEQ  tail_backslash_found
+    CMPB AL, $0x7B
+    JEQ  tail_brace_open_found
+    CMPB AL, $0x7D
+    JEQ  tail_brace_close_found
+    CMPB AL, $0x5B
+    JEQ  tail_bracket_open_found
+    CMPB AL, $0x5D
+    JEQ  tail_bracket_close_found
+    JMP  tail_next
+
+tail_inside_string:
+    CMPB AL, $0x22
+    JEQ  tail_quote_found
+    CMPB AL, $0x5C
+    JEQ  tail_backslash_found
+    JMP  tail_next
+
+tail_quote_found:
+    XORQ $1, R11
+    JMP  tail_next
+
+tail_backslash_found:
+    INCQ CX
+    JMP  tail_next
+
+tail_brace_open_found:
+    INCQ R9
+    INCQ R12
+    CMPQ R9, $1
+    JNE  tail_next
+    MOVQ CX, R10
+    JMP  tail_next
+
+tail_brace_close_found:
+    TESTQ R9, R9
+    JZ   tail_bracket_close_found
+    DECQ R9
+    TESTQ R12, R12
+    JZ   tail_next
+    DECQ R12
+    TESTQ R9, R9
+    JNZ  tail_next
+
+    INCQ R8
+    CMPQ R13, DX
+    JGE  tail_reset_start
 
     MOVQ R13, AX
     SHLQ $4, AX
@@ -709,83 +868,30 @@ outside_close_brace:
     MOVQ CX, 8(DI)(AX*1)
     INCQ 8(DI)(AX*1)
     INCQ R13
-
-outside_close_brace_reset:
+tail_reset_start:
     MOVQ $-1, R10
-outside_close_brace_advance:
-    INCQ CX
-    JMP  loop
+    JMP  tail_next
 
-outside_close_bracket:
-    TESTQ R12, R12
-    JZ   outside_close_brace_advance
-    DECQ R12
-    INCQ CX
-    JMP  loop
-
-outside_open_bracket:
+tail_bracket_open_found:
     INCQ R12
+    JMP  tail_next
+
+tail_bracket_close_found:
+    TESTQ R12, R12
+    JZ   tail_next
+    DECQ R12
+    JMP  tail_next
+
+tail_next:
     INCQ CX
-    JMP  loop
-
-string_scan:
-    MOVQ BX, R15
-    SUBQ CX, R15
-    CMPQ R15, $32
-    JL   string_tail
-
-    VMOVDQU (SI)(CX*1), Y0
-    VPCMPEQB Y1, Y0, Y7
-    VPCMPEQB Y2, Y0, Y8
-    VPOR Y7, Y8, Y9
-    VPMOVMSKB Y9, R15
-    TESTL R15, R15
-    JZ   string_advance
-
-    BSFL R15, R14
-    VPMOVMSKB Y8, R15
-    BTL R14, R15
-    JC  string_escape
-
-    ADDQ R14, CX
-    XORQ $1, R11
-    INCQ CX
-    JMP  loop
-
-string_escape:
-    ADDQ R14, CX
-    ADDQ $2, CX
-    JMP  loop
-
-string_advance:
-    ADDQ $32, CX
-    JMP  loop
-
-string_tail:
-    CMPQ CX, BX
-    JGE  done
-    MOVB (SI)(CX*1), AL
-    CMPB AL, $0x5C
-    JEQ  string_tail_escape
-    CMPB AL, $0x22
-    JEQ  string_tail_quote
-    INCQ CX
-    JMP  string_tail
-
-string_tail_escape:
-    ADDQ $2, CX
-    JMP  loop
-
-string_tail_quote:
-    XORQ $1, R11
-    INCQ CX
-    JMP  loop
+    JMP  scalar_tail
 
 done:
+    VZEROUPPER
     MOVQ R8, ret0+48(FP)
     MOVQ R12, ret1+56(FP)
-    VZEROUPPER
     RET
+
 
 // func skipValueASM(raw []byte, start int) int
 TEXT ·skipValueASM(SB), NOSPLIT, $0-24
@@ -931,4 +1037,74 @@ done:
     MOVQ AX, ret_base+32(FP)
     MOVQ SI, ret_len+40(FP)
     MOVQ R12, ret_cap+48(FP)
+    RET
+
+// func skipSpaceASM(raw []byte, start int) int
+TEXT ·skipSpaceASM(SB), NOSPLIT, $0-40
+    MOVQ raw_base+0(FP), SI
+    MOVQ raw_len+8(FP), BX
+    MOVQ start+24(FP), CX
+
+    MOVQ $0x2020202020202020, R8
+    MOVQ R8, X1
+    VPBROADCASTQ X1, Y1
+    MOVQ $0x0909090909090909, R8
+    MOVQ R8, X2
+    VPBROADCASTQ X2, Y2
+    MOVQ $0x0A0A0A0A0A0A0A0A, R8
+    MOVQ R8, X3
+    VPBROADCASTQ X3, Y3
+    MOVQ $0x0D0D0D0D0D0D0D0D, R8
+    MOVQ R8, X4
+    VPBROADCASTQ X4, Y4
+
+ss_avx_loop:
+    MOVQ BX, AX
+    SUBQ CX, AX
+    CMPQ AX, $32
+    JL ss_scalar_loop
+
+    VMOVDQU (SI)(CX*1), Y0
+    VPCMPEQB Y1, Y0, Y5
+    VPCMPEQB Y2, Y0, Y6
+    VPOR Y5, Y6, Y5
+    VPCMPEQB Y3, Y0, Y6
+    VPOR Y5, Y6, Y5
+    VPCMPEQB Y4, Y0, Y6
+    VPOR Y5, Y6, Y5
+
+    VPMOVMSKB Y5, DX
+    NOTL DX
+    TESTL DX, DX
+    JZ ss_all_spaces
+
+    BSFL DX, DX
+    ADDQ DX, CX
+    JMP ss_done
+
+ss_all_spaces:
+    ADDQ $32, CX
+    JMP ss_avx_loop
+
+ss_scalar_loop:
+    CMPQ CX, BX
+    JGE ss_done
+    MOVB (SI)(CX*1), AL
+    CMPB AL, $0x20
+    JEQ ss_next_char
+    CMPB AL, $0x09
+    JEQ ss_next_char
+    CMPB AL, $0x0A
+    JEQ ss_next_char
+    CMPB AL, $0x0D
+    JEQ ss_next_char
+    JMP ss_done
+
+ss_next_char:
+    INCQ CX
+    JMP ss_scalar_loop
+
+ss_done:
+    VZEROUPPER
+    MOVQ CX, ret+32(FP)
     RET

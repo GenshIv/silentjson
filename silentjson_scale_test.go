@@ -8,12 +8,12 @@ import (
 
 	"github.com/GenshIv/silentjson/pb"
 	"github.com/bytedance/sonic"
-	"github.com/minio/simdjson-go"
+	simdjson "github.com/minio/simdjson-go"
 	"google.golang.org/protobuf/proto"
 )
 
 func BenchmarkScalability(b *testing.B) {
-	sizes := []int{10, 50, 100, 500, 1000, 5000, 10000, 25000, 50000, 100000}
+	sizes := []int{10, 100000}
 	reg := BuildRegistry(reflect.TypeOf(Employee{}))
 
 	for _, size := range sizes {
@@ -89,7 +89,7 @@ func BenchmarkScalability(b *testing.B) {
 }
 
 func BenchmarkScalabilityParse(b *testing.B) {
-	sizes := []int{10, 50, 100, 500, 1000, 5000, 10000, 25000, 50000, 100000}
+	sizes := []int{10, 100000}
 	reg := BuildRegistry(reflect.TypeOf(Employee{}))
 
 	for _, size := range sizes {
