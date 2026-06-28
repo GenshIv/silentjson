@@ -245,6 +245,36 @@ TEXT ·parseShortStringASM2(SB), NOSPLIT, $0-40
 
     XORQ CX, CX // readIdx
     XORQ DX, DX // writeIdx
+
+    MOVQ $0x2222222222222222, R8
+    MOVQ R8, X1
+    VPBROADCASTQ X1, Y1
+    MOVQ $0x5c5c5c5c5c5c5c5c, R8
+    MOVQ R8, X2
+    VPBROADCASTQ X2, Y2
+
+pss_avx_loop:
+    MOVQ BX, AX
+    SUBQ CX, AX
+    CMPQ AX, $32
+    JL loop
+
+    VMOVDQU (SI)(CX*1), Y0
+    VPCMPEQB Y1, Y0, Y3
+    VPCMPEQB Y2, Y0, Y4
+    VPOR Y3, Y4, Y5
+    VPMOVMSKB Y5, R8
+    TESTL R8, R8
+    JNZ loop
+
+    CMPQ CX, DX
+    JEQ pss_skip_copy
+    VMOVDQU Y0, (SI)(DX*1)
+pss_skip_copy:
+    ADDQ $32, CX
+    ADDQ $32, DX
+    JMP pss_avx_loop
+
 loop:
     CMPQ CX, BX                // Check: read everything?
     JGE eof
@@ -931,4 +961,74 @@ done:
     MOVQ AX, ret_base+32(FP)
     MOVQ SI, ret_len+40(FP)
     MOVQ R12, ret_cap+48(FP)
+    RET
+
+// func skipSpaceASM(raw []byte, start int) int
+TEXT ·skipSpaceASM(SB), NOSPLIT, $0-40
+    MOVQ raw_base+0(FP), SI
+    MOVQ raw_len+8(FP), BX
+    MOVQ start+24(FP), CX
+
+    MOVQ $0x2020202020202020, R8
+    MOVQ R8, X1
+    VPBROADCASTQ X1, Y1
+    MOVQ $0x0909090909090909, R8
+    MOVQ R8, X2
+    VPBROADCASTQ X2, Y2
+    MOVQ $0x0A0A0A0A0A0A0A0A, R8
+    MOVQ R8, X3
+    VPBROADCASTQ X3, Y3
+    MOVQ $0x0D0D0D0D0D0D0D0D, R8
+    MOVQ R8, X4
+    VPBROADCASTQ X4, Y4
+
+ss_avx_loop:
+    MOVQ BX, AX
+    SUBQ CX, AX
+    CMPQ AX, $32
+    JL ss_scalar_loop
+
+    VMOVDQU (SI)(CX*1), Y0
+    VPCMPEQB Y1, Y0, Y5
+    VPCMPEQB Y2, Y0, Y6
+    VPOR Y5, Y6, Y5
+    VPCMPEQB Y3, Y0, Y6
+    VPOR Y5, Y6, Y5
+    VPCMPEQB Y4, Y0, Y6
+    VPOR Y5, Y6, Y5
+
+    VPMOVMSKB Y5, DX
+    NOTL DX
+    TESTL DX, DX
+    JZ ss_all_spaces
+
+    BSFL DX, DX
+    ADDQ DX, CX
+    JMP ss_done
+
+ss_all_spaces:
+    ADDQ $32, CX
+    JMP ss_avx_loop
+
+ss_scalar_loop:
+    CMPQ CX, BX
+    JGE ss_done
+    MOVB (SI)(CX*1), AL
+    CMPB AL, $0x20
+    JEQ ss_next_char
+    CMPB AL, $0x09
+    JEQ ss_next_char
+    CMPB AL, $0x0A
+    JEQ ss_next_char
+    CMPB AL, $0x0D
+    JEQ ss_next_char
+    JMP ss_done
+
+ss_next_char:
+    INCQ CX
+    JMP ss_scalar_loop
+
+ss_done:
+    VZEROUPPER
+    MOVQ CX, ret+32(FP)
     RET
