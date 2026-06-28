@@ -54,17 +54,21 @@ xychart-beta
     bar [1655, 481, 432, 211, 113]
 ```
 
-To emphasize our perfect linear scaling and O(N) complexity, here is how the parsing time grows with the number of objects. Notice the perfectly straight line, showing absolutely no performance degradation at scale:
+To emphasize our perfect linear scaling and O(N) complexity, here is how the parsing throughput stays perfectly flat regardless of the number of objects. Notice the horizontal straight line, showing no performance degradation at scale:
 
 ```mermaid
 xychart-beta
-    title "Parsing Time vs Array Size (ms, Lower is Better)"
+    title "Parsing Throughput Scaling (MB/s, Higher is Better)"
     x-axis ["10k", "25k", "50k", "100k"]
-    y-axis "Time (ms)" 0 --> 150
-    line "Standard" [14.7, 37.2, 73.8, 141.5]
-    line "Sonic" [3.7, 8.6, 17.1, 33.7]
-    line "SilentJSON" [1.1, 2.7, 5.1, 10.2]
+    y-axis "MB/s" 0 --> 1600
+    line "SilentJSON" [1450, 1483, 1550, 1552]
+    line "Sonic" [421, 459, 463, 471]
+    line "Standard" [106, 106, 107, 112]
 ```
+> **Legend:**
+> 🟢 **Top Line:** `SilentJSON` (maintaining stable ~1500 MB/s)
+> 🔵 **Middle Line:** `Sonic` (~450 MB/s)
+> 🔴 **Bottom Line:** `Standard` (~110 MB/s)
 
 ### 2. Serialization (Generation / Marshal)
 We benchmarked generating a JSON array of 100,000 complex objects. `simdjson-go` is excluded as it is a parser only.
@@ -84,17 +88,21 @@ xychart-beta
     bar [1454, 1400, 596, 452]
 ```
 
-Similarly, serialization time scales perfectly linearly:
+Similarly, serialization throughput scales perfectly linearly, remaining a flat horizontal line:
 
 ```mermaid
 xychart-beta
-    title "Serialization Time vs Array Size (ms, Lower is Better)"
+    title "Serialization Throughput Scaling (MB/s, Higher is Better)"
     x-axis ["10k", "25k", "50k", "100k"]
-    y-axis "Time (ms)" 0 --> 30
-    line "Standard" [2.7, 6.7, 13.1, 26.2]
-    line "Sonic" [1.8, 4.8, 8.2, 15.4]
-    line "SilentJSON" [1.2, 3.0, 5.8, 11.6]
+    y-axis "MB/s" 0 --> 1500
+    line "SilentJSON" [1344, 1364, 1403, 1404]
+    line "Sonic" [854, 816, 967, 1030]
+    line "Standard" [578, 592, 604, 607]
 ```
+> **Legend:**
+> 🟢 **Top Line:** `SilentJSON` (maintaining stable ~1400 MB/s)
+> 🔵 **Middle Line:** `Sonic` (816 - 1030 MB/s)
+> 🔴 **Bottom Line:** `Standard` (~600 MB/s)
 
 ### Benchmark Methodology & Fairness
 
