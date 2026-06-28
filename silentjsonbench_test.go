@@ -1,3 +1,4 @@
+
 package silentjson
 
 import (
@@ -15,6 +16,8 @@ import (
 	"github.com/GenshIv/silentjson/pb"
 	"github.com/bytedance/sonic"
 	simdjson "github.com/minio/simdjson-go"
+	jsoniter "github.com/json-iterator/go"
+	"github.com/naoina/toml"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -274,6 +277,20 @@ func BenchmarkNestedComparison(b *testing.B) {
 			}
 		}
 	})
+
+	b.Run("Jsoniter", func(b *testing.B) {
+		b.SetBytes(int64(len(hugeJSONData)))
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			var slice []Employee
+			err := jsoniter.ConfigFastest.Unmarshal(hugeJSONData, &slice)
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }
 
 // BenchmarkLargeScaleGeneration tests serialization (marshal/generation)
@@ -518,6 +535,82 @@ func BenchmarkStreamComparison(b *testing.B) {
 				}
 			}
 			_, _ = dec.Token() // Read closing bracket
+		}
+	})
+
+	b.Run("Jsoniter_Stream", func(b *testing.B) {
+		b.SetBytes(int64(len(hugeJSONData)))
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			r := bytes.NewReader(hugeJSONData)
+			iter := jsoniter.Parse(jsoniter.ConfigFastest, r, 256*1024)
+			var emp Employee
+			for iter.ReadArray() {
+				iter.ReadVal(&emp)
+			}
+			if iter.Error != nil && iter.Error != io.EOF {
+				b.Fatal(iter.Error)
+			}
+		}
+	})
+}
+
+var hugeTOMLData []byte
+
+type TOMLRoot struct {
+	Employees []Employee `toml:"employees"`
+}
+
+func initTOMLData() {
+	if hugeTOMLData != nil {
+		return
+	}
+	var buf bytes.Buffer
+	for i := 0; i < benchSliceSize; i++ {
+		emp := benchEmpSlice[i]
+		buf.WriteString("[[employees]]\n")
+		buf.WriteString(fmt.Sprintf("id = %d\n", emp.ID))
+		buf.WriteString(fmt.Sprintf("is_active = %t\n", emp.IsActive))
+		buf.WriteString(fmt.Sprintf("balance = %f\n", emp.Balance))
+		buf.WriteString("tags = [")
+		for j, tag := range emp.Tags {
+			if j > 0 {
+				buf.WriteString(", ")
+			}
+			buf.WriteString(fmt.Sprintf("\"%s\"", tag))
+		}
+		buf.WriteString("]\nscores = [")
+		for j, score := range emp.Scores {
+			if j > 0 {
+				buf.WriteString(", ")
+			}
+			buf.WriteString(fmt.Sprintf("%d", score))
+		}
+		buf.WriteString("]\n")
+		buf.WriteString("[employees.address]\n")
+		buf.WriteString(fmt.Sprintf("city = \"%s\"\n", emp.Address.City))
+		buf.WriteString(fmt.Sprintf("zip = %d\n\n", emp.Address.Zip))
+	}
+	hugeTOMLData = buf.Bytes()
+	fmt.Printf("Generated %d MB of TOML data\n", len(hugeTOMLData)/1024/1024)
+}
+
+func BenchmarkTOMLComparison(b *testing.B) {
+	initTOMLData()
+
+	b.Run("naoina_toml", func(b *testing.B) {
+		b.SetBytes(int64(len(hugeTOMLData)))
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			var root TOMLRoot
+			err := toml.Unmarshal(hugeTOMLData, &root)
+			if err != nil {
+				b.Fatal(err)
+			}
 		}
 	})
 }

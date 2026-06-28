@@ -1,6 +1,7 @@
 package silentjson
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -121,34 +122,38 @@ func (d *StreamDecoder[T]) Decode(obj *T) error {
 
 		// Find the end of the object by counting depth
 		depth := 0
-		inString := false
-		var escape bool
 		endIdx := -1
 
+	scanLoop:
 		for i := d.head; i < d.tail; i++ {
 			c := d.buf[i]
-			if inString {
-				if escape {
-					escape = false
-				} else if c == '\\' {
-					escape = true
-				} else if c == '"' {
-					inString = false
-				}
-				continue
-			}
+			switch c {
+			case '"':
+				i++
+				for i < d.tail {
+					idx := bytes.IndexByte(d.buf[i:d.tail], '"')
+					if idx == -1 {
+						i = d.tail
+						break
+					}
+					i += idx
 
-			if c == '"' {
-				inString = true
-				continue
-			}
-			if c == '{' {
+					escapes := 0
+					for j := i - 1; j >= d.head && d.buf[j] == '\\'; j-- {
+						escapes++
+					}
+					if escapes%2 == 0 {
+						break // valid end quote
+					}
+					i++ // escaped quote, continue
+				}
+			case '{':
 				depth++
-			} else if c == '}' {
+			case '}':
 				depth--
 				if depth == 0 {
 					endIdx = i + 1
-					break
+					break scanLoop
 				}
 			}
 		}
