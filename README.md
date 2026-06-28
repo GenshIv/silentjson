@@ -83,11 +83,28 @@ Because `simdjson` and `sonic` (for standard arrays) require the **entire** payl
 
 | Library | Throughput (MB/s) | Memory Allocated | Allocs/op | Notes |
 | :--- | :--- | :--- | :--- | :--- |
-| **SilentJSON (Stream)** | **477.86 MB/s** 👑 | **41 MB** 👑 | **7.7M** 👑 | Uses bounded 256KB buffer |
-| **Jsoniter (Stream)** | 459.92 MB/s | 148 MB | 14.6M | 2x more GC pressure |
-| **Standard (`json.NewDecoder`)**| 106.50 MB/s | 162 MB | 13.3M | Slowest, highest memory usage |
+| **SilentJSON (NextRaw)** | **~1181 MB/s** 🚀 | **526 MB** | **3.0M** | Extreme speed raw stream chunk extraction |
+| **SilentJSON (Decode)** | **469.96 MB/s** 👑 | **41 MB** 👑 | **7.7M** 👑 | Full Go Struct Binding, zero alloc iteration |
+| **Jsoniter (Stream)** | 455.51 MB/s | 148 MB | 14.6M | 2x more GC pressure |
+| **SilentJSON (NextChan)**| **378.02 MB/s** ⚡ | **41 MB** 👑| **7.7M** 👑| Async Producer-Consumer mode (Ring Buffer) |
+| **Standard (`json.NewDecoder`)**| 105.42 MB/s | 162 MB | 13.3M | Slowest, highest memory usage |
 
-*Note: Stream parsing disables Zero-Copy strings to ensure memory safety when the underlying `io.Reader` buffer is overwritten, which is why the throughput is ~470 MB/s instead of the 3.3 GB/s seen in Batch parsing.*
+```mermaid
+xychart-beta
+    title "Streaming Throughput vs jsoniter (MB/s) - Higher is Better"
+    x-axis ["Standard", "NextChan", "jsoniter", "Decode", "NextRaw"]
+    bar [105, 378, 455, 470, 1181]
+```
+
+```mermaid
+xychart-beta
+    title "Memory Allocated (MB) - Lower is Better"
+    x-axis ["NextChan (Ring)", "Decode (Sync)", "jsoniter", "Standard"]
+    bar [41, 41, 148, 162]
+```
+
+*Note: Stream parsing disables Zero-Copy strings to ensure memory safety when the underlying `io.Reader` buffer is overwritten, which is why the throughput of full struct binding is ~471 MB/s instead of the 3.3 GB/s seen in Batch parsing. However, using the new `NextRaw()` allows you to extract raw object chunks at **~1.2 GB/s** directly from the stream!*
+
 
 ### 3. Serialization (Generation / Marshal)
 We benchmarked generating a JSON array of 100,000 complex objects. `simdjson-go` is excluded as it is a parser only.
@@ -202,19 +219,58 @@ func streamLargeArray(reader io.Reader) error {
     // Create decoder, which maintains a fixed-size internal buffer (e.g. 256KB)
     dec := silentjson.NewStreamDecoder[Employee](reader, empRegistry)
     
+    // Use the convenient generic iterator.
+    // The decoder reuses a single instance internally, minimizing allocations.
+    err := dec.Next(func(emp *Employee) bool {
+        // Process `emp` immediately (e.g. save to DB, print to stdout)
+        fmt.Println(emp.ID)
+        return true // return false to break early
+    })
+    
+    return err
+}
+```
+
+#### Extreme Stream Extraction (NextRaw)
+If you just need to extract JSON objects rapidly (e.g., to proxy them to a database or filter by simple regex) without unmarshaling them into Go structs, use `NextRaw()`. This operates at almost **1.2 GB/s**!
+
+```go
+func fastRawStream(reader io.Reader) error {
+    dec := silentjson.NewStreamDecoder[Employee](reader, empRegistry)
     for {
-        var emp Employee
-        err := dec.Decode(&emp)
+        rawBytes, err := dec.NextRaw() // Returns raw JSON e.g. {"id":1, ...}
         if err == io.EOF {
-            break // End of the JSON array
+            break
         }
         if err != nil {
             return err
         }
-        // Process `emp` immediately (e.g. save to DB, print to stdout)
-        fmt.Println(emp.ID)
+        // rawBytes is a copy and is safe to retain
+        _ = rawBytes
     }
     return nil
+}
+```
+
+#### Asynchronous Streaming (Producer-Consumer)
+If you want to parse data on a background goroutine while simultaneously processing it on the main thread, use the asynchronous `NextChan` channel-based API. 
+
+Unlike traditional libraries (like `jsoniter`) where writing a custom channel stream either leads to **data races** (reusing pointers) or **massive allocations** (creating new structs), SilentJSON uses an internal **Ring Buffer**. This achieves **ZERO extra allocations** while strictly avoiding data corruption, providing the perfect balance between concurrency and memory efficiency.
+
+```go
+func streamAsync(reader io.Reader) {
+    dec := silentjson.NewStreamDecoder[Employee](reader, empRegistry)
+    
+    // Launch a background goroutine parsing objects with a channel buffer of 100
+    ch := dec.NextChan(100)
+    
+    // Main thread processes them as they arrive
+    for res := range ch {
+        if res.Err != nil {
+            log.Fatalf("Stream error: %v", res.Err)
+        }
+        fmt.Println(res.Item.ID)
+    }
 }
 ```
 

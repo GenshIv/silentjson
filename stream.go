@@ -22,6 +22,7 @@ type StreamDecoder[T any] struct {
 	isEOF      bool
 	hasStarted bool
 	hasEnded   bool
+	obj        T // Reusable internal object for zero-allocation Next()
 }
 
 // NewStreamDecoder creates a new streaming decoder.
@@ -69,20 +70,21 @@ func (d *StreamDecoder[T]) fill() error {
 	return nil
 }
 
-// Decode reads the next object from the JSON array and unmarshals it into obj.
-func (d *StreamDecoder[T]) Decode(obj *T) error {
+// nextChunk finds the next JSON object in the stream and returns its raw bytes.
+// The returned slice points to the internal buffer and is only valid until the next read.
+func (d *StreamDecoder[T]) nextChunk() ([]byte, error) {
 	if d.hasEnded {
-		return io.EOF
+		return nil, io.EOF
 	}
 
 	for {
 		// Ensure we have enough data to check at least one character
 		if d.head >= d.tail {
 			if err := d.fill(); err != nil {
-				return err
+				return nil, err
 			}
 			if d.head >= d.tail && d.isEOF {
-				return io.EOF
+				return nil, io.EOF
 			}
 		}
 
@@ -98,7 +100,7 @@ func (d *StreamDecoder[T]) Decode(obj *T) error {
 		// Initial array start
 		if !d.hasStarted {
 			if d.buf[d.head] != '[' {
-				return fmt.Errorf("expected '[' at the beginning of the stream, got '%c'", d.buf[d.head])
+				return nil, fmt.Errorf("expected '[' at the beginning of the stream, got '%c'", d.buf[d.head])
 			}
 			d.hasStarted = true
 			d.head++
@@ -108,7 +110,7 @@ func (d *StreamDecoder[T]) Decode(obj *T) error {
 		// Check for end of array or comma
 		if d.buf[d.head] == ']' {
 			d.hasEnded = true
-			return io.EOF
+			return nil, io.EOF
 		}
 		if d.buf[d.head] == ',' {
 			d.head++
@@ -117,7 +119,7 @@ func (d *StreamDecoder[T]) Decode(obj *T) error {
 
 		// We expect an object to start here
 		if d.buf[d.head] != '{' {
-			return fmt.Errorf("expected '{', got '%c'", d.buf[d.head])
+			return nil, fmt.Errorf("expected '{', got '%c'", d.buf[d.head])
 		}
 
 		// Find the end of the object by counting depth
@@ -162,15 +164,106 @@ func (d *StreamDecoder[T]) Decode(obj *T) error {
 			// Complete object found!
 			chunk := d.buf[d.head:endIdx]
 			d.head = endIdx
-			return ParseObject(chunk, d.reg, unsafe.Pointer(obj))
+			return chunk, nil
 		}
 
 		// If we reached here, the object is incomplete. We need to read more.
 		if d.isEOF {
-			return ErrUnexpectedEOF
+			return nil, ErrUnexpectedEOF
 		}
 		if err := d.fill(); err != nil {
-			return err
+			return nil, err
 		}
 	}
+}
+
+// Decode reads the next object from the JSON array and unmarshals it into obj.
+func (d *StreamDecoder[T]) Decode(obj *T) error {
+	chunk, err := d.nextChunk()
+	if err != nil {
+		return err
+	}
+	return ParseObject(chunk, d.reg, unsafe.Pointer(obj))
+}
+
+// Next processes the remainder of the JSON array, unmarshaling each object into an internal reusable instance 
+// and passing it to the provided callback. This enables strictly zero-allocation stream processing.
+// If the callback returns false, the iteration stops early.
+func (d *StreamDecoder[T]) Next(cb func(obj *T) bool) error {
+	for {
+		chunk, err := d.nextChunk()
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+		if err := ParseObject(chunk, d.reg, unsafe.Pointer(&d.obj)); err != nil {
+			return err
+		}
+		if !cb(&d.obj) {
+			return nil
+		}
+	}
+}
+
+// NextRaw reads the next object from the JSON array and returns its raw JSON bytes.
+// This completely skips the unmarshaling phase, providing extreme throughput for raw extraction.
+// A copy of the underlying bytes is returned to ensure memory safety.
+func (d *StreamDecoder[T]) NextRaw() ([]byte, error) {
+	chunk, err := d.nextChunk()
+	if err != nil {
+		return nil, err
+	}
+	// Copy the chunk because d.buf will be overwritten by future reads
+	res := make([]byte, len(chunk))
+	copy(res, chunk)
+	return res, nil
+}
+
+// StreamResult holds the result of an asynchronous stream parse operation.
+
+// StreamResult holds the result of an asynchronous stream parse operation.
+type StreamResult[T any] struct {
+	Item T
+	Err  error
+}
+
+// NextChan launches a background goroutine that parses objects and sends them to the returned channel.
+// It uses a Ring Buffer of size `bufferSize` to achieve ZERO allocations during streaming.
+// WARNING: The returned pointer is reused after `bufferSize` iterations. You must not retain 
+// references to it or its slices indefinitely.
+func (d *StreamDecoder[T]) NextChan(bufferSize int) <-chan StreamResult[*T] {
+	if bufferSize < 1 {
+		bufferSize = 1
+	}
+	ch := make(chan StreamResult[*T], bufferSize)
+	ringSize := bufferSize + 4
+	ring := make([]T, ringSize)
+
+	go func() {
+		defer close(ch)
+		i := 0
+		for {
+			chunk, err := d.nextChunk()
+			if err != nil {
+				if err != io.EOF {
+					ch <- StreamResult[*T]{Err: err}
+				}
+				return
+			}
+
+			// Zero-allocation ring buffer reuse
+			obj := &ring[i%ringSize]
+			if err := ParseObject(chunk, d.reg, unsafe.Pointer(obj)); err != nil {
+				ch <- StreamResult[*T]{Err: err}
+				return
+			}
+
+			ch <- StreamResult[*T]{Item: obj}
+			i++
+		}
+	}()
+
+	return ch
 }

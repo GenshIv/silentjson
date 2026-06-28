@@ -515,6 +515,65 @@ func BenchmarkStreamComparison(b *testing.B) {
 		}
 	})
 
+	b.Run("SilentJSON_Stream_Next", func(b *testing.B) {
+		reg := BuildRegistry(reflect.TypeOf(Employee{}))
+		b.SetBytes(int64(len(hugeJSONData)))
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			r := bytes.NewReader(hugeJSONData)
+			dec := NewStreamDecoder[Employee](r, reg)
+			err := dec.Next(func(emp *Employee) bool {
+				return true
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("SilentJSON_Stream_NextRaw", func(b *testing.B) {
+		reg := BuildRegistry(reflect.TypeOf(Employee{}))
+		b.SetBytes(int64(len(hugeJSONData)))
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			r := bytes.NewReader(hugeJSONData)
+			dec := NewStreamDecoder[Employee](r, reg)
+			for {
+				_, err := dec.NextRaw()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+	})
+
+	b.Run("SilentJSON_Stream_NextChan", func(b *testing.B) {
+		reg := BuildRegistry(reflect.TypeOf(Employee{}))
+		b.SetBytes(int64(len(hugeJSONData)))
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			r := bytes.NewReader(hugeJSONData)
+			dec := NewStreamDecoder[Employee](r, reg)
+			ch := dec.NextChan(100) // Buffer of 100 for maximum throughput
+			
+			for res := range ch {
+				if res.Err != nil {
+					b.Fatal(res.Err)
+				}
+				_ = res.Item
+			}
+		}
+	})
+
 	b.Run("Standard_Stream", func(b *testing.B) {
 		b.SetBytes(int64(len(hugeJSONData)))
 		b.ReportAllocs()

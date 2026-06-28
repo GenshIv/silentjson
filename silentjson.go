@@ -118,6 +118,7 @@ const (
 	TypeStruct
 	TypeStringSlice
 	TypeIntSlice
+	TypeStructSlice
 )
 
 type MarshalFunc func(ptr unsafe.Pointer, buf []byte) []byte
@@ -133,6 +134,8 @@ type FieldInfo struct {
 	Sub        *Registry
 	OmitEmpty  bool
 	Marshaler  MarshalFunc // <--- DIRECT CALL
+	SliceType  reflect.Type
+	ElemType   reflect.Type
 }
 
 // Registry: Map for parsing lookup, Fields for fast sequential generation
@@ -231,6 +234,26 @@ func BuildRegistry(typ reflect.Type) *Registry {
 			} else if field.Type.Elem().Kind() == reflect.Int {
 				info.Type = TypeIntSlice
 				info.Marshaler = MarshalIntSlice
+			} else if field.Type.Elem().Kind() == reflect.Struct {
+				info.Type = TypeStructSlice
+				info.Sub = BuildRegistry(field.Type.Elem())
+				info.SliceType = field.Type
+				info.ElemType = field.Type.Elem()
+				
+				info.Marshaler = func(ptr unsafe.Pointer, buf []byte) []byte {
+					header := (*reflect.SliceHeader)(unsafe.Pointer(uintptr(ptr) + info.Offset))
+					buf = append(buf, '[')
+					elemSize := info.ElemType.Size()
+					for i := 0; i < header.Len; i++ {
+						if i > 0 {
+							buf = append(buf, ',')
+						}
+						elemPtr := unsafe.Pointer(header.Data + uintptr(i)*elemSize)
+						buf = MarshalObject(elemPtr, info.Sub, buf)
+					}
+					buf = append(buf, ']')
+					return buf
+				}
 			}
 		}
 
@@ -608,6 +631,52 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 				}
 				*(*[]int)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = slice
 				i += consumed
+			
+			case TypeStructSlice:
+				if (charTable[raw[i]] & charOpenBracket) == 0 {
+					return 0, fmt.Errorf("%w: expected struct slice value", ErrTypeMismatch)
+				}
+				i++
+				for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+					i++
+				}
+				if i < len(raw) && raw[i] == ']' {
+					i++
+					continue
+				}
+
+				slicePtr := reflect.NewAt(info.SliceType, unsafe.Pointer(uintptr(ptr)+info.Offset))
+				sliceVal := slicePtr.Elem()
+				sliceVal.SetLen(0)
+
+				for {
+					elemPtr := reflect.New(info.ElemType)
+					consumed, err := parseObjectAt(raw[i:], info.Sub, unsafe.Pointer(elemPtr.Pointer()))
+					if err != nil {
+						return 0, err
+					}
+					i += consumed
+
+					sliceVal.Set(reflect.Append(sliceVal, elemPtr.Elem()))
+
+					for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+						i++
+					}
+					if i >= len(raw) {
+						return 0, ErrUnexpectedEOF
+					}
+					if raw[i] == ',' {
+						i++
+						for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+							i++
+						}
+					} else if raw[i] == ']' {
+						i++
+						break
+					} else {
+						return 0, fmt.Errorf("unexpected char in struct slice")
+					}
+				}
 			}
 		} else {
 			i = skipValue(raw, i)
