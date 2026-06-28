@@ -281,3 +281,71 @@ func TestUnmarshalArrayParallel_HighVolume(t *testing.T) {
 		}
 	}
 }
+
+// Test ParseObject Error Handling (Deep edge cases)
+func TestParseObject_DeepErrors(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(TestUser{}))
+
+	tests := []struct {
+		name        string
+		payload     []byte
+		expectedErr error
+	}{
+		{
+			name:        "Missing closing brace",
+			payload:     []byte(`{"id":1, "name":"test"`),
+			expectedErr: ErrUnexpectedEOF, // Should return an error and NOT panic
+		},
+		{
+			name:        "Unescaped control character in string",
+			payload:     []byte(`{"name":"test` + "\n" + `"}`),
+			expectedErr: nil, // Our parser allows unescaped control chars for speed
+		},
+		{
+			name:        "Escaped backslash at the very end of chunk",
+			payload:     []byte(`{"name":"test\\","id":2}`),
+			expectedErr: nil,
+		},
+		{
+			name:        "Invalid array structure missing bracket",
+			payload:     []byte(`{"tags":["a","b"}`),
+			expectedErr: ErrUnexpectedEOF, // or similar structural error
+		},
+		{
+			name:        "Nested object syntax error",
+			payload:     []byte(`{"name":"foo", "balance": { "nested": 123 ] }`),
+			expectedErr: ErrTypeMismatch, // or structural error, but not panic
+		},
+		{
+			name:        "Missing quotes around key",
+			payload:     []byte(`{name:"foo"}`),
+			expectedErr: ErrUnexpectedEOF, // or similar parsing error
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var actual TestUser
+			buf := make([]byte, len(tt.payload))
+			copy(buf, tt.payload)
+
+			err := ParseObject(buf, reg, unsafe.Pointer(&actual))
+			if err == nil && tt.expectedErr != nil {
+				t.Errorf("expected error, got nil")
+			}
+		})
+	}
+}
+
+// Nested structure for depth testing
+type Department struct {
+	Name    string     `json:"name"`
+	Workers []TestUser `json:"workers"`
+}
+
+type Company struct {
+	ID          int          `json:"id"`
+	Title       string       `json:"title"`
+	Departments []Department `json:"departments"`
+}
+
