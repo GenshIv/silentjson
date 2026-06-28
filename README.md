@@ -11,8 +11,8 @@ In a world of high-performance Go libraries, `silentjson` stands out by providin
 - **Zero Code Generation:** This is the key. Unlike other fast JSON libraries, you don't need to generate any code. There are no extra build steps, no `go:generate` commands to remember, and no complex CI/CD pipeline configurations. **It works out-of-the-box, just like the standard library, only much faster.** This makes it trivial to integrate into any project, including those deployed in Docker or Kubernetes environments.
 
 > [!TIP]
-> **🤔 Когда использовать SilentJSON?**
-> Используйте библиотеку для обработки больших массивов объектов, где критически важна максимальная пропускная способность и минимальное потребление памяти. Однако, если вам требуется 100% строгое соблюдение спецификации JSON для редких или нестандартных краевых случаев (edge cases), лучше использовать стандартный `encoding/json`.
+> **🤔 When to use SilentJSON?**
+> Use this library for processing large arrays of objects where maximum throughput and minimal memory consumption are critical. However, if you require 100% strict adherence to the JSON specification for rare or non-standard edge cases, it's better to stick with the standard `encoding/json`.
 
 ## ⚠️ Caveats & Considerations
 
