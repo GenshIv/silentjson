@@ -76,7 +76,20 @@ xychart-beta
 > 🟢 **Middle Line:** `Sonic` (~460 MB/s)
 > 🔴 **Bottom Line:** `Standard` (~107 MB/s)
 
-### 2. Serialization (Generation / Marshal)
+### 2. Stream Parsing (io.Reader)
+When you are downloading gigabytes of JSON arrays over the network and want to parse them on-the-fly without loading the entire payload into RAM, you need a streaming parser. 
+
+Because `simdjson` and `sonic` (for standard arrays) require the **entire** payload in memory, they cannot perform streaming array processing. `SilentJSON` includes a specialized `StreamDecoder` that uses an optimized boundary scanner to process infinite streams.
+
+| Library | Throughput (MB/s) | Memory Allocated | Allocs/op | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| **SilentJSON (Stream)** | **477.86 MB/s** 👑 | **41 MB** 👑 | **7.7M** 👑 | Uses bounded 256KB buffer |
+| **Jsoniter (Stream)** | 459.92 MB/s | 148 MB | 14.6M | 2x more GC pressure |
+| **Standard (`json.NewDecoder`)**| 106.50 MB/s | 162 MB | 13.3M | Slowest, highest memory usage |
+
+*Note: Stream parsing disables Zero-Copy strings to ensure memory safety when the underlying `io.Reader` buffer is overwritten, which is why the throughput is ~470 MB/s instead of the 3.3 GB/s seen in Batch parsing.*
+
+### 3. Serialization (Generation / Marshal)
 We benchmarked generating a JSON array of 100,000 complex objects. `simdjson-go` is excluded as it is a parser only.
 
 | Library | Throughput (MB/s) | Latency (ns/op) | Memory Allocated | Allocs/op |
@@ -178,6 +191,30 @@ func parseLargeArray(rawJSON []byte, expectedCount int) ([]Employee, error) {
         return nil, err
     }
     return employees, nil
+}
+```
+
+#### Stream Parsing (Infinite Arrays / Network streams)
+When fetching large JSON array datasets from an API or disk without running out of RAM, use the `StreamDecoder`.
+
+```go
+func streamLargeArray(reader io.Reader) error {
+    // Create decoder, which maintains a fixed-size internal buffer (e.g. 256KB)
+    dec := silentjson.NewStreamDecoder[Employee](reader, empRegistry)
+    
+    for {
+        var emp Employee
+        err := dec.Decode(&emp)
+        if err == io.EOF {
+            break // End of the JSON array
+        }
+        if err != nil {
+            return err
+        }
+        // Process `emp` immediately (e.g. save to DB, print to stdout)
+        fmt.Println(emp.ID)
+    }
+    return nil
 }
 ```
 
