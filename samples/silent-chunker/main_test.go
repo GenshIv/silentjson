@@ -25,12 +25,15 @@ func TestStreamDecoderNextRaw(t *testing.T) {
 
 	count := 0
 	for {
-		raw, err := dec.NextRaw()
+		raw, countObjects, err := dec.NextRawBlock(1, 0)
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
+		}
+		if countObjects != 1 {
+			t.Fatalf("Expected 1 object, got %d", countObjects)
 		}
 		if len(raw) == 0 {
 			t.Fatalf("Expected non-empty raw bytes")
@@ -61,11 +64,12 @@ func BenchmarkStreamDecoderNextRaw(b *testing.B) {
 
 	b.ResetTimer()
 	b.SetBytes(int64(len(payload)))
+	b.ReportAllocs()
 
 	for i := 0; i < b.N; i++ {
 		dec := silentjson.NewStreamDecoder[Dummy](bytes.NewReader(payload), reg)
 		for {
-			_, err := dec.NextRaw()
+			_, _, err := dec.NextRawBlock(1000, 0)
 			if err == io.EOF {
 				break
 			}

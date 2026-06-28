@@ -37,6 +37,9 @@ func appendStringASM(buf []byte, s string) ([]byte, int)
 func findObjectBoundariesASM(data []byte, chunks []Chunk) (ret0 int, ret1 int)
 
 //go:noescape
+func findObjectBoundariesEarlyExitASM(data []byte, chunks []Chunk) (ret0 int, ret1 int)
+
+//go:noescape
 func skipValueASM(raw []byte, start int) int
 
 //go:noescape

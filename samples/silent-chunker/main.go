@@ -88,12 +88,12 @@ func main() {
 	openNext()
 
 	for {
-		raw, err := dec.NextRaw()
+		raw, count, err := dec.NextRawBlock(limitCount, limitSize)
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
-			log.Fatalf("Stream error during NextRaw(): %v", err)
+			log.Fatalf("Stream error during NextRawBlock(): %v", err)
 		}
 
 		// If we reached limits (and have at least 1 object to avoid empty files)
@@ -108,7 +108,7 @@ func main() {
 		
 		n, _ := out.Write(raw)
 		byteCount += n
-		objCount++
+		objCount += count
 	}
 
 	// Close the last file

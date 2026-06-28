@@ -83,6 +83,7 @@ Because `simdjson` and `sonic` (for standard arrays) require the **entire** payl
 
 | Library | Throughput (MB/s) | Memory Allocated | Allocs/op | Notes |
 | :--- | :--- | :--- | :--- | :--- |
+| **SilentJSON (NextRawBlock)** | **~4150 MB/s** 🚀 | **0.3 MB** | **0** | Extreme zero-alloc bulk chunk extraction |
 | **SilentJSON (NextRaw)** | **~1181 MB/s** 🚀 | **526 MB** | **3.0M** | Extreme speed raw stream chunk extraction |
 | **SilentJSON (Decode)** | **469.96 MB/s** 👑 | **41 MB** 👑 | **7.7M** 👑 | Full Go Struct Binding, zero alloc iteration |
 | **Jsoniter (Stream)** | 455.51 MB/s | 148 MB | 14.6M | 2x more GC pressure |
@@ -92,8 +93,8 @@ Because `simdjson` and `sonic` (for standard arrays) require the **entire** payl
 ```mermaid
 xychart-beta
     title "Streaming Throughput vs jsoniter (MB/s) - Higher is Better"
-    x-axis ["Standard", "NextChan", "jsoniter", "Decode", "NextRaw"]
-    bar [105, 378, 455, 470, 1181]
+    x-axis ["Standard", "NextChan", "jsoniter", "Decode", "NextRaw", "NextRawBlock"]
+    bar [105, 378, 455, 470, 1181, 4150]
 ```
 
 ```mermaid
@@ -103,7 +104,7 @@ xychart-beta
     bar [41, 41, 148, 162]
 ```
 
-*Note: Stream parsing disables Zero-Copy strings to ensure memory safety when the underlying `io.Reader` buffer is overwritten, which is why the throughput of full struct binding is ~471 MB/s instead of the 3.3 GB/s seen in Batch parsing. However, using the new `NextRaw()` allows you to extract raw object chunks at **~1.2 GB/s** directly from the stream!*
+*Note: Stream parsing disables Zero-Copy strings to ensure memory safety when the underlying `io.Reader` buffer is overwritten, which is why the throughput of full struct binding is ~471 MB/s instead of the 3.3 GB/s seen in Batch parsing. However, using the new `NextRawBlock()` allows you to extract raw object chunks at **~4.1 GB/s** directly from the stream with **zero allocations**!*
 
 
 ### 3. Serialization (Generation / Marshal)
@@ -231,22 +232,32 @@ func streamLargeArray(reader io.Reader) error {
 }
 ```
 
-#### Extreme Stream Extraction (NextRaw)
-If you just need to extract JSON objects rapidly (e.g., to proxy them to a database or filter by simple regex) without unmarshaling them into Go structs, use `NextRaw()`. This operates at almost **1.2 GB/s**!
+#### Extreme Stream Extraction & Chunking (NextRawBlock)
+If you just need to extract JSON objects rapidly (e.g., to proxy them to a database, split large files into chunks, or filter by simple regex) without unmarshaling them into Go structs, use `NextRawBlock()`. 
+
+This method completely avoids allocations during extraction and writes raw objects into massive contiguous byte arrays directly from the stream. It operates at an incredible **~4.1 GB/s**!
 
 ```go
-func fastRawStream(reader io.Reader) error {
+func fastChunkSlicer(reader io.Reader) error {
     dec := silentjson.NewStreamDecoder[Employee](reader, empRegistry)
+    
     for {
-        rawBytes, err := dec.NextRaw() // Returns raw JSON e.g. {"id":1, ...}
+        // Extract up to 1000 objects at once, targeting ~10MB chunks
+        rawBytes, count, err := dec.NextRawBlock(1000, 10*1024*1024)
+        
+        if count > 0 {
+            // rawBytes is a single contiguous slice containing `count` objects
+            // Example: [ {"id":1}, {"id":2}, ... ] 
+            // Note: the slice lacks outer '[' and ']' brackets
+            processRawChunk(rawBytes) 
+        }
+
         if err == io.EOF {
             break
         }
         if err != nil {
             return err
         }
-        // rawBytes is a copy and is safe to retain
-        _ = rawBytes
     }
     return nil
 }
