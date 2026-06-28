@@ -10,16 +10,16 @@ In a world of high-performance Go libraries, `silentjson` stands out by providin
 - **7x Faster Standard Parsing:** Even on a single core, `UnmarshalSlice` is over 7 times faster than `encoding/json` for typical JSON objects.
 - **Zero Code Generation:** This is the key. Unlike other fast JSON libraries, you don't need to generate any code. There are no extra build steps, no `go:generate` commands to remember, and no complex CI/CD pipeline configurations. **It works out-of-the-box, just like the standard library, only much faster.** This makes it trivial to integrate into any project, including those deployed in Docker or Kubernetes environments.
 
+> [!TIP]
+> **🤔 Когда использовать SilentJSON?**
+> Используйте библиотеку для обработки больших массивов объектов, где критически важна максимальная пропускная способность и минимальное потребление памяти. Однако, если вам требуется 100% строгое соблюдение спецификации JSON для редких или нестандартных краевых случаев (edge cases), лучше использовать стандартный `encoding/json`.
+
 ## ⚠️ Caveats & Considerations
 
 * **`unsafe` package:** This library heavily utilizes the `unsafe` package. Use with care.
 * **Input Buffer Immutability:** Because strings are mapped directly via zero-copy, the underlying `rawJSON` byte slice **must not be modified** while the parsed objects are still in use.
 * **Memory Retention (Zero-Copy Side Effect):** Because strings hold direct references to the original `rawJSON` buffer, retaining even a single parsed string in memory will prevent the entire underlying JSON byte array from being garbage collected. If you only need to store a small subset of parsed data for a long time, explicitly copy the strings (e.g., using `strings.Clone(val)`).
 * **CPU Usage (Parallel Parsing):** `UnmarshalArrayParallel` is designed to use all available CPU cores to maximize speed for large payloads. It is ideal for batch processing or data pipelines. Avoid using it inside individual, high-concurrency API handlers, as this can lead to excessive goroutine creation. For per-request parsing, `UnmarshalSlice` is the better choice.
-
-## 🤔 When to use SilentJSON
-
-Используйте для больших массивов объектов, где важна пропускная способность, но не используйте, если вам нужно строгое соблюдение json спецификации для редких/нестандартных типов данных.
 
 ## Performance Deep Dive
 
@@ -163,3 +163,11 @@ go test
 # Run all benchmarks to see performance metrics
 go test -bench=.
 ```
+
+## 🤝 Contributing
+
+Contributions are welcome! We'd love your help in making `silentjson` even faster and more robust. Feel free to open issues, suggest improvements, or submit pull requests.
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
