@@ -94,22 +94,6 @@ xychart-beta
     bar [1454, 1400, 596, 452]
 ```
 
-Similarly, serialization throughput scales perfectly linearly, remaining a flat horizontal line:
-
-```mermaid
-xychart-beta
-    title "Serialization Throughput Scaling (MB/s, Higher is Better)"
-    x-axis ["10k", "25k", "50k", "100k"]
-    y-axis "MB/s" 0 --> 1500
-    line "SilentJSON" [1344, 1364, 1403, 1404]
-    line "Sonic" [854, 816, 967, 1030]
-    line "Standard" [578, 592, 604, 607]
-```
-> **Legend:**
-> 🔵 **Top Line:** `SilentJSON` (maintaining stable ~1400 MB/s)
-> 🟢 **Middle Line:** `Sonic` (816 - 1030 MB/s)
-> 🔴 **Bottom Line:** `Standard` (~600 MB/s)
-
 ### Benchmark Methodology & Fairness
 
 To ensure our benchmarks are as fair and accurate as possible, we strictly adhere to the following principles:
