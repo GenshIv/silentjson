@@ -1,7 +1,6 @@
 package silentjson
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -122,46 +121,13 @@ func (d *StreamDecoder[T]) nextChunk() ([]byte, error) {
 			return nil, fmt.Errorf("expected '{', got '%c'", d.buf[d.head])
 		}
 
-		// Find the end of the object by counting depth
-		depth := 0
-		endIdx := -1
+		// Find the end of the object using fast AVX2 scanning
+		var chunkBuf [1]Chunk
+		count, _ := findObjectBoundariesEarlyExitASM(d.buf[d.head:d.tail], chunkBuf[:])
 
-	scanLoop:
-		for i := d.head; i < d.tail; i++ {
-			c := d.buf[i]
-			switch c {
-			case '"':
-				i++
-				for i < d.tail {
-					idx := bytes.IndexByte(d.buf[i:d.tail], '"')
-					if idx == -1 {
-						i = d.tail
-						break
-					}
-					i += idx
-
-					escapes := 0
-					for j := i - 1; j >= d.head && d.buf[j] == '\\'; j-- {
-						escapes++
-					}
-					if escapes%2 == 0 {
-						break // valid end quote
-					}
-					i++ // escaped quote, continue
-				}
-			case '{':
-				depth++
-			case '}':
-				depth--
-				if depth == 0 {
-					endIdx = i + 1
-					break scanLoop
-				}
-			}
-		}
-
-		if endIdx != -1 {
+		if count > 0 {
 			// Complete object found!
+			endIdx := d.head + chunkBuf[0].End
 			chunk := d.buf[d.head:endIdx]
 			d.head = endIdx
 			return chunk, nil
@@ -266,4 +232,109 @@ func (d *StreamDecoder[T]) NextChan(bufferSize int) <-chan StreamResult[*T] {
 	}()
 
 	return ch
+}
+
+// NextRawBlock reads multiple objects from the JSON array and returns a single raw slice containing them all.
+// The slice points to the internal buffer and is only valid until the next read.
+// maxCount: maximum number of objects to extract. 0 means no limit.
+// maxSize: maximum approximate size in bytes. 0 means no limit.
+// It returns (rawChunk, objectCount, error).
+func (d *StreamDecoder[T]) NextRawBlock(maxCount int, maxSize int) ([]byte, int, error) {
+	if d.hasEnded {
+		return nil, 0, io.EOF
+	}
+
+	for {
+		if d.head >= d.tail {
+			if err := d.fill(); err != nil {
+				return nil, 0, err
+			}
+			if d.head >= d.tail && d.isEOF {
+				return nil, 0, io.EOF
+			}
+		}
+
+		for d.head < d.tail && (charTable[d.buf[d.head]]&charSpace) != 0 {
+			d.head++
+		}
+
+		if d.head >= d.tail {
+			continue
+		}
+
+		if !d.hasStarted {
+			if d.buf[d.head] != '[' {
+				return nil, 0, fmt.Errorf("expected '[' at the beginning of the stream, got '%c'", d.buf[d.head])
+			}
+			d.hasStarted = true
+			d.head++
+			continue
+		}
+
+		if d.buf[d.head] == ']' {
+			d.hasEnded = true
+			return nil, 0, io.EOF
+		}
+
+		// Skip leading comma if present
+		if d.buf[d.head] == ',' {
+			d.head++
+			for d.head < d.tail && (charTable[d.buf[d.head]]&charSpace) != 0 {
+				d.head++
+			}
+			if d.head >= d.tail {
+				continue
+			}
+		}
+
+		if d.buf[d.head] != '{' {
+			return nil, 0, fmt.Errorf("expected '{', got '%c'", d.buf[d.head])
+		}
+
+		chunkSize := maxCount
+		if chunkSize <= 0 || chunkSize > 10000 {
+			chunkSize = 10000 // reasonable batch capacity
+		}
+		
+		// Re-use chunk pool to prevent allocations
+		chunks := d.reg.chunkPool.Get().([]Chunk)
+		if cap(chunks) < chunkSize {
+			chunks = make([]Chunk, chunkSize)
+		}
+		
+		limitSize := maxSize
+		if limitSize > 0 && limitSize < 1024 {
+			limitSize = 1024
+		}
+
+		dataToScan := d.buf[d.head:d.tail]
+		if limitSize > 0 && len(dataToScan) > limitSize {
+			dataToScan = dataToScan[:limitSize]
+		}
+
+		count, _ := findObjectBoundariesEarlyExitASM(dataToScan, chunks[:chunkSize])
+
+		// Fallback: if 0 objects fit within limitSize but we have plenty of data, the first object is huge
+		if count == 0 && limitSize > 0 && d.tail-d.head > limitSize {
+			count, _ = findObjectBoundariesEarlyExitASM(d.buf[d.head:d.tail], chunks[:1])
+		}
+
+		if count > 0 {
+			// Complete objects found!
+			endIdx := d.head + chunks[count-1].End
+			res := d.buf[d.head:endIdx]
+			d.head = endIdx
+			d.reg.chunkPool.Put(chunks[:cap(chunks)])
+			return res, count, nil
+		}
+		d.reg.chunkPool.Put(chunks[:cap(chunks)])
+
+		// If we reach here, we couldn't find a complete object within the available data
+		if d.isEOF {
+			return nil, 0, ErrUnexpectedEOF
+		}
+		if err := d.fill(); err != nil {
+			return nil, 0, err
+		}
+	}
 }
