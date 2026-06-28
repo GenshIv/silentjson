@@ -349,3 +349,87 @@ type Company struct {
 	Departments []Department `json:"departments"`
 }
 
+func TestParseNestedStructures(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(Company{}))
+
+	payload := []byte(`{
+		"id": 1,
+		"title": "Tech Corp",
+		"departments": [
+			{
+				"name": "Engineering",
+				"workers": [
+					{"id": 101, "name": "Alice", "tags": ["go", "backend"]},
+					{"id": 102, "name": "Bob", "tags": ["frontend", "react"]}
+				]
+			},
+			{
+				"name": "HR",
+				"workers": [
+					{"id": 201, "name": "Charlie", "tags": ["recruiting"]}
+				]
+			}
+		]
+	}`)
+
+	var company Company
+	buf := make([]byte, len(payload))
+	copy(buf, payload)
+
+	err := ParseObject(buf, reg, unsafe.Pointer(&company))
+	if err != nil {
+		t.Fatalf("unexpected error parsing nested structure: %v", err)
+	}
+
+	if company.ID != 1 || company.Title != "Tech Corp" {
+		t.Errorf("Top-level fields mismatched: %+v", company)
+	}
+	if len(company.Departments) != 2 {
+		t.Fatalf("Expected 2 departments, got %d", len(company.Departments))
+	}
+	if company.Departments[0].Name != "Engineering" || len(company.Departments[0].Workers) != 2 {
+		t.Errorf("First department mismatched: %+v", company.Departments[0])
+	}
+	if company.Departments[1].Workers[0].Name != "Charlie" {
+		t.Errorf("Deeply nested worker name mismatched. Expected Charlie, got %s", company.Departments[1].Workers[0].Name)
+	}
+}
+
+func TestMarshalArrayParallel_Verification(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(TestWorkerItem{}))
+
+	data := make([]TestWorkerItem, 5000)
+	for i := range data {
+		data[i] = TestWorkerItem{
+			ID:     i,
+			Name:   fmt.Sprintf("Worker_%d", i),
+			Active: i%2 == 0,
+		}
+	}
+
+	jsonBytes, err := MarshalArrayParallel(data, reg)
+	if err != nil {
+		t.Fatalf("unexpected error marshaling: %v", err)
+	}
+
+	if len(jsonBytes) == 0 {
+		t.Fatalf("marshaled output is empty")
+	}
+
+	// Validate by unmarshaling back
+	parsed := make([]TestWorkerItem, 5000)
+	parsed, err = UnmarshalArrayParallel[TestWorkerItem](jsonBytes, reg, parsed)
+	if err != nil {
+		t.Fatalf("unexpected error unmarshaling the generated JSON: %v", err)
+	}
+
+	if len(parsed) != 5000 {
+		t.Fatalf("expected 5000 items, got %d", len(parsed))
+	}
+
+	for i := range parsed {
+		if parsed[i].ID != data[i].ID || parsed[i].Name != data[i].Name || parsed[i].Active != data[i].Active {
+			t.Fatalf("data mismatch at index %d: expected %+v, got %+v", i, data[i], parsed[i])
+		}
+	}
+}
