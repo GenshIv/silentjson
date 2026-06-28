@@ -10,6 +10,17 @@ In a world of high-performance Go libraries, `silentjson` stands out by providin
 - **7x Faster Standard Parsing:** Even on a single core, `UnmarshalSlice` is over 7 times faster than `encoding/json` for typical JSON objects.
 - **Zero Code Generation:** This is the key. Unlike other fast JSON libraries, you don't need to generate any code. There are no extra build steps, no `go:generate` commands to remember, and no complex CI/CD pipeline configurations. **It works out-of-the-box, just like the standard library, only much faster.** This makes it trivial to integrate into any project, including those deployed in Docker or Kubernetes environments.
 
+## ⚠️ Caveats & Considerations
+
+* **`unsafe` package:** This library heavily utilizes the `unsafe` package. Use with care.
+* **Input Buffer Immutability:** Because strings are mapped directly via zero-copy, the underlying `rawJSON` byte slice **must not be modified** while the parsed objects are still in use.
+* **Memory Retention (Zero-Copy Side Effect):** Because strings hold direct references to the original `rawJSON` buffer, retaining even a single parsed string in memory will prevent the entire underlying JSON byte array from being garbage collected. If you only need to store a small subset of parsed data for a long time, explicitly copy the strings (e.g., using `strings.Clone(val)`).
+* **CPU Usage (Parallel Parsing):** `UnmarshalArrayParallel` is designed to use all available CPU cores to maximize speed for large payloads. It is ideal for batch processing or data pipelines. Avoid using it inside individual, high-concurrency API handlers, as this can lead to excessive goroutine creation. For per-request parsing, `UnmarshalSlice` is the better choice.
+
+## 🤔 When to use SilentJSON
+
+Используйте для больших массивов объектов, где важна пропускная способность, но не используйте, если вам нужно строгое соблюдение json спецификации для редких/нестандартных типов данных.
+
 ## Performance Deep Dive
 
 Our latest scalability benchmarks (testing arrays from 10 to 100,000 objects) prove that `silentjson` is the fastest JSON serialization and deserialization library for Go, outperforming industry leaders like **Sonic** and **simdjson-go**.
@@ -28,6 +39,12 @@ We benchmarked unmarshaling a JSON array of 100,000 complex objects (~18MB paylo
 > [!NOTE]
 > **What about `simdjson-go`?**
 > `simdjson-go` is a highly optimized C++ port utilizing SIMD instructions. However, its API is purely AST-based, making it notoriously difficult to work with for standard Go development compared to libraries that automatically map to Go structs. Furthermore, even though it skips the heavy work of struct mapping and reflection, **SilentJSON's parallel parsing architecture still outperforms its raw parsing speed by ~4x on large arrays**, while keeping the developer experience identical to `encoding/json`!
+>
+> **Developer Experience Comparison:**
+> | Approach | Libraries |
+> | :--- | :--- |
+> | **Struct-mapping (automatic)** | SilentJSON, Sonic, `encoding/json` |
+> | **AST-only (manual)** | simdjson-go |
 
 ```mermaid
 xychart-beta
@@ -146,10 +163,3 @@ go test
 # Run all benchmarks to see performance metrics
 go test -bench=.
 ```
-
-## ⚠️ Caveats & Considerations
-
-* **`unsafe` package:** This library heavily utilizes the `unsafe` package. Use with care.
-* **Input Buffer Immutability:** Because strings are mapped directly via zero-copy, the underlying `rawJSON` byte slice **must not be modified** while the parsed objects are still in use.
-* **Memory Retention (Zero-Copy Side Effect):** Because strings hold direct references to the original `rawJSON` buffer, retaining even a single parsed string in memory will prevent the entire underlying JSON byte array from being garbage collected. If you only need to store a small subset of parsed data for a long time, explicitly copy the strings (e.g., using `strings.Clone(val)`).
-* **CPU Usage (Parallel Parsing):** `UnmarshalArrayParallel` is designed to use all available CPU cores to maximize speed for large payloads. It is ideal for batch processing or data pipelines. Avoid using it inside individual, high-concurrency API handlers, as this can lead to excessive goroutine creation. For per-request parsing, `UnmarshalSlice` is the better choice.
