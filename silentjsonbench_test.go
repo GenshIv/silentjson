@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"reflect"
 	"runtime"
@@ -472,4 +473,51 @@ func sliceIntToInt64(s []int) []int64 {
 		res[i] = int64(v)
 	}
 	return res
+}
+
+func BenchmarkStreamComparison(b *testing.B) {
+	b.Run("SilentJSON_Stream", func(b *testing.B) {
+		reg := BuildRegistry(reflect.TypeOf(Employee{}))
+		b.SetBytes(int64(len(hugeJSONData)))
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			r := bytes.NewReader(hugeJSONData)
+			dec := NewStreamDecoder[Employee](r, reg)
+			var emp Employee
+			for {
+				err := dec.Decode(&emp)
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+		}
+	})
+
+	b.Run("Standard_Stream", func(b *testing.B) {
+		b.SetBytes(int64(len(hugeJSONData)))
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			r := bytes.NewReader(hugeJSONData)
+			dec := json.NewDecoder(r)
+			_, err := dec.Token()
+			if err != nil {
+				b.Fatal(err)
+			}
+			var emp Employee
+			for dec.More() {
+				err := dec.Decode(&emp)
+				if err != nil {
+					b.Fatal(err)
+				}
+			}
+			_, _ = dec.Token() // Read closing bracket
+		}
+	})
 }
