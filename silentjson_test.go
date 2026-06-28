@@ -1,4 +1,4 @@
-package main
+package silentjson
 
 import (
 	"fmt"
@@ -216,7 +216,7 @@ func TestUnmarshalArrayParallel_Basic(t *testing.T) {
 			buf := make([]byte, len(tt.payload))
 			copy(buf, tt.payload)
 			for i := range dst {
-				dst[i] = TestWorkerItem{} // Обнуляет все поля, включая Active = false
+				dst[i] = TestWorkerItem{} // Zeros all fields, including Active = false
 			}
 
 			// Call our beautiful Generic API

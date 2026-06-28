@@ -1,4 +1,4 @@
-package main
+package silentjson
 
 import (
 	"errors"
@@ -26,9 +26,9 @@ func findQuoteAsm(data []byte) (index int)
 //go:noescape
 func appendIntASM(buf []byte, val int64) []byte
 
-// appendStringASM копирует строку s в buf, добавляя кавычки.
-// За один проход копирует байты и сканирует на спецсимволы.
-// Возвращает новый buf и позицию первого спецсимвола (-1 если нет).
+// appendStringASM copies string s to buf, adding quotes.
+// In one pass, it copies bytes and scans for special characters.
+// Returns the new buf and the position of the first special character (-1 if none).
 //
 //go:noescape
 func appendStringASM(buf []byte, s string) ([]byte, int)
@@ -127,7 +127,7 @@ type FieldInfo struct {
 	Type       FieldType
 	Sub        *Registry
 	OmitEmpty  bool
-	Marshaler  MarshalFunc // <--- ПРЯМОЙ ВЫЗОВ
+	Marshaler  MarshalFunc // <--- DIRECT CALL
 }
 
 // Registry: Map for parsing lookup, Fields for fast sequential generation
@@ -171,14 +171,14 @@ func BuildRegistry(typ reflect.Type) *Registry {
 			}
 		}
 
-		// Привязываем маршаллер в зависимости от типа
+		// Bind marshaler based on type
 		switch field.Type.Kind() {
 		case reflect.Int, reflect.Int64:
 			info.Type = TypeInt
-			info.Marshaler = MarshalInt // Использует наш новый appendIntASM
+			info.Marshaler = MarshalInt // Uses our new appendIntASM
 		case reflect.Float64, reflect.Float32:
 			info.Type = TypeFloat
-			info.Marshaler = MarshalFloat // Реализуй через appendFloatASM или fmt.AppendFloat
+			info.Marshaler = MarshalFloat // Implement via appendFloatASM or fmt.AppendFloat
 		case reflect.String:
 			info.Type = TypeString
 			info.Marshaler = MarshalString
@@ -188,7 +188,7 @@ func BuildRegistry(typ reflect.Type) *Registry {
 		case reflect.Struct:
 			info.Type = TypeStruct
 			info.Sub = BuildRegistry(field.Type)
-			// Специальный маршаллер для вложенных структур
+			// Special marshaler for nested structures
 			info.Marshaler = func(ptr unsafe.Pointer, buf []byte) []byte {
 				return MarshalObject(ptr, info.Sub, buf)
 			}
@@ -202,12 +202,12 @@ func BuildRegistry(typ reflect.Type) *Registry {
 			}
 		}
 
-		// Если есть OmitEmpty, оборачиваем маршаллер в проверку
+		// If OmitEmpty is present, wrap marshaler in a check
 		if info.OmitEmpty {
 			orig := info.Marshaler
 			info.Marshaler = func(ptr unsafe.Pointer, buf []byte) []byte {
-				// Логика проверки на Empty уже внутри каждой конкретной Marshal-функции
-				// либо можно вынести сюда, если хочется универсальности
+				// Empty check logic is already inside each specific Marshal function
+				// or it could be moved here for universality
 				return orig(ptr, buf)
 			}
 		}
@@ -221,13 +221,13 @@ func BuildRegistry(typ reflect.Type) *Registry {
 	return reg
 }
 
-// MarshalFloat: используем буфер на стеке
+// MarshalFloat: use stack buffer
 func MarshalFloat(ptr unsafe.Pointer, buf []byte) []byte {
 	val := *(*float64)(ptr)
 	return ryu.AppendFloat64(buf, val)
 }
 
-// MarshalBool: прямое добавление байтов
+// MarshalBool: direct byte append
 func MarshalBool(ptr unsafe.Pointer, buf []byte) []byte {
 	if *(*bool)(ptr) {
 		return append(buf, "true"...)
@@ -235,24 +235,24 @@ func MarshalBool(ptr unsafe.Pointer, buf []byte) []byte {
 	return append(buf, "false"...)
 }
 
-// MarshalString: один проход через ASM: копирует и сканирует одновременно.
-// Если строка чистая и буфер вмещает — ASM вернёт (buf+string, -1).
-// Если спецсимвол найден — ASM скопирует префикс, Go доделает остаток с экранированием.
-// Если нет места в буфере — Go-путь через append (с возможным grow).
+// MarshalString: one pass through ASM: copies and scans simultaneously.
+// If string is clean and buffer fits — ASM returns (buf+string, -1).
+// If special char found — ASM copies prefix, Go handles the rest with escaping.
+// If buffer lacks space — Go path via append (with possible grow).
 func MarshalString(ptr unsafe.Pointer, buf []byte) []byte {
 	s := *(*string)(ptr)
 
 	newBuf, specialPos := appendStringASM(buf, s)
 	switch specialPos {
 	case -1:
-		// Строка чистая, скопирована целиком с кавычками
+		// String is clean, copied completely with quotes
 		return newBuf
 	case -2:
-		// Нет места в буфере (overflow) — идём через Go с экранированием
+		// No space in buffer (overflow) — fallback to Go with escaping
 		return appendJSONStringGo(buf, s)
 	default:
-		// ASM скопировал s[:specialPos] и открывающую кавычку.
-		// Дописываем остаток с экранированием начиная с specialPos.
+		// ASM copied s[:specialPos] and opening quote.
+		// Write the rest with escaping starting from specialPos.
 		buf = newBuf
 		for i := specialPos; i < len(s); i++ {
 			c := s[i]
@@ -278,7 +278,7 @@ func appendJSONStringGo(buf []byte, s string) []byte {
 	return buf
 }
 
-// MarshalIntSlice: итерируемся и используем наш appendIntASM
+// MarshalIntSlice: iterate and use our appendIntASM
 func MarshalIntSlice(ptr unsafe.Pointer, buf []byte) []byte {
 	slice := *(*[]int)(ptr)
 	if slice == nil {
@@ -299,7 +299,7 @@ func MarshalIntSlice(ptr unsafe.Pointer, buf []byte) []byte {
 	return append(buf, ']')
 }
 
-// MarshalStringSlice: итерируемся с вызовом MarshalString-логики
+// MarshalStringSlice: iterate calling MarshalString logic
 func MarshalStringSlice(ptr unsafe.Pointer, buf []byte) []byte {
 	slice := *(*[]string)(ptr)
 	if slice == nil {
@@ -340,12 +340,12 @@ func MarshalObject(ptr unsafe.Pointer, reg *Registry, buf []byte) []byte {
 	fields := reg.Fields
 
 	if len(fields) > 0 {
-		// Первое поле (без запятой перед ним)
+		// First field (no comma before it)
 		f := &fields[0]
 		buf = append(buf, f.EncodedKey...)
 		buf = f.Marshaler(unsafe.Pointer(uintptr(ptr)+f.Offset), buf)
 
-		// Остальные поля
+		// Remaining fields
 		for i := 1; i < len(fields); i++ {
 			buf = append(buf, ',')
 			f := &fields[i]
@@ -687,7 +687,7 @@ func parseIntSliceAt(raw []byte, start int, dst []int) ([]int, int, error) {
 
 func skipValue(raw []byte, i int) int {
 	if i < 0 || i > len(raw) {
-		return len(raw) // Защита от кривого индекса
+		return len(raw) // Protection against bad index
 	}
 
 	switch raw[i] {
@@ -763,13 +763,13 @@ func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 		return nil, fmt.Errorf("asm returned invalid count: %d", count)
 	}
 
-	// Проверяем, хватает ли места в переданном слайсе
+	// Check if there is enough space in the provided slice
 	if len(dst) < count {
 		reg.chunkPool.Put(buf[:cap(buf)])
 		return nil, fmt.Errorf("insufficient capacity: need %d, have %d", count, len(dst))
 	}
 
-	// Работаем с обрезанным слайсом нужного размера
+	// Work with truncated slice of required size
 	target := dst[:count]
 	if count == 0 {
 		reg.chunkPool.Put(buf[:cap(buf)])
@@ -781,7 +781,7 @@ func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 	var err error
 	for i := 0; i < count; i++ {
 		chunk := buf[i]
-		// Проверка: границы должны быть логичными
+		// Check: bounds must be logical
 		if chunk.Start < 0 || chunk.End > len(raw) || chunk.Start >= chunk.End {
 			err = fmt.Errorf("invalid json boundaries at chunk %d", i)
 			break
@@ -915,7 +915,7 @@ func findBounds(raw []byte, start int, open, close byte) int {
 			}
 		}
 	}
-	return len(raw) - 1 // Возвращаем край, если структура не закрыта
+	return len(raw) - 1 // Return boundary if struct is not closed
 }
 
 func countArrayItems(buf []byte) int {
@@ -978,7 +978,7 @@ func countArrayItems(buf []byte) int {
 // ========================== PARALLELISM ==========================
 
 func findObjectBoundaries(data []byte, buf []Chunk) ([]Chunk, int) {
-	// Оценка: в JSON-массиве объектов не может быть больше, чем '{'
+	// Estimation: JSON array of objects can't have more items than '{'
 
 	count, maxSize := findObjectBoundariesASM(data, buf)
 	if count > len(buf) {
@@ -1006,13 +1006,13 @@ func UnmarshalArrayParallel[T any](raw []byte, reg *Registry, dst []T) ([]T, err
 		return nil, fmt.Errorf("asm returned invalid count: %d", count)
 	}
 
-	// ПРОВЕРКА 1: JSON валидность
+	// CHECK 1: JSON validity
 	if maxDepth != 0 {
 		reg.chunkPool.Put(buf[:cap(buf)])
 		return nil, errors.New("malformed json: unbalanced braces or brackets")
 	}
 
-	// ПРОВЕРКА 3: Емкость dst
+	// CHECK 3: dst capacity
 	if count > len(dst) {
 		reg.chunkPool.Put(buf[:cap(buf)])
 		return nil, fmt.Errorf("dst capacity insufficient: need %d, have %d", count, len(dst))

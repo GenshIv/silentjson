@@ -1,4 +1,4 @@
-package main
+package silentjson
 
 import (
 	"bytes"
@@ -13,7 +13,7 @@ import (
 
 	"github.com/GenshIv/silentjson/pb"
 	"github.com/bytedance/sonic"
-	"github.com/minio/simdjson-go"
+	simdjson "github.com/minio/simdjson-go"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -149,10 +149,10 @@ func initMarshalData() {
 
 // --- BENCHMARKS ---
 
-// BenchmarkNestedComparison тестирует последовательную десериализацию (unmarshal)
-// огромного JSON-файла (3 000 000 записей, Chaos-mode) с глубокой вложенностью,
-// экранированными строками, null-значениями и неизвестными полями.
-// Сравниваются: SilentJSON (sequential), Sonic, encoding/json (Standard) и simdjson-go.
+// BenchmarkNestedComparison tests sequential deserialization (unmarshal)
+// of a huge JSON file (3,000,000 records, Chaos-mode) with deep nesting,
+// escaped strings, null values, and unknown fields.
+// Compares: SilentJSON (sequential), Sonic, encoding/json (Standard), and simdjson-go.
 func BenchmarkNestedComparison(b *testing.B) {
 	b.Run("SilentJSON", func(b *testing.B) {
 		reg := BuildRegistry(reflect.TypeOf(Employee{}))
@@ -275,12 +275,12 @@ func BenchmarkNestedComparison(b *testing.B) {
 	})
 }
 
-// BenchmarkLargeScaleGeneration тестирует сериализацию (marshal/генерацию)
-// крупного массива структур (100 000 Employee объектов) в форматы JSON и Protobuf.
-// Сравниваются: SilentJSON (MarshalSlice с переиспользованием буфера), Sonic,
-// encoding/json (Standard) и Protobuf (proto.Marshal).
+// BenchmarkLargeScaleGeneration tests serialization (marshal/generation)
+// of a large struct array (100,000 Employee objects) to JSON and Protobuf formats.
+// Compares: SilentJSON (MarshalSlice with buffer reuse), Sonic,
+// encoding/json (Standard), and Protobuf (proto.Marshal).
 func BenchmarkLargeScaleGeneration(b *testing.B) {
-	// Подготовка Protobuf структуры
+	// Prepare Protobuf structure
 	pbEmployees := &pb.Employees{
 		List: make([]*pb.Employee, len(benchEmpSlice)),
 	}
@@ -350,12 +350,12 @@ func BenchmarkLargeScaleGeneration(b *testing.B) {
 	})
 }
 
-// BenchmarkLargeScaleComparison тестирует десериализацию (unmarshal/парсинг)
-// крупного массива структур (100 000 Employee объектов) из форматов JSON и Protobuf.
-// Сравниваются: SilentJSON (с параллельным парсингом), Sonic в параллельном режиме,
-// Sonic в последовательном режиме, encoding/json (Standard) и Protobuf (proto.Unmarshal).
+// BenchmarkLargeScaleComparison tests deserialization (unmarshal/parsing)
+// of a large struct array (100,000 Employee objects) from JSON and Protobuf formats.
+// Compares: SilentJSON (with parallel parsing), Sonic in parallel mode,
+// Sonic in sequential mode, encoding/json (Standard), and Protobuf (proto.Unmarshal).
 func BenchmarkLargeScaleComparison(b *testing.B) {
-	// Сериализуем один раз для всех, чтобы не учитывать это в тесте
+	// Serialize once for all to exclude it from the benchmark
 	pbEmployees := &pb.Employees{
 		List: make([]*pb.Employee, len(benchEmpSlice)),
 	}
@@ -370,7 +370,7 @@ func BenchmarkLargeScaleComparison(b *testing.B) {
 				Zip:  int32(emp.Address.Zip),
 			},
 			Tags:   emp.Tags,
-			Scores: sliceIntToInt64(emp.Scores), // Небольшая конвертация int -> int64
+			Scores: sliceIntToInt64(emp.Scores), // Small conversion int -> int64
 		}
 	}
 	rawPB, _ := proto.Marshal(pbEmployees)
@@ -465,7 +465,7 @@ func BenchmarkLargeScaleComparison(b *testing.B) {
 	})
 }
 
-// Вспомогательная функция для конвертации типов
+// Helper function for type conversion
 func sliceIntToInt64(s []int) []int64 {
 	res := make([]int64, len(s))
 	for i, v := range s {

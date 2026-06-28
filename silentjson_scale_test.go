@@ -1,4 +1,4 @@
-package main
+package silentjson
 
 import (
 	"encoding/json"
@@ -6,8 +6,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/bytedance/sonic"
 	"github.com/GenshIv/silentjson/pb"
+	"github.com/bytedance/sonic"
 	"github.com/minio/simdjson-go"
 	"google.golang.org/protobuf/proto"
 )
@@ -100,7 +100,7 @@ func BenchmarkScalabilityParse(b *testing.B) {
 
 		// Prepare JSON & Protobuf payloads
 		rawJSON, _ := json.Marshal(subSlice)
-		
+
 		pbEmployees := &pb.Employees{
 			List: make([]*pb.Employee, size),
 		}

@@ -14,6 +14,12 @@ In a world of high-performance Go libraries, `silentjson` stands out by providin
 > **🤔 When to use SilentJSON?**
 > Use this library for processing large arrays of objects where maximum throughput and minimal memory consumption are critical. However, if you require 100% strict adherence to the JSON specification for rare or non-standard edge cases, it's better to stick with the standard `encoding/json`.
 
+## 📖 The Origin Story
+
+This project was born out of a real-world necessity. While working on a large-scale project that required constant parsing of massive JSON catalogs, we hit a severe performance bottleneck. `easyjson` was still too slow for our specific needs, and fully integrating it would have broken our established workflows due to its code generation requirements. 
+
+We desperately needed a lightning-fast alternative that didn't rely on JIT (Just-In-Time compilation) or code generation, but couldn't find one that met our strict requirements at the time. While there are a few alternatives available today, building `silentjson` became a personal "todo" to prove that extreme, reflection-free performance could be achieved with a clean, drop-in API.
+
 ## ⚠️ Caveats & Considerations
 
 * **`unsafe` package:** This library heavily utilizes the `unsafe` package. Use with care.
@@ -111,6 +117,7 @@ To ensure our benchmarks are as fair and accurate as possible, we strictly adher
 1. **Strict Data Isolation**: Payload generation (such as creating the 100,000 Go structs, allocating destination slices, or converting data for Protobuf) is strictly isolated from the actual measurement. We extensively use `b.ResetTimer()` so that **only** the raw `Marshal` and `Unmarshal` functions are timed.
 2. **Realistic Workloads**: Instead of testing trivial JSON objects, our payload consists of a deeply nested `Employee` struct containing arrays, nested objects, floats, booleans, and strings to simulate a heavy, real-world database dump.
 3. **The "Unfair" Concurrency Penalty**: `SilentJSON` achieves its blazing fast parallel speeds by spawning standard Go goroutines *on-the-fly* during every call to `UnmarshalArrayParallel` and then letting them die. It does not use long-running background worker threads. This means `SilentJSON` intentionally pays a heavy latency penalty for goroutine scheduling on *every single operation*. Despite this overhead, it still easily defeats **Sonic** (which relies heavily on pre-compiled JIT caches and persistent `sync.Pool` memory blocks that stay resident in memory). If `SilentJSON` utilized a persistent worker pool, its performance lead would be even more massive!
+4. **Cold Start & JIT Penalty (Zero-Warmup)**: `Sonic` heavily relies on JIT compilation. This means that practically every time it encounters a new or slightly different JSON structure, it requires a "warmup" phase to compile the machine code on the fly (dropping to ~800 MB/s). Because of this, its performance can be highly unpredictable in real-world production environments that process a large variety of incoming data formats. While its peak results are undeniably impressive, this unpredictable variance in latency is a critical factor to consider for systems with strict SLA requirements. In contrast, `SilentJSON` uses a precomputed registry, meaning it has **zero warmup penalty** and consistently delivers its maximum throughput (1450+ MB/s) from the very first request.
 
 ```mermaid
 xychart-beta
@@ -137,6 +144,10 @@ go get github.com/GenshIv/silentjson
 
 ## 🛠️ Usage
 
+> [!TIP]
+> **Quickstart Example**
+> We provide a fully runnable example in the [`example/`](file:///c:/Users/ihar7/IdeaProjects/silentjson/example/main.go) directory. You can run it instantly using `go run example/main.go`.
+
 The API is designed to be simple and intuitive.
 
 ### 1. Build the Registry (Once)
@@ -159,9 +170,10 @@ var empRegistry = silentjson.BuildRegistry(reflect.TypeOf(Employee{}))
 For general-purpose parsing, use `UnmarshalSlice`. It's a simple, fast, single-core parser.
 
 ```go
-func parseData(rawJSON []byte) ([]Employee, error) {
-    var emps []Employee
-    err := silentjson.UnmarshalSlice(rawJSON, empRegistry, unsafe.Pointer(&emps))
+func parseData(rawJSON []byte, expectedCount int) ([]Employee, error) {
+    // silentjson achieves zero allocations by requiring a pre-allocated slice
+    emps := make([]Employee, expectedCount)
+    emps, err := silentjson.UnmarshalSlice(rawJSON, empRegistry, emps)
     return emps, err
 }
 ```
@@ -172,10 +184,11 @@ For large JSON arrays, `UnmarshalArrayParallel` provides a massive speedup with 
 ```go
 import "github.com/GenshIv/silentjson"
 
-func parseLargeArray(rawJSON []byte) ([]Employee, error) {
-    // Just call the function. It handles everything.
-    // No code generation, no manual allocation, no unsafe pointers.
-    employees, err := silentjson.UnmarshalArrayParallel[Employee](rawJSON, empRegistry)
+func parseLargeArray(rawJSON []byte, expectedCount int) ([]Employee, error) {
+    // Just pass a pre-allocated slice. It handles the multithreading automatically!
+    // No code generation, no unsafe pointers.
+    employees := make([]Employee, expectedCount)
+    employees, err := silentjson.UnmarshalArrayParallel[Employee](rawJSON, empRegistry, employees)
     if err != nil {
         return nil, err
     }

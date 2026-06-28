@@ -1,39 +1,39 @@
 
 #include "textflag.h"
 
-// Сигнатура для функции: func findQuoteAsm(data []byte) (ret int)
+// Signature for function: func findQuoteAsm(data []byte) (ret int)
 // data (s_ptr, s_len): +0(FP), +8(FP)
-// Невидимое пространство: +16(FP) (8 байт)
+// Invisible space: +16(FP) (8 bytes)
 // ret: +24(FP)
-TEXT ·findQuoteAsm(SB), NOSPLIT, $0-32 // 32 байта, чтобы покрыть все смещения
+TEXT ·findQuoteAsm(SB), NOSPLIT, $0-32 // 32 bytes to cover all offsets
 
-    // Читаем аргументы со стека.
-    MOVQ s_ptr+0(FP), AX     // AX = указатель на начало среза.
-    MOVQ s_len+8(FP), CX      // CX = длина среза.
+    // Read arguments from stack.
+    MOVQ s_ptr+0(FP), AX     // AX = pointer to start of slice.
+    MOVQ s_len+8(FP), CX      // CX = length of slice.
 
-    // Используем BX как счетчик индекса.
+    // Use BX as index counter.
     XORQ BX, BX
 
 LOOP:
-    // Сравниваем индекс (BX) с длиной (CX).
+    // Compare index (BX) with length (CX).
     CMPQ BX, CX
     JGE  NOT_FOUND
 
-    // Сравниваем байт по адресу [указатель + индекс].
+    // Compare byte at address [pointer + index].
     CMPB (AX)(BX*1), $'"'
     JE   FOUND
 
-    // Продолжаем цикл.
+    // Continue loop.
     INCQ BX
     JMP  LOOP
 
 FOUND:
-    // Индекс в BX. Записываем его в ячейку для возвращаемого значения.
+    // Index in BX. Write it to return value slot.
     MOVQ BX, ret+24(FP)
     RET
 
 NOT_FOUND:
-    // Символ не найден. Записываем -1.
+    // Character not found. Write -1.
     MOVQ $-1, ret+24(FP)
     RET
 
@@ -246,27 +246,27 @@ TEXT ·parseShortStringASM2(SB), NOSPLIT, $0-40
     XORQ CX, CX // readIdx
     XORQ DX, DX // writeIdx
 loop:
-    CMPQ CX, BX                // Проверка: прочитали всё?
+    CMPQ CX, BX                // Check: read everything?
     JGE eof
 
-    MOVB (SI)(CX*1), AL        // Читаем байт src[readIdx]
+    MOVB (SI)(CX*1), AL        // Read byte src[readIdx]
     INCQ CX                    // readIdx++
 
-    CMPB AL, $0x22             // Кавычка? (конец строки)
+    CMPB AL, $0x22             // Quote? (end of string)
     JEQ done
 
-    CMPB AL, $0x5C             // Слэш? (экранирование)
+    CMPB AL, $0x5C             // Slash? (escaping)
     JEQ escape
 
-    MOVB AL, (SI)(DX*1)        // Обычный байт: пишем в src[writeIdx]
+    MOVB AL, (SI)(DX*1)        // Normal byte: write to src[writeIdx]
     INCQ DX                    // writeIdx++
     JMP loop
 
 escape:
-    MOVB (SI)(CX*1), AL        // Читаем байт после '\'
+    MOVB (SI)(CX*1), AL        // Read byte after '\'
     INCQ CX
 
-    // Простой маппинг спецсимволов
+    // Simple mapping of special characters
     CMPB AL, $0x6E       // 'n' -> 0x0A
     JEQ  is_n
     CMPB AL, $0x72       // 'r' -> 0x0D
@@ -277,8 +277,8 @@ escape:
     JEQ  is_b
     CMPB AL, $0x66       // 'f' -> 0x0C
     JEQ  is_f
-    // Если символ не в списке (например, \" или \\ или \/),
-    // он просто запишется как есть (AL уже содержит нужный байт)
+    // If character not in list (e.g., \" or \\ or \/),
+    // it simply writes as is (AL already contains the required byte)
     JMP  write
 
 is_n: MOVB $0x0A, AL; JMP write
@@ -293,7 +293,7 @@ check_r:
     MOVB $0x0D, AL
 
 write:
-    MOVB AL, (SI)(DX*1)        // Пишем разэкранированный байт в src[writeIdx]
+    MOVB AL, (SI)(DX*1)        // Write unescaped byte to src[writeIdx]
     INCQ DX
     JMP loop
 
@@ -591,7 +591,7 @@ copy_eof:
 
 // func findObjectBoundariesASM(data []byte, chunks []Chunk) (ret0 int, ret1 int)
 TEXT ·findObjectBoundariesASM(SB), NOSPLIT, $0-64
-    // 1. Аргументы:
+    // 1. Arguments:
     // data_ptr (0), data_len (8), data_cap (16)
     // chunks_ptr (24), chunks_len (32), chunks_cap (40)
     MOVQ data_base+0(FP), SI
@@ -599,7 +599,7 @@ TEXT ·findObjectBoundariesASM(SB), NOSPLIT, $0-64
     MOVQ chunks_base+24(FP), DI
     MOVQ chunks_len+32(FP), DX
 
-    // 2. SIMD-константы
+    // 2. SIMD constants
     MOVQ $0x2222222222222222, R14
     MOVQ R14, X1
     VPBROADCASTQ X1, Y1
@@ -624,7 +624,7 @@ TEXT ·findObjectBoundariesASM(SB), NOSPLIT, $0-64
     MOVQ R14, X6
     VPBROADCASTQ X6, Y6
 
-    // 3. Инициализация
+    // 3. Initialization
     XORQ CX, CX        // i
     XORQ R8, R8        // totalCount
     XORQ R9, R9        // objectDepth
@@ -633,7 +633,7 @@ TEXT ·findObjectBoundariesASM(SB), NOSPLIT, $0-64
     XORQ R11, R11      // inString
     XORQ R13, R13      // storedCount
 
-    // Защита от nil
+    // Protection against nil
     TESTQ SI, SI
     JZ    done
     TESTQ DI, DI
@@ -789,12 +789,12 @@ done:
 
 // func skipValueASM(raw []byte, start int) int
 TEXT ·skipValueASM(SB), NOSPLIT, $0-24
-    // Загрузка аргументов (ABI Go)
+    // Load arguments (Go ABI)
     MOVQ raw_base+0(FP), SI
     MOVQ raw_len+8(FP), BX
     MOVQ start+24(FP), CX
 
-    // Проверка границ на входе
+    // Check input bounds
     CMPQ CX, BX
     JGE  done_err
 
@@ -804,11 +804,11 @@ loop:
 
     MOVB (SI)(CX*1), AL
 
-    // Поиск кавычки
+    // Search for quote
     CMPB AL, $0x22
     JEQ  skip_string
 
-    // Остановка на структуре
+    // Stop at struct
     CMPB AL, $0x2C
     JEQ  done
     CMPB AL, $0x7D
