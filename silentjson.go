@@ -137,10 +137,11 @@ type FieldInfo struct {
 
 // Registry: Map for parsing lookup, Fields for fast sequential generation
 type Registry struct {
-	Map       map[int64]FieldInfo
-	NameMap   map[string]FieldInfo
-	Fields    []FieldInfo
-	chunkPool sync.Pool
+	Map         map[int64]FieldInfo
+	NameMap     map[string]FieldInfo
+	Fields      []FieldInfo
+	chunkPool   sync.Pool
+	CopyStrings bool
 }
 
 // BuildRegistry constructs a registry for a given struct type.
@@ -398,12 +399,15 @@ func MarshalInt(ptr unsafe.Pointer, buf []byte) []byte {
 	return newBuf
 }
 
-func parseJSONString(raw []byte, start int) (string, int, error) {
+func parseJSONString(raw []byte, start int, copyStrings bool) (string, int, error) {
 	written, consumed := parseShortStringASM2(raw[start:])
 	if consumed < 0 {
 		return "", 0, ErrUnexpectedEOF
 	}
 	decoded := raw[start : start+int(written)]
+	if copyStrings {
+		return string(decoded), int(consumed), nil
+	}
 	return unsafe.String(unsafe.SliceData(decoded), len(decoded)), int(consumed), nil
 }
 
@@ -456,7 +460,12 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 			return 0, ErrUnexpectedEOF
 		}
 		decoded := raw[i : i+int(written)]
-		keySlice := unsafe.String(unsafe.SliceData(decoded), len(decoded))
+		var keySlice string
+		if reg.CopyStrings {
+			keySlice = string(decoded)
+		} else {
+			keySlice = unsafe.String(unsafe.SliceData(decoded), len(decoded))
+		}
 		i += int(consumed)
 
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
@@ -531,7 +540,12 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 					return 0, ErrUnexpectedEOF
 				}
 				decoded := raw[i : i+int(written)]
-				strVal := unsafe.String(unsafe.SliceData(decoded), len(decoded))
+				var strVal string
+				if reg.CopyStrings {
+					strVal = string(decoded)
+				} else {
+					strVal = unsafe.String(unsafe.SliceData(decoded), len(decoded))
+				}
 				*(*string)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = strVal
 				i += int(consumed)
 
@@ -576,7 +590,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 					return 0, fmt.Errorf("%w: expected string slice value", ErrTypeMismatch)
 				}
 				existingSlice := *(*[]string)(unsafe.Pointer(uintptr(ptr) + info.Offset))
-				slice, consumed, err := parseStringSliceAt(raw, i, existingSlice)
+				slice, consumed, err := parseStringSliceAt(raw[i:], 0, existingSlice, reg.CopyStrings)
 				if err != nil {
 					return 0, err
 				}
@@ -622,7 +636,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 	}
 }
 
-func parseStringSliceAt(raw []byte, start int, dst []string) ([]string, int, error) {
+func parseStringSliceAt(raw []byte, start int, dst []string, copyStrings bool) ([]string, int, error) {
 	if start < 0 || start >= len(raw) || (charTable[raw[start]]&charOpenBracket) == 0 {
 		return nil, 0, ErrTypeMismatch
 	}
@@ -666,7 +680,12 @@ func parseStringSliceAt(raw []byte, start int, dst []string) ([]string, int, err
 		}
 
 		decoded := raw[i : i+int(written)]
-		strVal := unsafe.String(unsafe.SliceData(decoded), len(decoded))
+		var strVal string
+		if copyStrings {
+			strVal = string(decoded)
+		} else {
+			strVal = unsafe.String(unsafe.SliceData(decoded), len(decoded))
+		}
 		dst = append(dst, strVal)
 		i += int(consumed)
 
@@ -922,7 +941,7 @@ func parseStringSliceSafe(buf []byte, dst []string) ([]string, error) {
 	for i := 0; i < len(buf); i++ {
 		if (charTable[buf[i]] & charString) != 0 {
 			i++
-			strVal, read, err := parseJSONString(buf, i)
+			strVal, read, err := parseJSONString(buf, i, false)
 			if err != nil {
 				return nil, err
 			}
