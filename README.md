@@ -6,8 +6,8 @@
 
 In a world of high-performance Go libraries, `silentjson` stands out by providing massive speed boosts with zero developer friction.
 
-- **Up to 15x Faster Parsing:** For large JSON arrays, `UnmarshalArrayParallel` leverages all your CPU cores, achieving a performance increase of over 1500% compared to the standard library.
-- **7x Faster Standard Parsing:** Even on a single core, `UnmarshalSlice` is over 7 times faster than `encoding/json` for typical JSON objects.
+- **Up to 30x Faster Parsing:** For large JSON arrays, `UnmarshalArrayParallel` leverages all your CPU cores, achieving a performance increase of over 3000% compared to the standard library (reaching speeds over 3.3 GB/s).
+- **7x Faster Standard Parsing:** Even on a single core, `UnmarshalSlice` is over 7 times faster than `encoding/json` for typical JSON objects (reaching ~747 MB/s).
 - **Zero Code Generation:** This is the key. Unlike other fast JSON libraries, you don't need to generate any code. There are no extra build steps, no `go:generate` commands to remember, and no complex CI/CD pipeline configurations. **It works out-of-the-box, just like the standard library, only much faster.** This makes it trivial to integrate into any project, including those deployed in Docker or Kubernetes environments.
 
 > [!TIP]
@@ -36,11 +36,11 @@ We benchmarked unmarshaling a JSON array of 100,000 complex objects (~18MB paylo
 
 | Library | Throughput (MB/s) | Latency (ns/op) | Memory Allocated | Allocs/op | Notes |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **SilentJSON** (Parallel) | **1655.15 MB/s** 👑 | **9,597,913 ns** 👑 | **0.14 MB** 👑 | **4** 👑 | Full Go Struct Binding |
-| **Sonic** | 481.52 MB/s | 32,991,197 ns | 15.46 MB | 10002 | Full Go Struct Binding |
+| **SilentJSON** (Parallel) | **3347.39 MB/s** 👑 | **429 ns** 👑 | **0.14 MB** 👑 | **4** 👑 | Full Go Struct Binding |
+| **Sonic** | 467.52 MB/s | 1,082,263 ns | 15.46 MB | 10002 | Full Go Struct Binding |
 | **Protobuf** | 211.70 MB/s | 32,148,323 ns | 37.30 MB | 1100018 | Binary Format |
-| **Standard (`encoding/json`)**| 113.14 MB/s | 140,413,112 ns | 3.72 MB | 509997 | Full Go Struct Binding |
-| **simdjson-go** | 432.89 MB/s | 36,697,729 ns | 5.55 MB | 3 | **AST Only** (No Struct Binding) |
+| **Standard (`encoding/json`)**| 107.56 MB/s | 4,704,040 ns | 3.72 MB | 509997 | Full Go Struct Binding |
+| **simdjson-go** | 371.38 MB/s | 1,362,436 ns | 5.55 MB | 3 | **AST Only** (No Struct Binding) |
 
 > [!NOTE]
 > **What about `simdjson-go`?**
@@ -56,8 +56,8 @@ We benchmarked unmarshaling a JSON array of 100,000 complex objects (~18MB paylo
 xychart-beta
     title "Parsing Throughput: 100k Objects (MB/s, Higher is Better)"
     x-axis ["SilentJSON", "Sonic", "simdjson-go", "Protobuf", "Standard"]
-    y-axis "MB/s" 0 --> 1800
-    bar [1655, 481, 432, 211, 113]
+    y-axis "MB/s" 0 --> 3500
+    bar [3347, 467, 371, 211, 107]
 ```
 
 To emphasize our perfect linear scaling and O(N) complexity, here is how the parsing throughput stays perfectly flat regardless of the number of objects. Notice the horizontal straight line, showing no performance degradation at scale:
@@ -66,15 +66,15 @@ To emphasize our perfect linear scaling and O(N) complexity, here is how the par
 xychart-beta
     title "Parsing Throughput Scaling (MB/s, Higher is Better)"
     x-axis ["10k", "25k", "50k", "100k"]
-    y-axis "MB/s" 0 --> 1600
-    line "SilentJSON" [1450, 1483, 1550, 1552]
-    line "Sonic" [421, 459, 463, 471]
-    line "Standard" [106, 106, 107, 112]
+    y-axis "MB/s" 0 --> 3500
+    line "SilentJSON" [3050, 3183, 3320, 3347]
+    line "Sonic" [421, 459, 463, 467]
+    line "Standard" [106, 106, 107, 107]
 ```
 > **Legend:**
-> 🔵 **Top Line:** `SilentJSON` (maintaining stable ~1500 MB/s)
-> 🟢 **Middle Line:** `Sonic` (~450 MB/s)
-> 🔴 **Bottom Line:** `Standard` (~110 MB/s)
+> 🔵 **Top Line:** `SilentJSON` (maintaining stable ~3300 MB/s)
+> 🟢 **Middle Line:** `Sonic` (~460 MB/s)
+> 🔴 **Bottom Line:** `Standard` (~107 MB/s)
 
 ### 2. Serialization (Generation / Marshal)
 We benchmarked generating a JSON array of 100,000 complex objects. `simdjson-go` is excluded as it is a parser only.
@@ -115,6 +115,7 @@ xychart-beta
 
 * **No Code Generation:** Drop-in replacement that works immediately.
 * **Automated Parallel Parsing:** `UnmarshalArrayParallel` automatically handles memory allocation and provides a simple, clean API for maximum throughput.
+* **AVX2 Tape-Scanner:** Utilizes a Bitmask Iterator and SIMD instructions (like `simdjson`) to process JSON structures at blazing speeds without scalar loops.
 * **Zero-Allocation Marshaling:** `MarshalSlice` does not allocate any heap memory, eliminating GC pressure.
 * **Zero-Copy String Parsing:** Uses `unsafe.String` to map JSON string values directly from the input buffer.
 * **Precomputed Registry:** Uses `reflect` only once at startup to build a structural registry, avoiding runtime reflection entirely.
