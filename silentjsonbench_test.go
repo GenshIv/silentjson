@@ -149,103 +149,211 @@ func initMarshalData() {
 
 // --- BENCHMARKS ---
 
-func BenchmarkNestedStandard(b *testing.B) {
-	b.SetBytes(int64(len(hugeJSONData)))
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		reader := bytes.NewReader(hugeJSONData)
-		dec := json.NewDecoder(reader)
-		_, _ = dec.Token()
-		var emp Employee
-		for dec.More() {
-			_ = dec.Decode(&emp)
+// BenchmarkNestedComparison тестирует последовательную десериализацию (unmarshal)
+// огромного JSON-файла (3 000 000 записей, Chaos-mode) с глубокой вложенностью,
+// экранированными строками, null-значениями и неизвестными полями.
+// Сравниваются: SilentJSON (sequential), Sonic, encoding/json (Standard) и simdjson-go.
+func BenchmarkNestedComparison(b *testing.B) {
+	b.Run("SilentJSON", func(b *testing.B) {
+		reg := BuildRegistry(reflect.TypeOf(Employee{}))
+		dst := make([]Employee, recordCount)
+		for i := range dst {
+			dst[i].Tags = make([]string, 0, 4)
+			dst[i].Scores = make([]int, 0, 4)
 		}
-	}
+
+		buf := make([]byte, len(hugeJSONData))
+
+		b.SetBytes(int64(len(hugeJSONData)))
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			copy(buf, hugeJSONData)
+			_, err := UnmarshalSlice(buf, reg, dst)
+			if err != nil {
+				b.Error(err)
+			}
+		}
+	})
+
+	b.Run("Sonic", func(b *testing.B) {
+		dst := make([]Employee, recordCount)
+		b.SetBytes(int64(len(hugeJSONData)))
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			err := sonic.Unmarshal(hugeJSONData, &dst)
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("Standard", func(b *testing.B) {
+		b.SetBytes(int64(len(hugeJSONData)))
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			reader := bytes.NewReader(hugeJSONData)
+			dec := json.NewDecoder(reader)
+			_, _ = dec.Token()
+			var emp Employee
+			for dec.More() {
+				_ = dec.Decode(&emp)
+			}
+		}
+	})
+
+	b.Run("Simdjson", func(b *testing.B) {
+		b.SetBytes(int64(len(hugeJSONData)))
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			parsed, err := simdjson.Parse(hugeJSONData, nil)
+			if err != nil {
+				b.Fatal(err)
+			}
+			iter := parsed.Iter()
+			if iter.Type() == simdjson.TypeArray {
+				array, _ := iter.Array(nil)
+				array.ForEach(func(i simdjson.Iter) {
+					if i.Type() == simdjson.TypeObject {
+						obj, _ := i.Object(nil)
+						var emp Employee
+
+						var elem simdjson.Element
+
+						if obj.FindKey("id", &elem) != nil {
+							id, _ := elem.Iter.Int()
+							emp.ID = int(id)
+						}
+						if obj.FindKey("is_active", &elem) != nil {
+							emp.IsActive, _ = elem.Iter.Bool()
+						}
+						if obj.FindKey("balance", &elem) != nil {
+							emp.Balance, _ = elem.Iter.Float()
+						}
+						if obj.FindKey("address", &elem) != nil {
+							if elem.Type == simdjson.TypeObject {
+								addrObj, _ := elem.Iter.Object(nil)
+								var subElem simdjson.Element
+								if addrObj.FindKey("city", &subElem) != nil {
+									emp.Address.City, _ = subElem.Iter.String()
+								}
+								if addrObj.FindKey("zip", &subElem) != nil {
+									zip, _ := subElem.Iter.Int()
+									emp.Address.Zip = int(zip)
+								}
+							}
+						}
+						if obj.FindKey("tags", &elem) != nil {
+							if elem.Type == simdjson.TypeArray {
+								tagsArr, _ := elem.Iter.Array(nil)
+								tagsArr.ForEach(func(t simdjson.Iter) {
+									tagStr, _ := t.String()
+									emp.Tags = append(emp.Tags, tagStr)
+								})
+							}
+						}
+						if obj.FindKey("scores", &elem) != nil {
+							if elem.Type == simdjson.TypeArray {
+								scoresArr, _ := elem.Iter.Array(nil)
+								scoresArr.ForEach(func(s simdjson.Iter) {
+									scoreInt, _ := s.Int()
+									emp.Scores = append(emp.Scores, int(scoreInt))
+								})
+							}
+						}
+						_ = emp
+					}
+				})
+			}
+		}
+	})
 }
 
-func BenchmarkNestedSystem(b *testing.B) {
-	reg := BuildRegistry(reflect.TypeOf(Employee{}))
-	dst := make([]Employee, recordCount)
-	for i := range dst {
-		dst[i].Tags = make([]string, 0, 4)
-		dst[i].Scores = make([]int, 0, 4)
+// BenchmarkLargeScaleGeneration тестирует сериализацию (marshal/генерацию)
+// крупного массива структур (100 000 Employee объектов) в форматы JSON и Protobuf.
+// Сравниваются: SilentJSON (MarshalSlice с переиспользованием буфера), Sonic,
+// encoding/json (Standard) и Protobuf (proto.Marshal).
+func BenchmarkLargeScaleGeneration(b *testing.B) {
+	// Подготовка Protobuf структуры
+	pbEmployees := &pb.Employees{
+		List: make([]*pb.Employee, len(benchEmpSlice)),
 	}
-
-	buf := make([]byte, len(hugeJSONData))
-
-	b.SetBytes(int64(len(hugeJSONData)))
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		copy(buf, hugeJSONData)
-		_, err := UnmarshalSlice(buf, reg, dst)
-		if err != nil {
-			b.Error(err)
+	for i, emp := range benchEmpSlice {
+		pbEmployees.List[i] = &pb.Employee{
+			Id:       int32(emp.ID),
+			IsActive: emp.IsActive,
+			Balance:  emp.Balance,
+			Address: &pb.Address{
+				City: emp.Address.City,
+				Zip:  int32(emp.Address.Zip),
+			},
+			Tags:   emp.Tags,
+			Scores: sliceIntToInt64(emp.Scores),
 		}
 	}
-}
 
-func BenchmarkMarshalStandardSlice(b *testing.B) {
-	sample, _ := json.Marshal(benchEmpSlice)
-	b.SetBytes(int64(len(sample)))
+	b.Run("SilentJSON", func(b *testing.B) {
+		const InitialCap = 25 * 1024 * 1024 // 25 MB
+		const MaxCap = 100 * 1024 * 1024    // 100 MB - limit for reset
 
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_, _ = json.Marshal(benchEmpSlice)
-	}
-}
+		reg := BuildRegistry(reflect.TypeOf(Employee{}))
+		buf := make([]byte, 0, InitialCap)
 
-func BenchmarkMarshalSystemSlice(b *testing.B) {
-	const InitialCap = 25 * 1024 * 1024 // 25 MB
-	const MaxCap = 100 * 1024 * 1024    // 100 MB - limit for reset
-
-	reg := BuildRegistry(reflect.TypeOf(Employee{}))
-	buf := make([]byte, 0, InitialCap)
-
-	buf = MarshalSlice(benchEmpSlice, reg, buf)
-	b.SetBytes(int64(len(buf)))
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if cap(buf) > MaxCap {
-			buf = make([]byte, 0, InitialCap)
-		} else {
-			buf = buf[:0]
-		}
 		buf = MarshalSlice(benchEmpSlice, reg, buf)
-	}
-}
-
-func BenchmarkUnmarshalArrayParallel(b *testing.B) {
-	// 1. Prepare raw data (source JSON array)
-	rawJSON, err := json.Marshal(benchEmpSlice)
-	if err != nil {
-		b.Fatal(err)
-	}
-
-	reg := BuildRegistry(reflect.TypeOf(Employee{}))
-
-	// 2. Set up benchmark metrics
-	b.SetBytes(int64(len(rawJSON)))
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	dst := make([]Employee, len(benchEmpSlice))
-	buf := make([]byte, len(rawJSON))
-	// 3. Hot loop
-	for i := 0; i < b.N; i++ {
-		copy(buf, rawJSON)
-		// use clean code
-		_, err := UnmarshalArrayParallel[Employee](buf, reg, dst)
-		if err != nil {
-			b.Fatal(err)
+		b.SetBytes(int64(len(buf)))
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if cap(buf) > MaxCap {
+				buf = make([]byte, 0, InitialCap)
+			} else {
+				buf = buf[:0]
+			}
+			buf = MarshalSlice(benchEmpSlice, reg, buf)
 		}
-	}
+	})
+
+	b.Run("Sonic", func(b *testing.B) {
+		sample, _ := sonic.Marshal(benchEmpSlice)
+		b.SetBytes(int64(len(sample)))
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, _ = sonic.Marshal(benchEmpSlice)
+		}
+	})
+
+	b.Run("Standard", func(b *testing.B) {
+		sample, _ := json.Marshal(benchEmpSlice)
+		b.SetBytes(int64(len(sample)))
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, _ = json.Marshal(benchEmpSlice)
+		}
+	})
+
+	b.Run("Protobuf", func(b *testing.B) {
+		sample, _ := proto.Marshal(pbEmployees)
+		b.SetBytes(int64(len(sample)))
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, _ = proto.Marshal(pbEmployees)
+		}
+	})
 }
 
+// BenchmarkLargeScaleComparison тестирует десериализацию (unmarshal/парсинг)
+// крупного массива структур (100 000 Employee объектов) из форматов JSON и Protobuf.
+// Сравниваются: SilentJSON (с параллельным парсингом), Sonic в параллельном режиме,
+// Sonic в последовательном режиме, encoding/json (Standard) и Protobuf (proto.Unmarshal).
 func BenchmarkLargeScaleComparison(b *testing.B) {
 	// Сериализуем один раз для всех, чтобы не учитывать это в тесте
 	pbEmployees := &pb.Employees{
@@ -269,6 +377,7 @@ func BenchmarkLargeScaleComparison(b *testing.B) {
 	rawJSON, _ := json.Marshal(benchEmpSlice)
 
 	dst := make([]Employee, len(benchEmpSlice))
+
 	b.Run("SilentJSON", func(b *testing.B) {
 		reg := BuildRegistry(reflect.TypeOf(Employee{}))
 		b.SetBytes(int64(len(rawJSON)))
@@ -277,8 +386,71 @@ func BenchmarkLargeScaleComparison(b *testing.B) {
 		buf := make([]byte, len(rawJSON))
 		for i := 0; i < b.N; i++ {
 			copy(buf, rawJSON)
-			// Твой параллельный парсер
 			_, _ = UnmarshalArrayParallel[Employee](buf, reg, dst)
+		}
+	})
+
+	b.Run("SonicParallel", func(b *testing.B) {
+		b.SetBytes(int64(len(rawJSON)))
+		b.ReportAllocs()
+		b.ResetTimer()
+		buf := make([]byte, len(rawJSON))
+		for i := 0; i < b.N; i++ {
+			copy(buf, rawJSON)
+
+			chunks := make([]Chunk, len(benchEmpSlice)+1000)
+			count, _ := findObjectBoundariesASM(buf, chunks)
+
+			workers := runtime.GOMAXPROCS(0)
+			batchSize := (count + workers - 1) / workers
+			var wg sync.WaitGroup
+			for w := 0; w < workers; w++ {
+				start := w * batchSize
+				end := start + batchSize
+				if end > count {
+					end = count
+				}
+				if start >= count {
+					break
+				}
+				wg.Add(1)
+				go func(start, end int) {
+					defer wg.Done()
+					for idx := start; idx < end; idx++ {
+						chunk := chunks[idx]
+						_ = sonic.Unmarshal(buf[chunk.Start:chunk.End], &dst[idx])
+					}
+				}(start, end)
+			}
+			wg.Wait()
+		}
+	})
+
+	b.Run("Sonic", func(b *testing.B) {
+		b.SetBytes(int64(len(rawJSON)))
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = sonic.Unmarshal(rawJSON, &dst)
+		}
+	})
+
+	b.Run("Standard", func(b *testing.B) {
+		b.SetBytes(int64(len(rawJSON)))
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_ = json.Unmarshal(rawJSON, &dst)
+		}
+	})
+
+	b.Run("Simdjson_AST", func(b *testing.B) {
+		b.SetBytes(int64(len(rawJSON)))
+		b.ReportAllocs()
+		b.ResetTimer()
+		var pj *simdjson.ParsedJson
+		for i := 0; i < b.N; i++ {
+			pj, _ = simdjson.Parse(rawJSON, pj)
 		}
 	})
 
@@ -300,129 +472,4 @@ func sliceIntToInt64(s []int) []int64 {
 		res[i] = int64(v)
 	}
 	return res
-}
-
-func BenchmarkNestedSimdjson(b *testing.B) {
-	b.SetBytes(int64(len(hugeJSONData)))
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		parsed, err := simdjson.Parse(hugeJSONData, nil)
-		if err != nil {
-			b.Fatal(err)
-		}
-		iter := parsed.Iter()
-		if iter.Type() == simdjson.TypeArray {
-			array, _ := iter.Array(nil)
-			array.ForEach(func(i simdjson.Iter) {
-				if i.Type() == simdjson.TypeObject {
-					obj, _ := i.Object(nil)
-					var emp Employee
-
-					var elem simdjson.Element
-
-					if obj.FindKey("id", &elem) != nil {
-						id, _ := elem.Iter.Int()
-						emp.ID = int(id)
-					}
-					if obj.FindKey("is_active", &elem) != nil {
-						emp.IsActive, _ = elem.Iter.Bool()
-					}
-					if obj.FindKey("balance", &elem) != nil {
-						emp.Balance, _ = elem.Iter.Float()
-					}
-					if obj.FindKey("address", &elem) != nil {
-						if elem.Type == simdjson.TypeObject {
-							addrObj, _ := elem.Iter.Object(nil)
-							var subElem simdjson.Element
-							if addrObj.FindKey("city", &subElem) != nil {
-								emp.Address.City, _ = subElem.Iter.String()
-							}
-							if addrObj.FindKey("zip", &subElem) != nil {
-								zip, _ := subElem.Iter.Int()
-								emp.Address.Zip = int(zip)
-							}
-						}
-					}
-					if obj.FindKey("tags", &elem) != nil {
-						if elem.Type == simdjson.TypeArray {
-							tagsArr, _ := elem.Iter.Array(nil)
-							tagsArr.ForEach(func(t simdjson.Iter) {
-								tagStr, _ := t.String()
-								emp.Tags = append(emp.Tags, tagStr)
-							})
-						}
-					}
-					if obj.FindKey("scores", &elem) != nil {
-						if elem.Type == simdjson.TypeArray {
-							scoresArr, _ := elem.Iter.Array(nil)
-							scoresArr.ForEach(func(s simdjson.Iter) {
-								scoreInt, _ := s.Int()
-								emp.Scores = append(emp.Scores, int(scoreInt))
-							})
-						}
-					}
-					_ = emp
-				}
-			})
-		}
-	}
-}
-
-func BenchmarkNestedSonic(b *testing.B) {
-	dst := make([]Employee, recordCount)
-	b.SetBytes(int64(len(hugeJSONData)))
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		err := sonic.Unmarshal(hugeJSONData, &dst)
-		if err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkUnmarshalArrayParallelSonic(b *testing.B) {
-	rawJSON, err := json.Marshal(benchEmpSlice)
-	if err != nil {
-		b.Fatal(err)
-	}
-
-	dst := make([]Employee, len(benchEmpSlice))
-	b.SetBytes(int64(len(rawJSON)))
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	buf := make([]byte, len(rawJSON))
-	for i := 0; i < b.N; i++ {
-		copy(buf, rawJSON)
-
-		chunks := make([]Chunk, len(benchEmpSlice)+1000)
-		count, _ := findObjectBoundariesASM(buf, chunks)
-
-		workers := runtime.GOMAXPROCS(0)
-		batchSize := (count + workers - 1) / workers
-		var wg sync.WaitGroup
-		for w := 0; w < workers; w++ {
-			start := w * batchSize
-			end := start + batchSize
-			if end > count {
-				end = count
-			}
-			if start >= count {
-				break
-			}
-			wg.Add(1)
-			go func(start, end int) {
-				defer wg.Done()
-				for idx := start; idx < end; idx++ {
-					chunk := chunks[idx]
-					_ = sonic.Unmarshal(buf[chunk.Start:chunk.End], &dst[idx])
-				}
-			}(start, end)
-		}
-		wg.Wait()
-	}
 }

@@ -11,6 +11,7 @@ import (
 	"unsafe"
 
 	"github.com/GenshIv/intHache"
+	"github.com/cespare/ryu"
 )
 
 //go:noescape
@@ -25,8 +26,12 @@ func findQuoteAsm(data []byte) (index int)
 //go:noescape
 func appendIntASM(buf []byte, val int64) []byte
 
+// appendStringASM копирует строку s в buf, добавляя кавычки.
+// За один проход копирует байты и сканирует на спецсимволы.
+// Возвращает новый buf и позицию первого спецсимвола (-1 если нет).
+//
 //go:noescape
-func appendStringASM(buf []byte, s string) []byte
+func appendStringASM(buf []byte, s string) ([]byte, int)
 
 //go:noescape
 func findObjectBoundariesASM(data []byte, chunks []Chunk) (ret0 int, ret1 int)
@@ -219,7 +224,7 @@ func BuildRegistry(typ reflect.Type) *Registry {
 // MarshalFloat: используем буфер на стеке
 func MarshalFloat(ptr unsafe.Pointer, buf []byte) []byte {
 	val := *(*float64)(ptr)
-	return strconv.AppendFloat(buf, val, 'f', -1, 64)
+	return ryu.AppendFloat64(buf, val)
 }
 
 // MarshalBool: прямое добавление байтов
@@ -230,14 +235,34 @@ func MarshalBool(ptr unsafe.Pointer, buf []byte) []byte {
 	return append(buf, "false"...)
 }
 
-// MarshalString: с базовым экранированием (минимум аллокаций)
+// MarshalString: один проход через ASM: копирует и сканирует одновременно.
+// Если строка чистая и буфер вмещает — ASM вернёт (buf+string, -1).
+// Если спецсимвол найден — ASM скопирует префикс, Go доделает остаток с экранированием.
+// Если нет места в буфере — Go-путь через append (с возможным grow).
 func MarshalString(ptr unsafe.Pointer, buf []byte) []byte {
 	s := *(*string)(ptr)
-	if strings.IndexAny(s, "\"\\") < 0 && len(buf)+len(s)+2 <= cap(buf) {
-		return appendStringASM(buf, s)
-	}
 
-	return appendJSONStringGo(buf, s)
+	newBuf, specialPos := appendStringASM(buf, s)
+	switch specialPos {
+	case -1:
+		// Строка чистая, скопирована целиком с кавычками
+		return newBuf
+	case -2:
+		// Нет места в буфере (overflow) — идём через Go с экранированием
+		return appendJSONStringGo(buf, s)
+	default:
+		// ASM скопировал s[:specialPos] и открывающую кавычку.
+		// Дописываем остаток с экранированием начиная с specialPos.
+		buf = newBuf
+		for i := specialPos; i < len(s); i++ {
+			c := s[i]
+			if (charTable[c] & (charString | charEscape)) != 0 {
+				buf = append(buf, '\\')
+			}
+			buf = append(buf, c)
+		}
+		return append(buf, '"')
+	}
 }
 
 func appendJSONStringGo(buf []byte, s string) []byte {
@@ -264,7 +289,12 @@ func MarshalIntSlice(ptr unsafe.Pointer, buf []byte) []byte {
 		if i > 0 {
 			buf = append(buf, ',')
 		}
-		buf = strconv.AppendInt(buf, int64(v), 10)
+		newBuf := appendIntASM(buf, int64(v))
+		if len(newBuf) == len(buf) {
+			buf = strconv.AppendInt(buf, int64(v), 10)
+		} else {
+			buf = newBuf
+		}
 	}
 	return append(buf, ']')
 }
@@ -276,20 +306,11 @@ func MarshalStringSlice(ptr unsafe.Pointer, buf []byte) []byte {
 		return append(buf, "null"...)
 	}
 	buf = append(buf, '[')
-	for i, v := range slice {
+	for i := range slice {
 		if i > 0 {
 			buf = append(buf, ',')
 		}
-		// Переиспользуем логику MarshalString
-		buf = append(buf, '"')
-		for j := 0; j < len(v); j++ {
-			c := v[j]
-			if (charTable[c] & (charString | charEscape)) != 0 {
-				buf = append(buf, '\\')
-			}
-			buf = append(buf, c)
-		}
-		buf = append(buf, '"')
+		buf = MarshalString(unsafe.Pointer(&slice[i]), buf)
 	}
 	return append(buf, ']')
 }
@@ -339,7 +360,11 @@ func MarshalObject(ptr unsafe.Pointer, reg *Registry, buf []byte) []byte {
 
 func MarshalInt(ptr unsafe.Pointer, buf []byte) []byte {
 	val := *(*int64)(ptr)
-	return strconv.AppendInt(buf, val, 10)
+	newBuf := appendIntASM(buf, val)
+	if len(newBuf) == len(buf) {
+		return strconv.AppendInt(buf, val, 10)
+	}
+	return newBuf
 }
 
 func parseJSONString(raw []byte, start int) (string, int, error) {

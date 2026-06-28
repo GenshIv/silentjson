@@ -86,160 +86,159 @@ scan_eof:
     RET
 
 
-// func appendStringASM(buf []byte, s string) []byte
-TEXT ·appendStringASM(SB), NOSPLIT, $0-64
-    MOVQ buf_base+0(FP), DI
-    MOVQ buf_len+8(FP), R11
-    MOVQ buf_cap+16(FP), DX
-    MOVQ s_base+24(FP), R8
-    MOVQ s_len+32(FP), R9
+// func appendStringASM(buf []byte, s string) (newBuf []byte, specialPos int)
+// AVX2: copies s into buf with surrounding quotes, scanning for '"' and '\\'.
+// Returns (newBuf, -1)   if string is fully written.
+// Returns (buf, -2)      if not enough space in buf.
+TEXT ·appendStringASM(SB), NOSPLIT, $0-72
+    MOVQ buf_base+0(FP), DI    // DI = buf.data
+    MOVQ buf_len+8(FP), R11    // R11 = buf.len
+    MOVQ buf_cap+16(FP), DX    // DX = buf.cap
+    MOVQ s_base+24(FP), SI     // SI = s.data
+    MOVQ s_len+32(FP), BX      // BX = s.len
 
-    // Проверяем, что в буфере хватает места для двух кавычек и содержимого строки.
+    // Check capacity: need R11 + BX + 2 <= DX
     MOVQ R11, AX
-    ADDQ R9, AX
+    ADDQ BX, AX
     ADDQ $2, AX
     CMPQ AX, DX
-    JG   append_string_overflow
+    JG   asw_overflow
 
-    LEAQ (DI)(R11*1), DI
-    MOVB $'"', 0(DI)
+    // Move DI to current write position in buf, write opening quote
+    ADDQ R11, DI
+    MOVB $0x22, 0(DI)
     INCQ DI
-    MOVQ R8, SI
-    MOVQ R9, CX
+    INCQ R11
 
-append_string_copy_loop:
-    TESTQ CX, CX
-    JZ   append_string_copy_done
-    MOVB 0(SI), AL
+    // Broadcast '"'  into Y1, '\\'  into Y2
+    MOVQ $0x2222222222222222, R8
+    MOVQ R8, X1
+    VPBROADCASTQ X1, Y1
+
+    MOVQ $0x5c5c5c5c5c5c5c5c, R8
+    MOVQ R8, X2
+    VPBROADCASTQ X2, Y2
+
+    XORQ CX, CX                // CX = index into s
+
+asw_avx2_loop:
+    MOVQ BX, R9
+    SUBQ CX, R9                // R9 = remaining bytes
+    CMPQ R9, $32
+    JL   asw_scalar_loop       // < 32 bytes remaining => scalar tail
+
+    // Load 32 bytes from s[CX:]
+    VMOVDQU (SI)(CX*1), Y0
+
+    // Compare with '"'  and '\\'  
+    VPCMPEQB Y1, Y0, Y3        // Y3: 0xFF where byte == '"'
+    VPCMPEQB Y2, Y0, Y4        // Y4: 0xFF where byte == '\\'
+    VPOR Y3, Y4, Y5            // Y5: combined special-char mask
+
+    VPMOVMSKB Y5, R13          // R13 = 32-bit bitmask
+    TESTL R13, R13
+    JNZ  asw_avx2_special      // found a special char in this chunk
+
+    // No special chars -- bulk copy 32 bytes
+    VMOVDQU Y0, 0(DI)
+    ADDQ $32, DI
+    ADDQ $32, CX
+    ADDQ $32, R11
+    JMP  asw_avx2_loop
+
+asw_avx2_special:
+    // Find index of first set bit (first special char in the 32-byte chunk)
+    BSFL R13, R13              // R13 = bit offset
+
+    // Copy s[CX .. CX+R13) into buf byte-by-byte
+    TESTL R13, R13
+    JZ   asw_escape_special    // nothing to copy before the special char
+
+asw_avx2_copy_prefix:
+    MOVB (SI)(CX*1), AL
     MOVB AL, 0(DI)
-    INCQ SI
     INCQ DI
-    DECQ CX
-    JMP  append_string_copy_loop
+    INCQ CX
+    INCQ R11
+    DECL R13
+    JNZ  asw_avx2_copy_prefix
 
-append_string_copy_done:
-    MOVB $'"', 0(DI)
+asw_escape_special:
+    // Check capacity for the rest of string + closing quote + the '\\' we add.
+    // Required: (BX - CX) + 2 <= DX - R11
+    MOVQ BX, AX
+    SUBQ CX, AX
+    ADDQ $2, AX
+    MOVQ DX, R14
+    SUBQ R11, R14
+    CMPQ AX, R14
+    JG   asw_overflow
 
-    ADDQ R9, R11
+    MOVB $0x5C, 0(DI)          // '\\'
+    INCQ DI
+    MOVB (SI)(CX*1), AL
+    MOVB AL, 0(DI)             // the escaped char
+    INCQ DI
+    INCQ CX
     ADDQ $2, R11
+    JMP  asw_avx2_loop         // loop back to process remaining bytes
+
+asw_scalar_loop:
+    CMPQ CX, BX
+    JGE  asw_clean_done
+
+    MOVB (SI)(CX*1), AL
+    CMPB AL, $0x22
+    JEQ  asw_scalar_special
+    CMPB AL, $0x5C
+    JEQ  asw_scalar_special
+
+    MOVB AL, 0(DI)
+    INCQ DI
+    INCQ CX
+    INCQ R11
+    JMP  asw_scalar_loop
+
+asw_scalar_special:
+    // Capacity check
+    MOVQ BX, AX
+    SUBQ CX, AX
+    ADDQ $2, AX
+    MOVQ DX, R14
+    SUBQ R11, R14
+    CMPQ AX, R14
+    JG   asw_overflow
+
+    MOVB $0x5C, 0(DI)
+    INCQ DI
+    MOVB (SI)(CX*1), AL        // <--- FIXED: Reload AL after AX was overwritten
+    MOVB AL, 0(DI)
+    INCQ DI
+    INCQ CX
+    ADDQ $2, R11
+    JMP  asw_scalar_loop
+
+asw_clean_done:
+    // Write closing quote
+    MOVB $0x22, 0(DI)
+    INCQ R11
 
     MOVQ buf_base+0(FP), AX
     MOVQ AX, ret_base+40(FP)
     MOVQ R11, ret_len+48(FP)
     MOVQ DX, ret_cap+56(FP)
+    MOVQ $-1, ret1+64(FP)
     RET
 
-append_string_overflow:
+asw_overflow:
     MOVQ buf_base+0(FP), AX
     MOVQ AX, ret_base+40(FP)
     MOVQ buf_len+8(FP), AX
     MOVQ AX, ret_len+48(FP)
     MOVQ DX, ret_cap+56(FP)
+    MOVQ $-2, ret1+64(FP)
     RET
 
-
-// func findQuoteOrEscapeASM(b []byte) (idx int, isEscape bool)
-TEXT ·findQuoteOrEscapeASM(SB), NOSPLIT, $0-33
-    // Загружаем срез []byte (указатель, длина, вместимость)
-    MOVQ b_base+0(FP), AX    // AX = указатель на данные
-    MOVQ b_len+8(FP), BX     // BX = длина массива
-    XORQ CX, CX              // CX = текущий индекс (начинаем с 0)
-
-    // Бродкастим кавычку '"' (0x22) на все 32 байта регистра Y1
-    MOVQ $0x2222222222222222, R8
-    MOVQ R8, X1
-    VPBROADCASTQ X1, Y1
-
-    // Бродкастим слэш '\' (0x5c) на все 32 байта регистра Y2
-    MOVQ $0x5c5c5c5c5c5c5c5c, R9
-    MOVQ R9, X2
-    VPBROADCASTQ X2, Y2
-
-loop:
-    // Проверяем, осталось ли хотя бы 32 байта для AVX2
-    MOVQ BX, R10
-    SUBQ CX, R10
-    CMPQ R10, $32
-    JL tail                  // Если меньше 32, уходим на хвост (Go обработает)
-
-    // Загружаем сразу 32 байта из памяти в Y0
-    VMOVDQU (AX)(CX*1), Y0
-
-    // Векторное сравнение (SIMD)
-    VPCMPEQB Y1, Y0, Y3      // Y3 = маска совпадений с кавычкой
-    VPCMPEQB Y2, Y0, Y4      // Y4 = маска совпадений со слэшем
-
-    // Объединяем маски (OR)
-    VPOR Y3, Y4, Y5
-
-    // Превращаем 256-битный результат в обычный 32-битный регистр
-    VPMOVMSKB Y5, R11
-
-    // Если R11 == 0, значит ни кавычек, ни слэшей в этих 32 байтах нет
-    TESTL R11, R11
-    JZ next_chunk
-
-    // Нашли! Инструкция BSFL находит индекс первого установленного бита
-    BSFL R11, R11
-
-    // Проверяем, был ли это слэш (маска в Y4)
-    VPMOVMSKB Y4, R12
-    BTL R11, R12             // Проверяем бит под индексом R11
-    JC is_escape
-
-    // Это была кавычка
-    ADDQ R11, CX             // Добавляем смещение к текущему индексу
-    MOVQ CX, ret+24(FP)      // Возвращаем индекс
-    MOVB $0, isEscape+32(FP) // Возвращаем false (не слэш)
-    VZEROUPPER               // Сброс состояния AVX (обязательно для Go)
-    RET
-
-is_escape:
-    ADDQ R11, CX
-    MOVQ CX, ret+24(FP)
-    MOVB $1, isEscape+32(FP) // Возвращаем true (это слэш)
-    VZEROUPPER
-    RET
-
-next_chunk:
-    ADDQ $32, CX             // Прыгаем сразу на 32 байта вперед
-    JMP loop
-
-tail:
-    // Хвост добиваем побайтно: ищем либо кавычку, либо экранирующий слэш.
-tail_loop:
-    CMPQ CX, BX
-    JGE tail_done
-
-    MOVB (AX)(CX*1), AL
-    CMPB AL, $0x22
-    JEQ  tail_quote
-    CMPB AL, $0x5C
-    JEQ  tail_escape
-
-    INCQ CX
-    JMP  tail_loop
-
-tail_quote:
-    MOVQ CX, ret+24(FP)
-    MOVB $0, isEscape+32(FP)
-    VZEROUPPER
-    RET
-
-tail_escape:
-    MOVQ CX, ret+24(FP)
-    MOVB $1, isEscape+32(FP)
-    VZEROUPPER
-    RET
-
-tail_done:
-    MOVQ CX, ret+24(FP)
-    MOVB $0, isEscape+32(FP)
-    VZEROUPPER
-    RET
-
-
-// func parseShortStringASM2(src []byte) (written int, read int)
 TEXT ·parseShortStringASM2(SB), NOSPLIT, $0-40
     MOVQ src_base+0(FP), SI
     MOVQ src_len+8(FP), BX
@@ -854,25 +853,20 @@ done_err:
     RET
 
 // func appendIntASM(buf []byte, val int64) []byte
-// Возвращает новый срез (base, len, cap)
 TEXT ·appendIntASM(SB), NOSPLIT, $0-56
     MOVQ buf_base+0(FP), DI    // Base
     MOVQ buf_len+8(FP), SI     // Len
-    MOVQ buf_cap+16(FP), DX    // Cap
+    MOVQ buf_cap+16(FP), R12   // Cap
     MOVQ val+24(FP), AX        // Val
 
-    // DEBUG: Если Base == 0, значит срез не инициализирован
     TESTQ DI, DI
     JZ   overflow
 
-    // ЗАЩИТА: Если len + 20 > cap, возвращаем старый буфер,
-    // чтобы Go сделал append (расширение)
     MOVQ SI, R8
     ADDQ $20, R8
-    CMPQ R8, DX
+    CMPQ R8, R12
     JGT  overflow
 
-    // Проверка на 0
     TESTQ AX, AX
     JNE   check_negative
     MOVB  $0x30, 0(DI)(SI*1)
@@ -886,20 +880,18 @@ check_negative:
     NEGQ  AX
 
 prepare_div:
-    MOVQ  SI, R8               // Начало числа в буфере
+    MOVQ  SI, R8
     MOVQ  $10, CX
 
 loop:
-
-    CMPQ SI, DX    // SI = len, DX = cap
-    JGE  overflow  // Если длина >= емкости, мы не можем писать!
+    CMPQ SI, R12
+    JGE  overflow
 
     MOVQ  AX, BX
     MOVQ  $0xCCCCCCCCCCCCCCCD, R9
-    IMULQ R9
+    MULQ R9
     MOVQ  DX, AX
     SHRQ  $3, AX
-    // Коррекция частного из-за сдвига
     MOVQ  AX, R10
     IMULQ $10, R10
     SUBQ  R10, BX
@@ -911,7 +903,6 @@ loop:
     TESTQ AX, AX
     JNE   loop
 
-    // Переворачиваем (Reverse)
     MOVQ  R8, DX
     MOVQ  SI, CX
     DECQ  CX
@@ -928,18 +919,16 @@ reverse:
     JMP   reverse
 
 overflow:
-    // Возвращаем исходный срез (как он пришел на вход)
-    MOVQ buf_base+0(FP), AX  // Восстанавливаем Base
-    MOVQ AX, ret_base+32(FP) // Записываем в ret (Base)
-    MOVQ SI, ret_len+40(FP)  // Записываем исходную длину (Len)
-    MOVQ DX, ret_cap+48(FP)  // Записываем исходную емкость (Cap)
+    MOVQ buf_base+0(FP), AX
+    MOVQ AX, ret_base+32(FP)
+    MOVQ buf_len+8(FP), AX
+    MOVQ AX, ret_len+40(FP)
+    MOVQ R12, ret_cap+48(FP)
     RET
 
 done:
-    // Возвращаем обновленный срез
-    MOVQ buf_base+0(FP), AX  // Base тот же
+    MOVQ buf_base+0(FP), AX
     MOVQ AX, ret_base+32(FP)
-    MOVQ SI, ret_len+40(FP)  // Новая длина (SI обновился в процессе)
-    MOVQ DX, ret_cap+48(FP)  // Cap тот же
+    MOVQ SI, ret_len+40(FP)
+    MOVQ R12, ret_cap+48(FP)
     RET
-
