@@ -166,9 +166,25 @@ func BuildRegistry(typ reflect.Type) *Registry {
 		
 		keyLen := len(key)
 		var keyU64 uint64
-		if keyLen <= 8 {
-			for j := 0; j < keyLen; j++ {
-				keyU64 |= uint64(key[j]) << (8 * j)
+		if keyLen > 0 && keyLen <= 8 {
+			b := unsafe.SliceData([]byte(key))
+			switch keyLen {
+			case 1:
+				keyU64 = uint64(*b)
+			case 2:
+				keyU64 = uint64(*(*uint16)(unsafe.Pointer(b)))
+			case 3:
+				keyU64 = uint64(*(*uint16)(unsafe.Pointer(b))) | (uint64(*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 2))) << 16)
+			case 4:
+				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b)))
+			case 5:
+				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b))) | (uint64(*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 4))) << 32)
+			case 6:
+				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b))) | (uint64(*(*uint16)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 4))) << 32)
+			case 7:
+				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b))) | (uint64(*(*uint16)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 4))) << 32) | (uint64(*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 6))) << 48)
+			case 8:
+				keyU64 = *(*uint64)(unsafe.Pointer(b))
 			}
 		}
 
@@ -462,9 +478,25 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 		var ok bool
 		keyLen := len(decoded)
 		var keyU64 uint64
-		if keyLen <= 8 {
-			for j := 0; j < keyLen; j++ {
-				keyU64 |= uint64(decoded[j]) << (8 * j)
+		if keyLen > 0 && keyLen <= 8 {
+			b := unsafe.SliceData(decoded)
+			switch keyLen {
+			case 1:
+				keyU64 = uint64(*b)
+			case 2:
+				keyU64 = uint64(*(*uint16)(unsafe.Pointer(b)))
+			case 3:
+				keyU64 = uint64(*(*uint16)(unsafe.Pointer(b))) | (uint64(*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 2))) << 16)
+			case 4:
+				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b)))
+			case 5:
+				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b))) | (uint64(*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 4))) << 32)
+			case 6:
+				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b))) | (uint64(*(*uint16)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 4))) << 32)
+			case 7:
+				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b))) | (uint64(*(*uint16)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 4))) << 32) | (uint64(*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 6))) << 48)
+			case 8:
+				keyU64 = *(*uint64)(unsafe.Pointer(b))
 			}
 		}
 
