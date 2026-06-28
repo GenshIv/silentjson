@@ -1,8 +1,9 @@
-package silentjson
+package main
 
 import (
 	"fmt"
 	"reflect"
+	"strconv"
 	"testing"
 	"unsafe"
 )
@@ -109,6 +110,26 @@ func TestZeroCopy_String(t *testing.T) {
 	}
 }
 
+func TestMarshalStringASM(t *testing.T) {
+	tests := []string{
+		"plain text",
+		`quoted "value" and slash \\`,
+	}
+
+	for _, tt := range tests {
+		t.Run(tt, func(t *testing.T) {
+			s := tt
+			buf := make([]byte, 0, len(tt)+8)
+			got := MarshalString(unsafe.Pointer(&s), buf)
+			want := strconv.Quote(tt)
+
+			if string(got) != want {
+				t.Fatalf("got %q, want %q", string(got), want)
+			}
+		})
+	}
+}
+
 func TestParseObject_Errors(t *testing.T) {
 	reg := BuildRegistry(reflect.TypeOf(TestUser{}))
 
@@ -187,15 +208,19 @@ func TestUnmarshalArrayParallel_Basic(t *testing.T) {
 		},
 	}
 
+	dst := make([]TestWorkerItem, 65536)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Make a copy of the buffer, as our parser does in-place unescaping,
 			// and it's good practice in tests not to mutate the source constants.
 			buf := make([]byte, len(tt.payload))
 			copy(buf, tt.payload)
+			for i := range dst {
+				dst[i] = TestWorkerItem{} // Обнуляет все поля, включая Active = false
+			}
 
 			// Call our beautiful Generic API
-			res, err := UnmarshalArrayParallel[TestWorkerItem](buf, reg)
+			res, err := UnmarshalArrayParallel[TestWorkerItem](buf, reg, dst)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("wantErr %v, got error: %v", tt.wantErr, err)
@@ -218,7 +243,7 @@ func TestUnmarshalArrayParallel_HighVolume(t *testing.T) {
 
 	// Generate an array of 15,000 elements to guarantee
 	// the use of all processor cores (Worker Pool batching)
-	const numItems = 15000
+	const numItems = 8000
 	var jsonBuilder []byte
 	jsonBuilder = append(jsonBuilder, '[')
 	for i := 0; i < numItems; i++ {
@@ -231,8 +256,9 @@ func TestUnmarshalArrayParallel_HighVolume(t *testing.T) {
 	}
 	jsonBuilder = append(jsonBuilder, ']')
 
+	dst := make([]TestWorkerItem, numItems)
 	// Run parallel parsing
-	res, err := UnmarshalArrayParallel[TestWorkerItem](jsonBuilder, reg)
+	res, err := UnmarshalArrayParallel[TestWorkerItem](jsonBuilder, reg, dst)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

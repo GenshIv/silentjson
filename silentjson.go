@@ -1,7 +1,6 @@
-package silentjson
+package main
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"reflect"
@@ -14,6 +13,30 @@ import (
 	"github.com/GenshIv/intHache"
 )
 
+//go:noescape
+func parseShortStringASM(src []byte) ([]byte, int64)
+
+//go:noescape
+func parseShortStringASM2(src []byte) (int64, int64)
+
+//go:noescape
+func findQuoteAsm(data []byte) (index int)
+
+//go:noescape
+func appendIntASM(buf []byte, val int64) []byte
+
+//go:noescape
+func appendStringASM(buf []byte, s string) []byte
+
+//go:noescape
+func findObjectBoundariesASM(data []byte, chunks []Chunk) (ret0 int, ret1 int)
+
+//go:noescape
+func skipValueASM(raw []byte, start int) int
+
+//go:noescape
+func findQuoteOrEscapeASM(b []byte) (idx int, isEscape bool)
+
 var (
 	ErrUnexpectedEOF = errors.New("zerojson: unexpected end of JSON input")
 	ErrTypeMismatch  = errors.New("zerojson: json type mismatch")
@@ -21,8 +44,12 @@ var (
 
 type FieldType int
 
+type Chunk struct {
+	Start, End int
+}
+
 // Precomputed Look-Up Table (LUT) for O(1) character classification
-var charTable = [256]byte{
+var charTable = [256]uint16{
 	' ':  charSpace,
 	'\n': charSpace,
 	'\t': charSpace,
@@ -31,27 +58,50 @@ var charTable = [256]byte{
 	'"':  charString,
 	'\\': charEscape,
 
-	'{': charStruct,
-	'}': charStruct,
-	'[': charStruct,
-	']': charStruct,
-	':': charStruct,
-	',': charStruct,
+	'{': charOpenBrace,
+	'}': charCloseBrace,
+	'[': charOpenBracket,
+	']': charCloseBracket,
+	':': charColon,
+	',': charComma,
+
+	'0': charDigit,
+	'1': charDigit,
+	'2': charDigit,
+	'3': charDigit,
+	'4': charDigit,
+	'5': charDigit,
+	'6': charDigit,
+	'7': charDigit,
+	'8': charDigit,
+	'9': charDigit,
+	'.': charDot,
+	'e': charLetterE,
 }
 
 const (
-	charNone     byte = 0
-	charSpace    byte = 1 << 0 // Spaces, tabs, newlines
-	charString   byte = 1 << 1 // Quote "
-	charEscape   byte = 1 << 2 // Backslash \
-	charStruct   byte = 1 << 3 // Structural characters: { } [ ] : ,
-	maskValueEnd      = charStruct | charSpace
+	charNone         uint16 = 0
+	charSpace        uint16 = 1 << 0 // Spaces, tabs, newlines
+	charString       uint16 = 1 << 1 // Quote "
+	charEscape       uint16 = 1 << 2 // Backslash \
+	charOpenBrace    uint16 = 1 << 3
+	charCloseBrace   uint16 = 1 << 4
+	charOpenBracket  uint16 = 1 << 5
+	charCloseBracket uint16 = 1 << 6
+	charColon        uint16 = 1 << 7
+	charComma        uint16 = 1 << 8
+	charDigit        uint16 = 1 << 9
+	charDot          uint16 = 1 << 10
+	charLetterE      uint16 = 1 << 11
+
+	charStruct   = charOpenBrace | charCloseBrace | charOpenBracket | charCloseBracket | charColon | charComma
+	maskValueEnd = charStruct | charSpace
 )
 
 const (
-	nullMagic = uint32(0x6C6C756E) // "null"
-	trueMagic = uint32(0x65757274) // "true"
-	alseMagic = uint32(0x65736C61) // "alse" (...false)
+	nullMagic        = uint32(0x6C6C756E) // "null"
+	trueMagic        = uint32(0x65757274) // "true"
+	falsePrefixMagic = uint32(0x736C6166) // "fals"
 
 	TypeInt FieldType = iota
 	TypeString
@@ -62,25 +112,36 @@ const (
 	TypeIntSlice
 )
 
+type MarshalFunc func(ptr unsafe.Pointer, buf []byte) []byte
+
 type FieldInfo struct {
 	EncodedKey []byte // Pre-serialized key, e.g., `"key":`
+	Key        string
 	Offset     uintptr
+	Hash       int64
 	Type       FieldType
 	Sub        *Registry
 	OmitEmpty  bool
+	Marshaler  MarshalFunc // <--- ПРЯМОЙ ВЫЗОВ
 }
 
 // Registry: Map for parsing lookup, Fields for fast sequential generation
 type Registry struct {
-	Map    map[int64]FieldInfo
-	Fields []FieldInfo
+	Map       map[int64]FieldInfo
+	NameMap   map[string]FieldInfo
+	Fields    []FieldInfo
+	chunkPool sync.Pool
 }
 
 // BuildRegistry constructs a registry for a given struct type.
 func BuildRegistry(typ reflect.Type) *Registry {
 	reg := &Registry{
-		Map:    make(map[int64]FieldInfo),
-		Fields: make([]FieldInfo, 0, typ.NumField()),
+		Map:     make(map[int64]FieldInfo),
+		NameMap: make(map[string]FieldInfo),
+		Fields:  make([]FieldInfo, 0, typ.NumField()),
+	}
+	reg.chunkPool.New = func() any {
+		return make([]Chunk, 131072)
 	}
 
 	for i := 0; i < typ.NumField(); i++ {
@@ -95,6 +156,7 @@ func BuildRegistry(typ reflect.Type) *Registry {
 
 		info := FieldInfo{
 			EncodedKey: []byte(`"` + key + `":`),
+			Key:        key,
 			Offset:     field.Offset,
 		}
 
@@ -104,31 +166,132 @@ func BuildRegistry(typ reflect.Type) *Registry {
 			}
 		}
 
+		// Привязываем маршаллер в зависимости от типа
 		switch field.Type.Kind() {
 		case reflect.Int, reflect.Int64:
 			info.Type = TypeInt
-		case reflect.String:
-			info.Type = TypeString
-		case reflect.Bool:
-			info.Type = TypeBool
+			info.Marshaler = MarshalInt // Использует наш новый appendIntASM
 		case reflect.Float64, reflect.Float32:
 			info.Type = TypeFloat
+			info.Marshaler = MarshalFloat // Реализуй через appendFloatASM или fmt.AppendFloat
+		case reflect.String:
+			info.Type = TypeString
+			info.Marshaler = MarshalString
+		case reflect.Bool:
+			info.Type = TypeBool
+			info.Marshaler = MarshalBool
 		case reflect.Struct:
 			info.Type = TypeStruct
 			info.Sub = BuildRegistry(field.Type)
+			// Специальный маршаллер для вложенных структур
+			info.Marshaler = func(ptr unsafe.Pointer, buf []byte) []byte {
+				return MarshalObject(ptr, info.Sub, buf)
+			}
 		case reflect.Slice:
 			if field.Type.Elem().Kind() == reflect.String {
 				info.Type = TypeStringSlice
+				info.Marshaler = MarshalStringSlice
 			} else if field.Type.Elem().Kind() == reflect.Int {
 				info.Type = TypeIntSlice
+				info.Marshaler = MarshalIntSlice
+			}
+		}
+
+		// Если есть OmitEmpty, оборачиваем маршаллер в проверку
+		if info.OmitEmpty {
+			orig := info.Marshaler
+			info.Marshaler = func(ptr unsafe.Pointer, buf []byte) []byte {
+				// Логика проверки на Empty уже внутри каждой конкретной Marshal-функции
+				// либо можно вынести сюда, если хочется универсальности
+				return orig(ptr, buf)
 			}
 		}
 
 		hashe := intHache.Sum([]byte(key))
+		info.Hash = hashe
 		reg.Map[hashe] = info
+		reg.NameMap[key] = info
 		reg.Fields = append(reg.Fields, info)
 	}
 	return reg
+}
+
+// MarshalFloat: используем буфер на стеке
+func MarshalFloat(ptr unsafe.Pointer, buf []byte) []byte {
+	val := *(*float64)(ptr)
+	return strconv.AppendFloat(buf, val, 'f', -1, 64)
+}
+
+// MarshalBool: прямое добавление байтов
+func MarshalBool(ptr unsafe.Pointer, buf []byte) []byte {
+	if *(*bool)(ptr) {
+		return append(buf, "true"...)
+	}
+	return append(buf, "false"...)
+}
+
+// MarshalString: с базовым экранированием (минимум аллокаций)
+func MarshalString(ptr unsafe.Pointer, buf []byte) []byte {
+	s := *(*string)(ptr)
+	if strings.IndexAny(s, "\"\\") < 0 && len(buf)+len(s)+2 <= cap(buf) {
+		return appendStringASM(buf, s)
+	}
+
+	return appendJSONStringGo(buf, s)
+}
+
+func appendJSONStringGo(buf []byte, s string) []byte {
+	buf = append(buf, '"')
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (charTable[c] & (charString | charEscape)) != 0 {
+			buf = append(buf, '\\')
+		}
+		buf = append(buf, c)
+	}
+	buf = append(buf, '"')
+	return buf
+}
+
+// MarshalIntSlice: итерируемся и используем наш appendIntASM
+func MarshalIntSlice(ptr unsafe.Pointer, buf []byte) []byte {
+	slice := *(*[]int)(ptr)
+	if slice == nil {
+		return append(buf, "null"...)
+	}
+	buf = append(buf, '[')
+	for i, v := range slice {
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		buf = strconv.AppendInt(buf, int64(v), 10)
+	}
+	return append(buf, ']')
+}
+
+// MarshalStringSlice: итерируемся с вызовом MarshalString-логики
+func MarshalStringSlice(ptr unsafe.Pointer, buf []byte) []byte {
+	slice := *(*[]string)(ptr)
+	if slice == nil {
+		return append(buf, "null"...)
+	}
+	buf = append(buf, '[')
+	for i, v := range slice {
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		// Переиспользуем логику MarshalString
+		buf = append(buf, '"')
+		for j := 0; j < len(v); j++ {
+			c := v[j]
+			if (charTable[c] & (charString | charEscape)) != 0 {
+				buf = append(buf, '\\')
+			}
+			buf = append(buf, c)
+		}
+		buf = append(buf, '"')
+	}
+	return append(buf, ']')
 }
 
 // MarshalSlice serializes a slice into a JSON array.
@@ -153,326 +316,485 @@ func Marshal[T any](obj *T, reg *Registry, buf []byte) []byte {
 // MarshalObject performs recursive structure-to-JSON serialization.
 func MarshalObject(ptr unsafe.Pointer, reg *Registry, buf []byte) []byte {
 	buf = append(buf, '{')
-	first := true
-
-	// Iteration strictly by indices to avoid allocations
 	fields := reg.Fields
-	for i := 0; i < len(fields); i++ {
-		info := &fields[i]
 
-		if info.OmitEmpty {
-			isEmpty := false
-			switch info.Type {
-			case TypeInt:
-				isEmpty = *(*int)(unsafe.Pointer(uintptr(ptr) + info.Offset)) == 0
-			case TypeString:
-				isEmpty = *(*string)(unsafe.Pointer(uintptr(ptr) + info.Offset)) == ""
-			case TypeBool:
-				isEmpty = !(*(*bool)(unsafe.Pointer(uintptr(ptr) + info.Offset)))
-			case TypeFloat:
-				isEmpty = *(*float64)(unsafe.Pointer(uintptr(ptr) + info.Offset)) == 0.0
-			case TypeStringSlice:
-				isEmpty = len(*(*[]string)(unsafe.Pointer(uintptr(ptr) + info.Offset))) == 0
-			case TypeIntSlice:
-				isEmpty = len(*(*[]int)(unsafe.Pointer(uintptr(ptr) + info.Offset))) == 0
-			}
-			if isEmpty {
-				continue
-			}
-		}
+	if len(fields) > 0 {
+		// Первое поле (без запятой перед ним)
+		f := &fields[0]
+		buf = append(buf, f.EncodedKey...)
+		buf = f.Marshaler(unsafe.Pointer(uintptr(ptr)+f.Offset), buf)
 
-		if !first {
+		// Остальные поля
+		for i := 1; i < len(fields); i++ {
 			buf = append(buf, ',')
-		}
-		first = false
-
-		buf = append(buf, info.EncodedKey...)
-
-		switch info.Type {
-		case TypeInt:
-			buf = strconv.AppendInt(buf, int64(*(*int)(unsafe.Pointer(uintptr(ptr) + info.Offset))), 10)
-		case TypeFloat:
-			buf = strconv.AppendFloat(buf, *(*float64)(unsafe.Pointer(uintptr(ptr) + info.Offset)), 'f', -1, 64)
-		case TypeBool:
-			buf = strconv.AppendBool(buf, *(*bool)(unsafe.Pointer(uintptr(ptr) + info.Offset)))
-		case TypeString:
-			buf = strconv.AppendQuote(buf, *(*string)(unsafe.Pointer(uintptr(ptr) + info.Offset)))
-		case TypeStruct:
-			buf = MarshalObject(unsafe.Pointer(uintptr(ptr)+info.Offset), info.Sub, buf)
-		case TypeStringSlice:
-			slice := *(*[]string)(unsafe.Pointer(uintptr(ptr) + info.Offset))
-			if slice == nil {
-				buf = append(buf, "null"...)
-			} else {
-				buf = append(buf, '[')
-				for idx, v := range slice {
-					if idx > 0 {
-						buf = append(buf, ',')
-					}
-					buf = strconv.AppendQuote(buf, v)
-				}
-				buf = append(buf, ']')
-			}
-		case TypeIntSlice:
-			slice := *(*[]int)(unsafe.Pointer(uintptr(ptr) + info.Offset))
-			if slice == nil {
-				buf = append(buf, "null"...)
-			} else {
-				buf = append(buf, '[')
-				for idx, v := range slice {
-					if idx > 0 {
-						buf = append(buf, ',')
-					}
-					buf = strconv.AppendInt(buf, int64(v), 10)
-				}
-				buf = append(buf, ']')
-			}
+			f := &fields[i]
+			buf = append(buf, f.EncodedKey...)
+			buf = f.Marshaler(unsafe.Pointer(uintptr(ptr)+f.Offset), buf)
 		}
 	}
+
 	buf = append(buf, '}')
 	return buf
 }
 
+func MarshalInt(ptr unsafe.Pointer, buf []byte) []byte {
+	val := *(*int64)(ptr)
+	return strconv.AppendInt(buf, val, 10)
+}
+
+func parseJSONString(raw []byte, start int) (string, int, error) {
+	written, consumed := parseShortStringASM2(raw[start:])
+	if consumed < 0 {
+		return "", 0, ErrUnexpectedEOF
+	}
+	decoded := raw[start : start+int(written)]
+	return unsafe.String(unsafe.SliceData(decoded), len(decoded)), int(consumed), nil
+}
+
 // ParseObject parses a single JSON object and maps it directly into memory via unsafe.Pointer.
 func ParseObject(raw []byte, reg *Registry, ptr unsafe.Pointer) error {
-	for i, j := 0, 1; i < len(raw); i, j = i+1, j+1 {
-		// Identify the start of the key (LUT check)
-		if (charTable[raw[i]] & charString) != 0 {
-			i++
-			start := i
-
-			// SIMD/AVX powered search for the closing quote
-			idx := bytes.IndexByte(raw[i:], '"')
-			if idx == -1 {
-				return ErrTypeMismatch
-			}
-			i += idx
-			keySlice := raw[start:i]
-			i++ // Skip closing quote
-
-			idx = bytes.IndexByte(raw[i:], ':')
-			if idx == -1 {
-				return ErrTypeMismatch
-			}
-			i += idx + 1 // Jump right after the colon
-
-			// LUT OPTIMIZATION 1: Skip whitespaces
-			for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
-				i++
-			}
-
-			// Global null check (SWAR)
-			if i+3 < len(raw) {
-				if *(*uint32)(unsafe.Pointer(&raw[i])) == nullMagic {
-					i += 3
-					continue
-				}
-			}
-
-			hash := intHache.Sum(keySlice)
-			if info, ok := reg.Map[hash]; ok {
-				switch info.Type {
-				case TypeString:
-					// LUT check: Verify the value is actually a string
-					if (charTable[raw[i]] & charString) == 0 {
-						return ErrTypeMismatch
-					}
-					i++
-					strVal, newIdx, err := parseStringIntelligent(raw, i)
-					if err != nil {
-						return err
-					}
-					*(*string)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = strVal
-					i = newIdx
-
-				case TypeInt:
-					valStart := i
-					// LUT OPTIMIZATION 2: Find the end of the number.
-					// Loop continues until a structural character or whitespace is found.
-					for i < len(raw) && (charTable[raw[i]]&maskValueEnd) == 0 {
-						i++
-					}
-					*(*int)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = fastParseInt(raw[valStart:i])
-					i--
-
-				case TypeFloat:
-					valStart := i
-					// LUT OPTIMIZATION 3: Find the end of the float.
-					for i < len(raw) && (charTable[raw[i]]&maskValueEnd) == 0 {
-						i++
-					}
-					*(*float64)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = fastParseFloat(raw[valStart:i])
-					i--
-
-				case TypeBool:
-					// SWAR optimization for boolean parsing directly into memory
-					if i+3 < len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == trueMagic {
-						*(*bool)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = true
-						i += 3
-					} else if raw[i] == 'f' && i+4 < len(raw) && *(*uint32)(unsafe.Pointer(&raw[i+1])) == alseMagic {
-						*(*bool)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = false
-						i += 4
-					} else {
-						return ErrTypeMismatch
-					}
-
-				case TypeStruct:
-					if raw[i] != '{' {
-						return ErrTypeMismatch
-					}
-					end := findBounds(raw, i, '{', '}')
-					if end > j {
-						subPtr := unsafe.Pointer(uintptr(ptr) + info.Offset)
-						_ = ParseObject(raw[i:end+1], info.Sub, subPtr)
-					}
-					i = end
-
-				case TypeStringSlice:
-					if raw[i] != '[' {
-						return ErrTypeMismatch
-					}
-					end := findBounds(raw, i, '[', ']')
-					if end > j {
-						// Read existing slice to reuse its capacity (Zero-Alloc approach)
-						existingSlice := *(*[]string)(unsafe.Pointer(uintptr(ptr) + info.Offset))
-						slice, _ := parseStringSliceSafe(raw[i:end+1], existingSlice)
-						*(*[]string)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = slice
-					}
-					i = end
-
-				case TypeIntSlice:
-					if raw[i] != '[' {
-						return ErrTypeMismatch
-					}
-					end := findBounds(raw, i, '[', ']')
-					if end > j {
-						// Read existing slice to reuse its capacity (Zero-Alloc approach)
-						existingSlice := *(*[]int)(unsafe.Pointer(uintptr(ptr) + info.Offset))
-						*(*[]int)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = parseIntSlice(raw[i:end+1], existingSlice)
-					}
-					i = end
-				}
-			} else {
-				// If field is not in registry, skip the entire value
-				i = skipValue(raw, i)
-			}
-		}
+	n, err := parseObjectAt(raw, reg, ptr)
+	if err != nil {
+		return err
+	}
+	for n < len(raw) && (charTable[raw[n]]&charSpace) != 0 {
+		n++
+	}
+	if n != len(raw) {
+		return fmt.Errorf("%w: trailing data after object at %d", ErrTypeMismatch, n)
 	}
 	return nil
 }
 
-func skipValue(raw []byte, i int) int {
-	if i >= len(raw) {
-		return i
+func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
+	if len(raw) == 0 {
+		return 0, ErrUnexpectedEOF
 	}
-	c := raw[i]
 
-	if c == '"' {
+	i := 0
+	for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+		i++
+	}
+	if i >= len(raw) || (charTable[raw[i]]&charOpenBrace) == 0 {
+		return 0, fmt.Errorf("%w: expected object start", ErrTypeMismatch)
+	}
+	i++
+
+	for {
+		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+			i++
+		}
+		if i >= len(raw) {
+			return 0, ErrUnexpectedEOF
+		}
+		if (charTable[raw[i]] & charCloseBrace) != 0 {
+			return i + 1, nil
+		}
+		if (charTable[raw[i]] & charString) == 0 {
+			return 0, fmt.Errorf("%w: expected key quote at %d (%q)", ErrTypeMismatch, i, raw[i])
+		}
+
+		i++
+		written, consumed := parseShortStringASM2(raw[i:])
+		if consumed < 0 {
+			return 0, ErrUnexpectedEOF
+		}
+		decoded := raw[i : i+int(written)]
+		keySlice := unsafe.String(unsafe.SliceData(decoded), len(decoded))
+		i += int(consumed)
+
+		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+			i++
+		}
+		if i >= len(raw) || (charTable[raw[i]]&charColon) == 0 {
+			return 0, ErrTypeMismatch
+		}
+		i++
+
+		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+			i++
+		}
+		if i >= len(raw) {
+			return 0, ErrUnexpectedEOF
+		}
+
+		var info FieldInfo
+		var ok bool
+		if len(reg.Fields) <= 16 {
+			for idx := 0; idx < len(reg.Fields); idx++ {
+				if reg.Fields[idx].Key == keySlice {
+					info = reg.Fields[idx]
+					ok = true
+					break
+				}
+			}
+		} else {
+			info, ok = reg.NameMap[keySlice]
+		}
+		if ok {
+			switch info.Type {
+			case TypeString:
+				if (charTable[raw[i]] & charString) == 0 {
+					return 0, fmt.Errorf("%w: expected string value", ErrTypeMismatch)
+				}
+				i++
+				written, consumed := parseShortStringASM2(raw[i:])
+				if consumed < 0 {
+					return 0, ErrUnexpectedEOF
+				}
+				decoded := raw[i : i+int(written)]
+				strVal := unsafe.String(unsafe.SliceData(decoded), len(decoded))
+				*(*string)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = strVal
+				i += int(consumed)
+
+			case TypeInt:
+				valStart := i
+				for i < len(raw) && (charTable[raw[i]]&maskValueEnd) == 0 {
+					i++
+				}
+				*(*int)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = fastParseInt(raw[valStart:i])
+
+			case TypeFloat:
+				valStart := i
+				for i < len(raw) && (charTable[raw[i]]&maskValueEnd) == 0 {
+					i++
+				}
+				*(*float64)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = fastParseFloat(raw[valStart:i])
+
+			case TypeBool:
+				if i+3 < len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == trueMagic {
+					*(*bool)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = true
+					i += 4
+				} else if i+4 < len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == falsePrefixMagic && (charTable[raw[i+4]]&charLetterE) != 0 {
+					*(*bool)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = false
+					i += 5
+				} else {
+					return 0, fmt.Errorf("%w: expected boolean value", ErrTypeMismatch)
+				}
+
+			case TypeStruct:
+				if (charTable[raw[i]] & charOpenBrace) == 0 {
+					return 0, fmt.Errorf("%w: expected object value", ErrTypeMismatch)
+				}
+				subPtr := unsafe.Pointer(uintptr(ptr) + info.Offset)
+				consumed, err := parseObjectAt(raw[i:], info.Sub, subPtr)
+				if err != nil {
+					return 0, err
+				}
+				i += consumed
+
+			case TypeStringSlice:
+				if (charTable[raw[i]] & charOpenBracket) == 0 {
+					return 0, fmt.Errorf("%w: expected string slice value", ErrTypeMismatch)
+				}
+				existingSlice := *(*[]string)(unsafe.Pointer(uintptr(ptr) + info.Offset))
+				slice, consumed, err := parseStringSliceAt(raw, i, existingSlice)
+				if err != nil {
+					return 0, err
+				}
+				*(*[]string)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = slice
+				i += consumed
+
+			case TypeIntSlice:
+				if (charTable[raw[i]] & charOpenBracket) == 0 {
+					return 0, fmt.Errorf("%w: expected int slice value", ErrTypeMismatch)
+				}
+				existingSlice := *(*[]int)(unsafe.Pointer(uintptr(ptr) + info.Offset))
+				slice, consumed, err := parseIntSliceAt(raw, i, existingSlice)
+				if err != nil {
+					return 0, err
+				}
+				*(*[]int)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = slice
+				i += consumed
+			}
+		} else {
+			i = skipValue(raw, i)
+		}
+
+		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+			i++
+		}
+		if i < len(raw) && (charTable[raw[i]]&(charComma|charCloseBrace)) == 0 {
+			i = skipValue(raw, i)
+			for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+				i++
+			}
+		}
+		if i >= len(raw) {
+			return 0, ErrUnexpectedEOF
+		}
+		switch raw[i] {
+		case ',':
+			i++
+		case '}':
+			return i + 1, nil
+		default:
+			return 0, fmt.Errorf("%w: expected delimiter after key at %d (%q)", ErrTypeMismatch, i, raw[i])
+		}
+	}
+}
+
+func parseStringSliceAt(raw []byte, start int, dst []string) ([]string, int, error) {
+	if start < 0 || start >= len(raw) || (charTable[raw[start]]&charOpenBracket) == 0 {
+		return nil, 0, ErrTypeMismatch
+	}
+
+	i := start + 1
+	initialized := false
+
+	for {
+		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+			i++
+		}
+		if i >= len(raw) {
+			return nil, 0, ErrUnexpectedEOF
+		}
+		if (charTable[raw[i]] & charCloseBracket) != 0 {
+			if !initialized {
+				if dst == nil {
+					return nil, i - start + 1, nil
+				}
+				return dst[:0], i - start + 1, nil
+			}
+			return dst, i - start + 1, nil
+		}
+		if (charTable[raw[i]] & charString) == 0 {
+			return nil, 0, ErrTypeMismatch
+		}
+		i++
+
+		written, consumed := parseShortStringASM2(raw[i:])
+		if consumed < 0 {
+			return nil, 0, ErrUnexpectedEOF
+		}
+
+		if !initialized {
+			if dst == nil {
+				dst = make([]string, 0, 4)
+			} else {
+				dst = dst[:0]
+			}
+			initialized = true
+		}
+
+		decoded := raw[i : i+int(written)]
+		strVal := unsafe.String(unsafe.SliceData(decoded), len(decoded))
+		dst = append(dst, strVal)
+		i += int(consumed)
+
+		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+			i++
+		}
+		if i >= len(raw) {
+			return nil, 0, ErrUnexpectedEOF
+		}
+		if (charTable[raw[i]] & charComma) != 0 {
+			i++
+			continue
+		}
+		if (charTable[raw[i]] & charCloseBracket) != 0 {
+			return dst, i - start + 1, nil
+		}
+		return nil, 0, ErrTypeMismatch
+	}
+}
+
+func parseIntSliceAt(raw []byte, start int, dst []int) ([]int, int, error) {
+	if start < 0 || start >= len(raw) || (charTable[raw[start]]&charOpenBracket) == 0 {
+		return nil, 0, ErrTypeMismatch
+	}
+
+	i := start + 1
+	initialized := false
+
+	for {
+		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+			i++
+		}
+		if i >= len(raw) {
+			return nil, 0, ErrUnexpectedEOF
+		}
+		if (charTable[raw[i]] & charCloseBracket) != 0 {
+			if !initialized {
+				if dst == nil {
+					return nil, i - start + 1, nil
+				}
+				return dst[:0], i - start + 1, nil
+			}
+			return dst, i - start + 1, nil
+		}
+		if (charTable[raw[i]] & charDigit) == 0 {
+			return nil, 0, ErrTypeMismatch
+		}
+
+		startNum := i
+		for i < len(raw) && (charTable[raw[i]]&charDigit) != 0 {
+			i++
+		}
+
+		if !initialized {
+			if dst == nil {
+				dst = make([]int, 0, 4)
+			} else {
+				dst = dst[:0]
+			}
+			initialized = true
+		}
+
+		dst = append(dst, fastParseInt(raw[startNum:i]))
+
+		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+			i++
+		}
+		if i >= len(raw) {
+			return nil, 0, ErrUnexpectedEOF
+		}
+		if (charTable[raw[i]] & charComma) != 0 {
+			i++
+			continue
+		}
+		if (charTable[raw[i]] & charCloseBracket) != 0 {
+			return dst, i - start + 1, nil
+		}
+		return nil, 0, ErrTypeMismatch
+	}
+}
+
+func skipValue(raw []byte, i int) int {
+	if i < 0 || i > len(raw) {
+		return len(raw) // Защита от кривого индекса
+	}
+
+	switch raw[i] {
+	case '"':
 		i++
 		for i < len(raw) {
-			if raw[i] == '"' {
-				return i
-			}
-			if raw[i] == '\\' {
+			if (charTable[raw[i]] & charEscape) != 0 {
 				i += 2
 				continue
 			}
+			if (charTable[raw[i]] & charString) != 0 {
+				return i + 1
+			}
 			i++
 		}
-	} else if c == '{' {
-		return findBounds(raw, i, '{', '}')
-	} else if c == '[' {
-		return findBounds(raw, i, '[', ']')
-	} else {
-		for i < len(raw) && raw[i] != ',' && raw[i] != '}' && raw[i] != ']' && raw[i] != ' ' && raw[i] != '\n' {
+		return len(raw)
+	case '{':
+		return skipComposite(raw, i, '{', '}')
+	case '[':
+		return skipComposite(raw, i, '[', ']')
+	default:
+		for i < len(raw) && (charTable[raw[i]]&maskValueEnd) == 0 {
 			i++
 		}
-		return i - 1
+		return i
 	}
-	return i
+}
+
+func skipComposite(raw []byte, start int, open, close byte) int {
+	depth := 1
+	for i := start + 1; i < len(raw); i++ {
+		c := raw[i]
+		switch c {
+		case '"':
+			i++
+			for i < len(raw) {
+				if (charTable[raw[i]] & charEscape) != 0 {
+					i += 2
+					continue
+				}
+				if (charTable[raw[i]] & charString) != 0 {
+					break
+				}
+				i++
+			}
+		case open:
+			depth++
+		case close:
+			depth--
+			if depth == 0 {
+				return i + 1
+			}
+		}
+	}
+	return len(raw)
 }
 
 // UnmarshalSlice processes a raw JSON array sequentially, invoking ParseObject for each element.
-func UnmarshalSlice(raw []byte, reg *Registry, slicePtr unsafe.Pointer) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("corrupted json: %v", r)
+func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
+	if len(raw) == 0 {
+		return dst[:0], nil
+	}
+
+	buf := reg.chunkPool.Get().([]Chunk)
+	need := estimateChunkCapacity(raw)
+	if cap(buf) < need {
+		buf = make([]Chunk, need)
+	}
+
+	count, _ := findObjectBoundariesASM(raw, buf[:len(buf)])
+	if count < 0 || count > len(buf) {
+		reg.chunkPool.Put(buf[:cap(buf)])
+		return nil, fmt.Errorf("asm returned invalid count: %d", count)
+	}
+
+	// Проверяем, хватает ли места в переданном слайсе
+	if len(dst) < count {
+		reg.chunkPool.Put(buf[:cap(buf)])
+		return nil, fmt.Errorf("insufficient capacity: need %d, have %d", count, len(dst))
+	}
+
+	// Работаем с обрезанным слайсом нужного размера
+	target := dst[:count]
+	if count == 0 {
+		reg.chunkPool.Put(buf[:cap(buf)])
+		return target, nil
+	}
+	structSize := unsafe.Sizeof(*new(T))
+	basePtr := unsafe.Pointer(&target[0])
+
+	var err error
+	for i := 0; i < count; i++ {
+		chunk := buf[i]
+		// Проверка: границы должны быть логичными
+		if chunk.Start < 0 || chunk.End > len(raw) || chunk.Start >= chunk.End {
+			err = fmt.Errorf("invalid json boundaries at chunk %d", i)
+			break
 		}
-	}()
 
-	var inObject bool
-	var objStart int
-	var limit = len(raw)
+		itemPtr := unsafe.Pointer(uintptr(basePtr) + (uintptr(i) * structSize))
 
-	for j, k := 0, 1; j < limit; j, k = j+1, k+1 {
-		c := raw[j]
-		if c == '{' && !inObject {
-			inObject = true
-			objStart = j
-		} else if c == '}' && inObject {
-			// Validate end of object boundary
-			if j == len(raw)-1 || raw[k] == ',' || raw[k] == '\n' || raw[k] == ' ' || raw[k] == ']' {
-				inObject = false
-
-				// Create the object directly within the pre-allocated slice
-				err = ParseObject(raw[objStart:k], reg, (unsafe.Pointer)(unsafe.Pointer(uintptr(slicePtr)+uintptr(0))))
-				if err != nil {
-					return
-				}
-			}
+		if err = ParseObject(raw[chunk.Start:chunk.End], reg, itemPtr); err != nil {
+			break
 		}
 	}
-	return
+
+	reg.chunkPool.Put(buf[:cap(buf)])
+	if err != nil {
+		return nil, err
+	}
+	return target, nil
 }
 
-// parseStringIntelligent extracts a string from the JSON buffer.
-// It achieves zero-allocation by pointing directly to the raw buffer if no escape characters are present.
-func parseStringIntelligent(raw []byte, start int) (string, int, error) {
-	hasEscape := false
-	i := start
-
-	// Phase 1: Scan for the closing quote and detect escape characters
-	for i < len(raw) {
-		if raw[i] == '"' {
-			// Ensure it's not an escaped quote \"
-			if raw[i-1] != '\\' {
-				break
-			}
-		}
-		if raw[i] == '\\' {
-			hasEscape = true
-		}
-		i++
+func estimateChunkCapacity(raw []byte) int {
+	if len(raw) == 0 {
+		return 0
 	}
-
-	if i >= len(raw) {
-		return "", i, fmt.Errorf("unexpected end of JSON input")
+	est := len(raw)/128 + 1024
+	if est < 1024 {
+		est = 1024
 	}
+	return est
+}
 
-	strLen := i - start
-
-	// Phase 2: Fast Path (Zero Allocation)
-	// If the string is clean, point directly to the source buffer.
-	if !hasEscape {
-		if strLen == 0 {
-			return "", i + 1, nil
-		}
-		// Pure zero-copy string instantiation
-		return unsafe.String(&raw[start], strLen), i + 1, nil
-	}
-
-	// Phase 3: Slow Path (In-Place Allocation-Free Unescaping)
-	// We modify the original read-only JSON payload to avoid heap allocations.
-	result := unescapeStringInPlace(raw[start:i])
-
-	// Return the result and the NEW INDEX (immediately after the closing quote)
-	return result, i + 1, nil
+func allocBytes(n int) []byte {
+	return make([]byte, n)
 }
 
 func fastParseInt(buf []byte) int {
 	res := 0
 	for _, b := range buf {
-		if b >= '0' && b <= '9' {
+		if (charTable[b] & charDigit) != 0 {
 			res = res*10 + int(b-'0')
 		}
 	}
@@ -483,11 +805,11 @@ func fastParseFloat(buf []byte) float64 {
 	res, fraction, div := 0.0, 0.0, 1.0
 	inFrac := false
 	for _, b := range buf {
-		if b == '.' {
+		if (charTable[b] & charDot) != 0 {
 			inFrac = true
 			continue
 		}
-		if b >= '0' && b <= '9' {
+		if (charTable[b] & charDigit) != 0 {
 			if inFrac {
 				fraction = fraction*10 + float64(b-'0')
 				div *= 10
@@ -504,17 +826,20 @@ func parseStringSliceSafe(buf []byte, dst []string) ([]string, error) {
 	if len(buf) <= 2 {
 		return nil, nil
 	}
-	dst = dst[:0] // Reset length, retain capacity
+	if dst == nil {
+		dst = make([]string, 0, 4)
+	}
+	dst = dst[:0]
 
 	for i := 0; i < len(buf); i++ {
-		if buf[i] == '"' {
+		if (charTable[buf[i]] & charString) != 0 {
 			i++
-			strVal, newIdx, err := parseStringIntelligent(buf, i)
+			strVal, read, err := parseJSONString(buf, i)
 			if err != nil {
 				return nil, err
 			}
 			dst = append(dst, strVal)
-			i = newIdx
+			i += read
 		}
 	}
 	return dst, nil
@@ -525,12 +850,15 @@ func parseIntSlice(buf []byte, dst []int) []int {
 	if len(buf) <= 2 {
 		return nil
 	}
-	dst = dst[:0] // Reset length, retain capacity
+	if dst == nil {
+		dst = make([]int, 0, 4)
+	}
+	dst = dst[:0]
 
 	for i := 0; i < len(buf); i++ {
-		if buf[i] >= '0' && buf[i] <= '9' {
+		if (charTable[buf[i]] & charDigit) != 0 {
 			start := i
-			for i < len(buf) && buf[i] >= '0' && buf[i] <= '9' {
+			for i < len(buf) && (charTable[buf[i]]&charDigit) != 0 {
 				i++
 			}
 			dst = append(dst, fastParseInt(buf[start:i]))
@@ -541,147 +869,204 @@ func parseIntSlice(buf []byte, dst []int) []int {
 
 func findBounds(raw []byte, start int, open, close byte) int {
 	depth := 1
+	openBit := charTable[open]
+	closeBit := charTable[close]
 	for i := start + 1; i < len(raw); i++ {
-		if raw[i] == '"' {
+		c := raw[i]
+		if (charTable[c] & charString) != 0 {
 			i++
-			for i < len(raw) && raw[i] != '"' {
-				if raw[i] == '\\' {
+			for i < len(raw) && (charTable[raw[i]]&charString) == 0 {
+				if (charTable[raw[i]] & charEscape) != 0 {
 					i++
 				}
 				i++
 			}
-			continue
-		}
-		if raw[i] == open {
+		} else if (charTable[c] & openBit) != 0 {
 			depth++
-		} else if raw[i] == close {
+		} else if (charTable[c] & closeBit) != 0 {
 			depth--
 			if depth == 0 {
 				return i
 			}
 		}
 	}
-	return len(raw) - 1
+	return len(raw) - 1 // Возвращаем край, если структура не закрыта
+}
+
+func countArrayItems(buf []byte) int {
+	if len(buf) <= 2 {
+		return 0
+	}
+
+	inString := false
+	escaped := false
+	depth := 0
+	count := 0
+	hasValue := false
+
+	for i := 0; i < len(buf); i++ {
+		c := buf[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if (charTable[c] & charEscape) != 0 {
+				escaped = true
+				continue
+			}
+			if (charTable[c] & charString) != 0 {
+				inString = false
+			}
+			continue
+		}
+
+		switch c {
+		case '"':
+			inString = true
+			hasValue = true
+		case '[':
+			depth++
+		case ']':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 1 {
+				count++
+				hasValue = true
+			}
+		case ' ', '\n', '\t', '\r':
+		default:
+			if depth == 1 {
+				hasValue = true
+			}
+		}
+	}
+
+	if !hasValue {
+		return 0
+	}
+	return count + 1
 }
 
 // ========================== PARALLELISM ==========================
 
-// findObjectBoundaries rapidly locates the boundaries of all top-level objects.
-// Returns a slice of slices (zero-copy, referencing the original raw buffer).
-func findObjectBoundaries(data []byte) [][]byte {
-	var chunks [][]byte
-	depth := 0
-	inString := false
-	start := -1
+func findObjectBoundaries(data []byte, buf []Chunk) ([]Chunk, int) {
+	// Оценка: в JSON-массиве объектов не может быть больше, чем '{'
 
-	for i := 0; i < len(data); i++ {
-		c := data[i]
-
-		// String handling to ignore structural characters inside quotes
-		if c == '"' && (i == 0 || data[i-1] != '\\') {
-			inString = !inString
-			continue
-		}
-		if inString {
-			continue
-		}
-
-		if c == '{' {
-			if depth == 0 {
-				start = i
-			}
-			depth++
-		} else if c == '}' {
-			depth--
-			if depth == 0 && start != -1 {
-				// Found a complete object boundary, append the slice
-				chunks = append(chunks, data[start:i+1])
-				start = -1
-			}
-		}
+	count, maxSize := findObjectBoundariesASM(data, buf)
+	if count > len(buf) {
+		count = len(buf)
 	}
-	return chunks
+
+	return buf[:count], maxSize
 }
 
-// UnmarshalArrayParallel is the main public generic API for high-performance parallel array parsing.
-// It automatically determines the array size, allocates the exact required memory, and distributes parsing across CPU cores.
-func UnmarshalArrayParallel[T any](raw []byte, reg *Registry) ([]T, error) {
-	// 1. Rapidly scan boundaries. We now know the EXACT number of elements.
-	chunks := findObjectBoundaries(raw)
-	if len(chunks) == 0 {
+func UnmarshalArrayParallel[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
+	if len(raw) == 0 {
 		return nil, nil
 	}
 
-	// 2. Pre-allocate the strongly-typed slice with the exact required capacity
-	result := make([]T, len(chunks))
+	buf := reg.chunkPool.Get().([]Chunk)
+	need := estimateChunkCapacity(raw)
+	if cap(buf) < need {
+		buf = make([]Chunk, need)
+	}
 
-	// 3. Pass the pointer to the internal worker pool
-	err := parseArrayParallelChunks(
-		chunks,
-		reg,
-		unsafe.Pointer(&result[0]),
-		unsafe.Sizeof(*new(T)),
-	)
+	count, maxDepth := findObjectBoundariesASM(raw[:len(raw)], buf[:len(buf)])
 
-	return result, err
+	if count < 0 || count > len(buf) {
+		reg.chunkPool.Put(buf[:cap(buf)])
+		return nil, fmt.Errorf("asm returned invalid count: %d", count)
+	}
+
+	// ПРОВЕРКА 1: JSON валидность
+	if maxDepth != 0 {
+		reg.chunkPool.Put(buf[:cap(buf)])
+		return nil, errors.New("malformed json: unbalanced braces or brackets")
+	}
+
+	// ПРОВЕРКА 3: Емкость dst
+	if count > len(dst) {
+		reg.chunkPool.Put(buf[:cap(buf)])
+		return nil, fmt.Errorf("dst capacity insufficient: need %d, have %d", count, len(dst))
+	}
+	target := dst[:count]
+
+	if len(target) == 0 {
+		reg.chunkPool.Put(buf[:cap(buf)])
+		return target, nil
+	}
+
+	if err := parseArrayParallelChunks(raw, buf[:count], reg, unsafe.Pointer(&target[0]), unsafe.Sizeof(*new(T))); err != nil {
+		reg.chunkPool.Put(buf[:cap(buf)])
+		return nil, err
+	}
+	reg.chunkPool.Put(buf[:cap(buf)])
+	return target, nil
 }
 
-// ParseArrayParallel parses a JSON array of objects into a pre-allocated memory space.
-// Kept for backward compatibility. Prefer UnmarshalArrayParallel[T any].
-func ParseArrayParallel(raw []byte, reg *Registry, basePtr unsafe.Pointer, structSize uintptr) error {
-	chunks := findObjectBoundaries(raw)
+func parseArrayParallelChunks(raw []byte, chunks []Chunk, reg *Registry, basePtr unsafe.Pointer, structSize uintptr) error {
 	if len(chunks) == 0 {
 		return nil
 	}
-	return parseArrayParallelChunks(chunks, reg, basePtr, structSize)
-}
 
-// parseArrayParallelChunks is the internal worker pool executor.
-func parseArrayParallelChunks(chunks [][]byte, reg *Registry, basePtr unsafe.Pointer, structSize uintptr) error {
-	numWorkers := runtime.GOMAXPROCS(0)
-	if numWorkers > len(chunks) {
-		numWorkers = len(chunks)
+	workers := runtime.GOMAXPROCS(0)
+	const minChunksPerWorker = 128
+	maxUsefulWorkers := (len(chunks) + minChunksPerWorker - 1) / minChunksPerWorker
+	if workers > maxUsefulWorkers {
+		workers = maxUsefulWorkers
+	}
+	if workers <= 1 {
+		for idx := 0; idx < len(chunks); idx++ {
+			chunk := chunks[idx]
+			itemPtr := unsafe.Pointer(uintptr(basePtr) + (uintptr(idx) * structSize))
+			if err := ParseObject(raw[chunk.Start:chunk.End], reg, itemPtr); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 
+	oncePool.Do(initWorkerPool)
+
+	batchSize := (len(chunks) + workers - 1) / workers
+	errCh := make(chan error, 1)
 	var wg sync.WaitGroup
-	errChan := make(chan error, numWorkers)
-	batchSize := len(chunks) / numWorkers
 
-	// Launch Worker Pool via Batching
-	for w := 0; w < numWorkers; w++ {
-		wg.Add(1)
-
-		// Calculate index range for the specific worker
-		startIdx := w * batchSize
-		endIdx := startIdx + batchSize
-		if w == numWorkers-1 {
-			endIdx = len(chunks) // The last worker processes any remaining items
+	for w := 0; w < workers; w++ {
+		start := w * batchSize
+		if start >= len(chunks) {
+			break
+		}
+		end := start + batchSize
+		if end > len(chunks) {
+			end = len(chunks)
 		}
 
-		go func(start, end int) {
-			defer wg.Done()
-			for idx := start; idx < end; idx++ {
-				chunk := chunks[idx]
-				itemPtr := unsafe.Pointer(uintptr(basePtr) + (uintptr(idx) * structSize))
-
-				err := ParseObject(chunk, reg, itemPtr)
-				if err != nil {
-					errChan <- err
-					return
-				}
-			}
-		}(startIdx, endIdx)
+		wg.Add(1)
+		globalTaskCh <- workerTask{
+			raw:        raw,
+			chunks:     chunks,
+			reg:        reg,
+			basePtr:    basePtr,
+			structSize: structSize,
+			start:      start,
+			end:        end,
+			errCh:      errCh,
+			wg:         &wg,
+		}
 	}
 
 	wg.Wait()
-	close(errChan)
 
-	// Check for any errors caught by the workers
-	if err, ok := <-errChan; ok {
+	select {
+	case err := <-errCh:
 		return err
+	default:
+		return nil
 	}
-
-	return nil
 }
 
 // unescapeStringInPlace modifies the provided raw slice in-place, removing escape characters.
@@ -691,7 +1076,7 @@ func unescapeStringInPlace(raw []byte) string {
 	// We write to the exact same array from which we read!
 	writeIdx := 0
 	for readIdx := 0; readIdx < len(raw); readIdx++ {
-		if raw[readIdx] == '\\' && readIdx+1 < len(raw) {
+		if (charTable[raw[readIdx]]&charEscape) != 0 && readIdx+1 < len(raw) {
 			readIdx++ // Skip the backslash
 			switch raw[readIdx] {
 			case 'n':
@@ -720,4 +1105,48 @@ func unescapeStringInPlace(raw []byte) string {
 	}
 	// Zero-copy return of the modified underlying buffer
 	return unsafe.String(unsafe.SliceData(raw), writeIdx)
+}
+
+type workerTask struct {
+	raw        []byte
+	chunks     []Chunk
+	reg        *Registry
+	basePtr    unsafe.Pointer
+	structSize uintptr
+	start      int
+	end        int
+	errCh      chan error
+	wg         *sync.WaitGroup
+}
+
+var (
+	globalTaskCh chan workerTask
+	oncePool     sync.Once
+)
+
+func initWorkerPool() {
+	numWorkers := runtime.GOMAXPROCS(0)
+	globalTaskCh = make(chan workerTask, numWorkers*8)
+	for i := 0; i < numWorkers; i++ {
+		go func() {
+			for task := range globalTaskCh {
+				executeTask(task)
+			}
+		}()
+	}
+}
+
+func executeTask(task workerTask) {
+	defer task.wg.Done()
+	for idx := task.start; idx < task.end; idx++ {
+		chunk := task.chunks[idx]
+		itemPtr := unsafe.Pointer(uintptr(task.basePtr) + (uintptr(idx) * task.structSize))
+		if err := ParseObject(task.raw[chunk.Start:chunk.End], task.reg, itemPtr); err != nil {
+			select {
+			case task.errCh <- err:
+			default:
+			}
+			return
+		}
+	}
 }
