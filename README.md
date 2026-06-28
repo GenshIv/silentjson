@@ -66,8 +66,8 @@ xychart-beta
     line "Standard" [106, 106, 107, 112]
 ```
 > **Legend:**
-> 🟢 **Top Line:** `SilentJSON` (maintaining stable ~1500 MB/s)
-> 🔵 **Middle Line:** `Sonic` (~450 MB/s)
+> 🔵 **Top Line:** `SilentJSON` (maintaining stable ~1500 MB/s)
+> 🟢 **Middle Line:** `Sonic` (~450 MB/s)
 > 🔴 **Bottom Line:** `Standard` (~110 MB/s)
 
 ### 2. Serialization (Generation / Marshal)
@@ -100,8 +100,8 @@ xychart-beta
     line "Standard" [578, 592, 604, 607]
 ```
 > **Legend:**
-> 🟢 **Top Line:** `SilentJSON` (maintaining stable ~1400 MB/s)
-> 🔵 **Middle Line:** `Sonic` (816 - 1030 MB/s)
+> 🔵 **Top Line:** `SilentJSON` (maintaining stable ~1400 MB/s)
+> 🟢 **Middle Line:** `Sonic` (816 - 1030 MB/s)
 > 🔴 **Bottom Line:** `Standard` (~600 MB/s)
 
 ### Benchmark Methodology & Fairness
