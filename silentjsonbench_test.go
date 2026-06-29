@@ -554,6 +554,30 @@ func BenchmarkStreamComparison(b *testing.B) {
 		}
 	})
 
+	b.Run("SilentJSON_Stream_NextRawBlock", func(b *testing.B) {
+		reg := BuildRegistry(reflect.TypeOf(Employee{}))
+		b.SetBytes(int64(len(hugeJSONData)))
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			r := bytes.NewReader(hugeJSONData)
+			dec := NewStreamDecoder[Employee](r, reg)
+			for {
+				_, count, err := dec.NextRawBlock(1000, 0)
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					b.Fatal(err)
+				}
+				if count == 0 {
+					break
+				}
+			}
+		}
+	})
+
 	b.Run("SilentJSON_Stream_NextChan", func(b *testing.B) {
 		reg := BuildRegistry(reflect.TypeOf(Employee{}))
 		b.SetBytes(int64(len(hugeJSONData)))
