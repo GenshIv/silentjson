@@ -1384,3 +1384,402 @@ done:
 
 
 // func skipValueASM(raw []byte, start int) int
+
+// func findArrayElementsEarlyExitASM(data []byte, chunks []Chunk) (ret0 int, ret1 int)
+TEXT ·findArrayElementsEarlyExitASM(SB), NOSPLIT, $8-64
+    MOVQ data_base+0(FP), SI
+    MOVQ data_len+8(FP), BX
+    MOVQ chunks_base+24(FP), DI
+    MOVQ chunks_len+32(FP), DX
+
+    // Y10 = 0x0F0F0F0F... (Nibble mask)
+    MOVQ $0x0F0F0F0F0F0F0F0F, R14
+    MOVQ R14, X10
+    VPBROADCASTQ X10, Y10
+
+    // Y11 = struct_lo
+    XORQ R14, R14
+    MOVQ R14, X11
+    MOVQ $0x0000A004A0000000, R14
+    PINSRQ $1, R14, X11
+    VINSERTI128 $1, X11, Y11, Y11
+
+    // Y12 = struct_hi
+    MOVQ $0x8000200000040000, R14
+    MOVQ R14, X12
+    XORQ R14, R14
+    PINSRQ $1, R14, X12
+    VINSERTI128 $1, X12, Y12, Y12
+
+    // Y13 = 0
+    VPXOR Y13, Y13, Y13
+    
+    // Y7 = "
+    MOVQ $0x2222222222222222, R14
+    MOVQ R14, X7
+    VPBROADCASTQ X7, Y7
+
+    // Y8 = \
+    MOVQ $0x5c5c5c5c5c5c5c5c, R14
+    MOVQ R14, X8
+    VPBROADCASTQ X8, Y8
+
+    // X2 = all 1s
+    PCMPEQL X2, X2
+
+    XORQ CX, CX        // i
+    XORQ R8, R8        // totalCount
+    XORQ R12, R12      // totalDepth
+    XORQ R10, R10      // start
+    XORQ R11, R11      // inString
+    MOVQ $0, 0(SP)     // escape_carry
+
+    TESTQ SI, SI
+    JZ    fae_done
+    TESTQ DI, DI
+    JZ    fae_done
+
+fae_avx_loop:
+    MOVQ BX, R15
+    SUBQ CX, R15
+    CMPQ R15, $32
+    JL   fae_scalar_tail
+
+    VMOVDQU (SI)(CX*1), Y0
+    
+    // Struct mask (Y6)
+    VPAND Y10, Y0, Y1
+    VPSRLW $4, Y0, Y3
+    VPAND Y10, Y3, Y3
+    VPSHUFB Y1, Y11, Y4
+    VPSHUFB Y3, Y12, Y5
+    VPAND Y4, Y5, Y6
+    VPCMPEQB Y13, Y6, Y6
+    VPMOVMSKB Y6, R15
+    NOTL R15   // R15 = struct_mask32
+
+    // Quote mask (Y4)
+    VPCMPEQB Y7, Y0, Y4
+    VPMOVMSKB Y4, R14   // R14 = quote_mask32
+
+    // Backslash mask (Y5)
+    VPCMPEQB Y8, Y0, Y5
+    VPMOVMSKB Y5, R9    // R9 = bs_mask32
+
+    // Process escape carry from previous chunk
+    CMPQ 0(SP), $0
+    JEQ  fae_no_carry
+    BTRL $0, R15
+    BTRL $0, R14
+    MOVQ $0, 0(SP)
+fae_no_carry:
+
+    TESTL R9, R9
+    JNZ fae_slow_path
+
+    // --- FAST PATH (No backslashes) ---
+    MOVQ R14, X14
+    VPCLMULQDQ $0, X2, X14, X14
+    MOVQ X14, R14
+
+    // XOR in prev inString state
+    MOVQ R11, R13
+    NEGQ R13
+    XORQ R13, R14
+
+    // Compute next inString (MSB)
+    MOVQ R14, R11
+    SHRQ $31, R11
+    ANDQ $1, R11
+
+    // Mask out structural characters inside strings
+    NOTQ R14
+    ANDQ R14, R15
+
+    TESTL R15, R15
+    JZ fae_avx_advance
+
+fae_fast_mask_loop:
+    BSFL R15, R14
+    MOVQ CX, R9
+    ADDQ R14, R9
+    MOVB (SI)(R9*1), AL
+    
+    CMPB AL, $0x2C
+    JEQ  fae_fast_comma
+    CMPB AL, $0x7B
+    JEQ  fae_fast_brace_open
+    CMPB AL, $0x7D
+    JEQ  fae_fast_brace_close
+    CMPB AL, $0x5B
+    JEQ  fae_fast_brace_open
+    JMP  fae_fast_bracket_close
+
+fae_fast_comma:
+    TESTQ R12, R12
+    JZ    fae_fast_element_end
+    JMP   fae_fast_next_bit
+
+fae_fast_brace_open:
+    INCQ R12
+    JMP   fae_fast_next_bit
+
+fae_fast_brace_close:
+    DECQ R12
+    JMP   fae_fast_next_bit
+
+fae_fast_bracket_close:
+    TESTQ R12, R12
+    JZ    fae_fast_array_end
+    DECQ R12
+    JMP   fae_fast_next_bit
+
+fae_fast_element_end:
+    CMPQ R8, DX
+    JGE  fae_done_early
+    MOVQ R8, R13
+    SHLQ $4, R13
+    MOVQ R10, (DI)(R13*1)
+    MOVQ R9, 8(DI)(R13*1)
+    INCQ R8
+    MOVQ R9, R10
+    INCQ R10
+    CMPQ R8, DX
+    JGE  fae_done_early
+    JMP  fae_fast_next_bit
+
+fae_fast_array_end:
+    CMPQ R8, DX
+    JGE  fae_done_early
+    MOVQ R8, R13
+    SHLQ $4, R13
+    MOVQ R10, (DI)(R13*1)
+    MOVQ R9, 8(DI)(R13*1)
+    INCQ R8
+    JMP  fae_done_early
+
+fae_fast_next_bit:
+    BTRL R14, R15
+    TESTL R15, R15
+    JNZ  fae_fast_mask_loop
+    JMP  fae_avx_advance
+
+fae_slow_path:
+    // --- SLOW PATH (Has backslashes) ---
+    // Merge all masks so the old state machine can process them
+    ORL R14, R15
+    ORL R9, R15
+    
+    TESTL R15, R15
+    JZ fae_avx_advance
+
+fae_mask_loop:
+    BSFL R15, R14
+    MOVQ CX, R9
+    ADDQ R14, R9
+    MOVB (SI)(R9*1), AL
+
+    TESTQ R11, R11
+    JNZ   fae_inside_string
+
+    CMPB AL, $0x22
+    JEQ  fae_quote_found
+    CMPB AL, $0x7B
+    JEQ  fae_brace_open
+    CMPB AL, $0x7D
+    JEQ  fae_brace_close
+    CMPB AL, $0x5B
+    JEQ  fae_brace_open // same action as {
+    CMPB AL, $0x5D
+    JEQ  fae_bracket_close // check depth!
+    CMPB AL, $0x2C
+    JEQ  fae_comma_found
+    JMP  fae_next_bit
+
+fae_inside_string:
+    CMPB AL, $0x22
+    JEQ  fae_quote_found
+    CMPB AL, $0x5C
+    JEQ  fae_backslash
+    JMP  fae_next_bit
+
+fae_quote_found:
+    XORQ $1, R11
+    JMP  fae_next_bit
+
+fae_backslash:
+    CMPL R14, $31
+    JEQ  fae_escape_carry
+    MOVL R14, AX
+    INCL AX
+    BTRL AX, R15
+    JMP  fae_next_bit
+fae_escape_carry:
+    MOVQ $1, 0(SP)
+    JMP  fae_next_bit
+
+fae_brace_open:
+    INCQ R12
+    JMP  fae_next_bit
+
+fae_brace_close:
+    DECQ R12
+    JMP  fae_next_bit
+
+fae_bracket_close:
+    TESTQ R12, R12
+    JZ    fae_array_end
+    DECQ R12
+    JMP   fae_next_bit
+
+fae_comma_found:
+    TESTQ R12, R12
+    JZ    fae_element_end
+    JMP   fae_next_bit
+
+fae_element_end:
+    CMPQ R8, DX
+    JGE  fae_done_early
+
+    MOVQ R8, R13
+    SHLQ $4, R13
+    
+    // Chunk.Start = R10
+    MOVQ R10, (DI)(R13*1)
+    
+    // Chunk.End = R9 (index of comma or bracket)
+    MOVQ R9, 8(DI)(R13*1)
+    
+    INCQ R8
+    
+    // start for next chunk = R9 + 1
+    MOVQ R9, R10
+    INCQ R10
+    
+    // If we hit DX limit, we can return early
+    CMPQ R8, DX
+    JGE  fae_done_early
+    
+    JMP  fae_next_bit
+
+fae_array_end:
+    CMPQ R8, DX
+    JGE  fae_done_early
+
+    MOVQ R8, R13
+    SHLQ $4, R13
+    MOVQ R10, (DI)(R13*1)
+    MOVQ R9, 8(DI)(R13*1)
+    INCQ R8
+    JMP  fae_done_early
+
+fae_next_bit:
+    BTRL R14, R15
+    TESTL R15, R15
+    JNZ  fae_mask_loop
+
+fae_avx_advance:
+    ADDQ $32, CX
+    JMP  fae_avx_loop
+
+fae_scalar_tail:
+    CMPQ CX, BX
+    JGE  fae_done
+
+    MOVB (SI)(CX*1), AL
+    
+    TESTQ R11, R11
+    JNZ   fae_scalar_inside
+
+    CMPB AL, $0x22
+    JEQ  fae_scalar_quote
+    CMPB AL, $0x7B
+    JEQ  fae_scalar_brace_open
+    CMPB AL, $0x7D
+    JEQ  fae_scalar_brace_close
+    CMPB AL, $0x5B
+    JEQ  fae_scalar_brace_open
+    CMPB AL, $0x5D
+    JEQ  fae_scalar_bracket_close
+    CMPB AL, $0x2C
+    JEQ  fae_scalar_comma
+    JMP  fae_scalar_next
+
+fae_scalar_inside:
+    CMPB AL, $0x22
+    JEQ  fae_scalar_quote
+    CMPB AL, $0x5C
+    JEQ  fae_scalar_backslash
+    JMP  fae_scalar_next
+
+fae_scalar_quote:
+    XORQ $1, R11
+    JMP  fae_scalar_next
+
+fae_scalar_backslash:
+    INCQ CX
+    JMP  fae_scalar_next
+
+fae_scalar_brace_open:
+    INCQ R12
+    JMP  fae_scalar_next
+
+fae_scalar_brace_close:
+    DECQ R12
+    JMP  fae_scalar_next
+
+fae_scalar_bracket_close:
+    TESTQ R12, R12
+    JZ    fae_scalar_array_end
+    DECQ R12
+    JMP   fae_scalar_next
+
+fae_scalar_comma:
+    TESTQ R12, R12
+    JZ    fae_scalar_element_end
+    JMP   fae_scalar_next
+
+fae_scalar_element_end:
+    CMPQ R8, DX
+    JGE  fae_done_early
+
+    MOVQ R8, R13
+    SHLQ $4, R13
+    
+    MOVQ R10, (DI)(R13*1)
+    MOVQ CX, 8(DI)(R13*1) // CX is current index in scalar loop
+    
+    INCQ R8
+    MOVQ CX, R10
+    INCQ R10
+
+    CMPQ R8, DX
+    JGE  fae_done_early
+    JMP  fae_scalar_next
+
+fae_scalar_array_end:
+    CMPQ R8, DX
+    JGE  fae_done_early
+    MOVQ R8, R13
+    SHLQ $4, R13
+    MOVQ R10, (DI)(R13*1)
+    MOVQ CX, 8(DI)(R13*1)
+    INCQ R8
+    JMP  fae_done_early
+
+fae_scalar_next:
+    INCQ CX
+    JMP  fae_scalar_tail
+
+fae_done_early:
+    VZEROUPPER
+    MOVQ R8, ret0+48(FP)
+    MOVQ R12, ret1+56(FP)
+    RET
+
+fae_done:
+    VZEROUPPER
+    MOVQ R8, ret0+48(FP)
+    MOVQ R12, ret1+56(FP)
+    RET
+

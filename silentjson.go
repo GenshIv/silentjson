@@ -37,7 +37,10 @@ func appendStringASM(buf []byte, s string) ([]byte, int)
 func findObjectBoundariesASM(data []byte, chunks []Chunk) (ret0 int, ret1 int)
 
 //go:noescape
-func findObjectBoundariesEarlyExitASM(data []byte, chunks []Chunk) (ret0 int, ret1 int)
+func findObjectBoundariesEarlyExitASM(data []byte, chunks []Chunk) (int, int)
+
+//go:noescape
+func findArrayElementsEarlyExitASM(data []byte, chunks []Chunk) (int, int)
 
 //go:noescape
 func skipValueASM(raw []byte, start int) int
@@ -911,11 +914,28 @@ func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 		buf = make([]Chunk, need)
 	}
 
-	count, _ := findObjectBoundariesASM(raw, buf[:len(buf)])
+	startIdx := skipSpaceASM(raw, 0)
+	if startIdx < 0 || startIdx >= len(raw) || raw[startIdx] != '[' {
+		reg.chunkPool.Put(buf[:cap(buf)])
+		return nil, errors.New("expected '[' at the beginning of array")
+	}
+	startIdx++
+	rawInner := raw[startIdx:]
+
+	count, _ := findArrayElementsEarlyExitASM(rawInner, buf[:len(buf)])
 	if count < 0 || count > len(buf) {
 		reg.chunkPool.Put(buf[:cap(buf)])
 		return nil, fmt.Errorf("asm returned invalid count: %d", count)
 	}
+
+	validCount := 0
+	for i := 0; i < count; i++ {
+		if buf[i].Start != buf[i].End {
+			buf[validCount] = buf[i]
+			validCount++
+		}
+	}
+	count = validCount
 
 	// Check if there is enough space in the provided slice
 	if len(dst) < count {
@@ -943,7 +963,7 @@ func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 
 		itemPtr := unsafe.Pointer(uintptr(basePtr) + (uintptr(i) * structSize))
 
-		if err = ParseObject(raw[chunk.Start:chunk.End], reg, itemPtr); err != nil {
+		if err = ParseObject(rawInner[chunk.Start:chunk.End], reg, itemPtr); err != nil {
 			break
 		}
 	}
@@ -1153,12 +1173,29 @@ func UnmarshalArrayParallel[T any](raw []byte, reg *Registry, dst []T) ([]T, err
 		buf = make([]Chunk, need)
 	}
 
-	count, maxDepth := findObjectBoundariesASM(raw[:len(raw)], buf[:len(buf)])
+	startIdx := skipSpaceASM(raw, 0)
+	if startIdx < 0 || startIdx >= len(raw) || raw[startIdx] != '[' {
+		reg.chunkPool.Put(buf[:cap(buf)])
+		return nil, errors.New("expected '[' at the beginning of array")
+	}
+	startIdx++
+	rawInner := raw[startIdx:]
+
+	count, maxDepth := findArrayElementsEarlyExitASM(rawInner, buf[:len(buf)])
 
 	if count < 0 || count > len(buf) {
 		reg.chunkPool.Put(buf[:cap(buf)])
 		return nil, fmt.Errorf("asm returned invalid count: %d", count)
 	}
+
+	validCount := 0
+	for i := 0; i < count; i++ {
+		if buf[i].Start != buf[i].End {
+			buf[validCount] = buf[i]
+			validCount++
+		}
+	}
+	count = validCount
 
 	// CHECK 1: JSON validity
 	if maxDepth != 0 {
@@ -1178,7 +1215,7 @@ func UnmarshalArrayParallel[T any](raw []byte, reg *Registry, dst []T) ([]T, err
 		return target, nil
 	}
 
-	if err := parseArrayParallelChunks(raw, buf[:count], reg, unsafe.Pointer(&target[0]), unsafe.Sizeof(*new(T))); err != nil {
+	if err := parseArrayParallelChunks(rawInner, buf[:count], reg, unsafe.Pointer(&target[0]), unsafe.Sizeof(*new(T))); err != nil {
 		reg.chunkPool.Put(buf[:cap(buf)])
 		return nil, err
 	}

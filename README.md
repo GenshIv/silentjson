@@ -36,11 +36,12 @@ We benchmarked unmarshaling a JSON array of 100,000 complex objects (~18MB paylo
 
 | Library | Throughput (MB/s) | Latency (ns/op) | Memory Allocated | Allocs/op | Notes |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **SilentJSON** (Parallel) | **3347.39 MB/s** 👑 | **429 ns** 👑 | **0.14 MB** 👑 | **4** 👑 | Full Go Struct Binding |
-| **Sonic** | 467.52 MB/s | 1,082,263 ns | 15.46 MB | 10002 | Full Go Struct Binding |
-| **Protobuf** | 211.70 MB/s | 32,148,323 ns | 37.30 MB | 1100018 | Binary Format |
-| **Standard (`encoding/json`)**| 107.56 MB/s | 4,704,040 ns | 3.72 MB | 509997 | Full Go Struct Binding |
-| **simdjson-go** | 371.38 MB/s | 1,362,436 ns | 5.55 MB | 3 | **AST Only** (No Struct Binding) |
+| **SilentJSON** (Parallel) | **3458.96 MB/s** 👑 | **429 ns** 👑 | **0.14 MB** 👑 | **4** 👑 | Full Go Struct Binding |
+| **Sonic (Parallel)** | 2179.65 MB/s | 7,288,331 ns | 22.07 MB | 210068 | Full Go Struct Binding |
+| **Sonic** | 551.48 MB/s | 28,806,370 ns | 16.21 MB | 10002 | Full Go Struct Binding |
+| **simdjson-go** | 419.93 MB/s | 37,829,915 ns | 6.68 MB | 3 | **AST Only** (No Struct Binding) |
+| **Protobuf** | 232.54 MB/s | 29,267,715 ns | 39.12 MB | 1100019 | Binary Format |
+| **Standard (`encoding/json`)**| 110.94 MB/s | 143,188,857 ns | 3.90 MB | 509997 | Full Go Struct Binding |
 
 > [!NOTE]
 > **What about `simdjson-go`?**
@@ -55,9 +56,23 @@ We benchmarked unmarshaling a JSON array of 100,000 complex objects (~18MB paylo
 ```mermaid
 xychart-beta
     title "Parsing Throughput: 100k Objects (MB/s, Higher is Better)"
-    x-axis ["SilentJSON", "Sonic", "simdjson-go", "Protobuf", "Standard"]
+    x-axis ["SilentJSON", "Sonic (Parallel)", "Sonic", "simdjson-go", "Protobuf", "Standard"]
     y-axis "MB/s" 0 --> 3500
-    bar [3347, 467, 371, 211, 107]
+    bar [3458, 2179, 551, 419, 232, 110]
+```
+
+### Scalability Across File Sizes (10 KB to 640 MB)
+Our CLMUL-accelerated parallel scanner not only reaches incredible peaks but maintains its performance lead across all file sizes.
+Notice how `SilentJSON` scales rapidly and then gracefully hits the physical limits of memory bandwidth (RAM-bound) at sizes exceeding the CPU's L3 cache (128 MB+), always outperforming the competition.
+
+```mermaid
+xychart-beta
+    title "Parallel Parsing Speed vs File Size (MB/s, Higher is Better)"
+    x-axis "File Size" ["10 KB", "120 KB", "1.2 MB", "12 MB", "120 MB", "640 MB"]
+    y-axis "Speed (MB/s)" 0 --> 4000
+    line "SilentJSON" [781, 1622, 2406, 2874, 3230, 3475]
+    line "Sonic Parallel" [490, 1025, 1905, 2365, 2124, 2374]
+    line "Standard" [89, 92, 92, 93, 96, 83]
 ```
 
 To emphasize our perfect linear scaling and O(N) complexity, here is how the parsing throughput stays perfectly flat regardless of the number of objects. Notice the horizontal straight line, showing no performance degradation at scale:
@@ -83,18 +98,18 @@ Because `simdjson` and `sonic` (for standard arrays) require the **entire** payl
 
 | Library | Throughput (MB/s) | Memory Allocated | Allocs/op | Notes |
 | :--- | :--- | :--- | :--- | :--- |
-| **SilentJSON (NextRawBlock)** | **~4150 MB/s** 🚀 | **0.3 MB** | **0** | Extreme zero-alloc bulk chunk extraction |
-| **SilentJSON (NextRaw)** | **~1181 MB/s** 🚀 | **526 MB** | **3.0M** | Extreme speed raw stream chunk extraction |
-| **SilentJSON (Decode)** | **469.96 MB/s** 👑 | **41 MB** 👑 | **7.7M** 👑 | Full Go Struct Binding, zero alloc iteration |
-| **Jsoniter (Stream)** | 455.51 MB/s | 148 MB | 14.6M | 2x more GC pressure |
-| **SilentJSON (NextChan)**| **378.02 MB/s** ⚡ | **41 MB** 👑| **7.7M** 👑| Async Producer-Consumer mode (Ring Buffer) |
-| **Standard (`json.NewDecoder`)**| 105.42 MB/s | 162 MB | 13.3M | Slowest, highest memory usage |
+| **SilentJSON (NextRawBlock)** | **~4009 MB/s** 🚀 | **0.9 MB** | **5.7k** | Extreme zero-alloc bulk chunk extraction |
+| **SilentJSON (NextRaw)** | **~2547 MB/s** 🚀 | **526 MB** | **3.0M** | Extreme speed raw stream chunk extraction |
+| **SilentJSON (Decode)** | **614.90 MB/s** 👑 | **41 MB** 👑 | **7.7M** 👑 | Full Go Struct Binding, zero alloc iteration |
+| **Jsoniter (Stream)** | 457.22 MB/s | 148 MB | 14.6M | 2x more GC pressure |
+| **SilentJSON (NextChan)**| **446.96 MB/s** ⚡ | **41 MB** 👑| **7.7M** 👑| Async Producer-Consumer mode (Ring Buffer) |
+| **Standard (`json.NewDecoder`)**| 105.70 MB/s | 162 MB | 13.3M | Slowest, highest memory usage |
 
 ```mermaid
 xychart-beta
     title "Streaming Throughput vs jsoniter (MB/s) - Higher is Better"
     x-axis ["Standard", "NextChan", "jsoniter", "Decode", "NextRaw", "NextRawBlock"]
-    bar [105, 378, 455, 470, 1181, 4150]
+    bar [105, 446, 457, 614, 2547, 4009]
 ```
 
 ```mermaid

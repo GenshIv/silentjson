@@ -69,7 +69,8 @@ func (d *StreamDecoder[T]) fill() error {
 	return nil
 }
 
-// nextChunk finds the next JSON object in the stream and returns its raw bytes.
+// nextChunk finds the next JSON value in the stream and returns its raw bytes.
+// Supports objects, arrays, strings, numbers, booleans, and null.
 // The returned slice points to the internal buffer and is only valid until the next read.
 func (d *StreamDecoder[T]) nextChunk() ([]byte, error) {
 	if d.hasEnded {
@@ -116,25 +117,30 @@ func (d *StreamDecoder[T]) nextChunk() ([]byte, error) {
 			continue
 		}
 
-		// We expect an object to start here
-		if d.buf[d.head] != '{' {
-			return nil, fmt.Errorf("expected '{', got '%c'", d.buf[d.head])
-		}
-
-		// Find the end of the object using fast AVX2 scanning
+		// Dispatch using AVX2 unified array element chunker
 		var chunkBuf [1]Chunk
-		count, _ := findObjectBoundariesEarlyExitASM(d.buf[d.head:d.tail], chunkBuf[:])
+		count, _ := findArrayElementsEarlyExitASM(d.buf[d.head:d.tail], chunkBuf[:])
 
 		if count > 0 {
-			// Complete object found!
+			// Complete element found!
+			// chunkBuf[0].End is the index of the comma or closing bracket
 			endIdx := d.head + chunkBuf[0].End
 			chunk := d.buf[d.head:endIdx]
+			
+			// If it ended on a bracket, NextRawBlock/nextChunk handles it by seeing ']' on next call
+			// For comma, we skip it by pointing d.head exactly at it so the next iteration skips it.
 			d.head = endIdx
 			return chunk, nil
 		}
 
-		// If we reached here, the object is incomplete. We need to read more.
+		// If we reached here, the element is incomplete in the current buffer.
 		if d.isEOF {
+			// If EOF and we have some data, return it as the last element (though it's malformed JSON)
+			if d.tail > d.head {
+				chunk := d.buf[d.head:d.tail]
+				d.head = d.tail
+				return chunk, nil
+			}
 			return nil, ErrUnexpectedEOF
 		}
 		if err := d.fill(); err != nil {
@@ -287,21 +293,18 @@ func (d *StreamDecoder[T]) NextRawBlock(maxCount int, maxSize int) ([]byte, int,
 			}
 		}
 
-		if d.buf[d.head] != '{' {
-			return nil, 0, fmt.Errorf("expected '{', got '%c'", d.buf[d.head])
-		}
-
+		// Use AVX2 bulk element detection for all types
 		chunkSize := maxCount
 		if chunkSize <= 0 || chunkSize > 10000 {
 			chunkSize = 10000 // reasonable batch capacity
 		}
-		
+
 		// Re-use chunk pool to prevent allocations
 		chunks := d.reg.chunkPool.Get().([]Chunk)
 		if cap(chunks) < chunkSize {
 			chunks = make([]Chunk, chunkSize)
 		}
-		
+
 		limitSize := maxSize
 		if limitSize > 0 && limitSize < 1024 {
 			limitSize = 1024
@@ -312,15 +315,14 @@ func (d *StreamDecoder[T]) NextRawBlock(maxCount int, maxSize int) ([]byte, int,
 			dataToScan = dataToScan[:limitSize]
 		}
 
-		count, _ := findObjectBoundariesEarlyExitASM(dataToScan, chunks[:chunkSize])
+		count, _ := findArrayElementsEarlyExitASM(dataToScan, chunks[:chunkSize])
 
-		// Fallback: if 0 objects fit within limitSize but we have plenty of data, the first object is huge
 		if count == 0 && limitSize > 0 && d.tail-d.head > limitSize {
-			count, _ = findObjectBoundariesEarlyExitASM(d.buf[d.head:d.tail], chunks[:1])
+			count, _ = findArrayElementsEarlyExitASM(d.buf[d.head:d.tail], chunks[:1])
 		}
 
 		if count > 0 {
-			// Complete objects found!
+			// Complete elements found!
 			endIdx := d.head + chunks[count-1].End
 			res := d.buf[d.head:endIdx]
 			d.head = endIdx
@@ -329,7 +331,7 @@ func (d *StreamDecoder[T]) NextRawBlock(maxCount int, maxSize int) ([]byte, int,
 		}
 		d.reg.chunkPool.Put(chunks[:cap(chunks)])
 
-		// If we reach here, we couldn't find a complete object within the available data
+		// If we reach here, we couldn't find a complete element within the available data
 		if d.isEOF {
 			return nil, 0, ErrUnexpectedEOF
 		}
