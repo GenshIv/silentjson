@@ -166,8 +166,11 @@ xychart-beta
 
 ## ⚙️ Key Features
 
-* **No Code Generation:** Drop-in replacement that works immediately.
-* **Automated Parallel Parsing:** `UnmarshalArrayParallel` automatically handles memory allocation and provides a simple, clean API for maximum throughput.
+- **Unmatched Speed**: Up to **3000+ MB/s** decoding speed by parallelizing the unmarshalling of large arrays.
+- **Zero-Copy Architecture**: Maximizes performance and minimizes GC overhead through direct `[]byte` mapping.
+- **Cross-Platform**: SIMD-level acceleration for `amd64` (AVX2), with **Experimental `arm64` (Apple Silicon M-series, Linux ARM)** assembly support!
+- **Effortless Integration**: Drop-in `UnmarshalArrayParallel` function that is fully compatible with native `[]struct{}` types.
+- **Developer Friendly**: No code generation (`go generate`) required.
 * **AVX2 Tape-Scanner:** Utilizes a Bitmask Iterator and SIMD instructions (like `simdjson`) to process JSON structures at blazing speeds without scalar loops.
 * **Zero-Allocation Marshaling:** `MarshalSlice` does not allocate any heap memory, eliminating GC pressure.
 * **Zero-Copy String Parsing:** Uses `unsafe.String` to map JSON string values directly from the input buffer.

@@ -2,11 +2,8 @@
 
 package silentjson
 
-import "bytes"
-
-func findQuoteAsm(data []byte) int {
-	return bytes.IndexByte(data, '"')
-}
+//go:noescape
+func findQuoteAsm(data []byte) int
 
 func scanJSONStringASM(src []byte) (int, bool) {
 	hasEscape := false
@@ -108,15 +105,8 @@ func appendStringASM(buf []byte, s string) ([]byte, int) {
 	return buf, specialPos
 }
 
-func skipSpaceASM(data []byte, start int) int {
-	for i := start; i < len(data); i++ {
-		c := data[i]
-		if c != ' ' && c != '\t' && c != '\n' && c != '\r' {
-			return i
-		}
-	}
-	return len(data)
-}
+//go:noescape
+func skipSpaceASM(data []byte, start int) int
 
 func skipValueASM(raw []byte, start int) int {
 	return skipValue(raw, start)
@@ -134,192 +124,15 @@ func findQuoteOrEscapeASM(b []byte) (int, bool) {
 	return -1, false
 }
 
-func findObjectBoundariesASM(data []byte, chunks []Chunk) (int, int) {
-	count := 0
-	depth := 0
-	inString := false
-	escaped := false
-	maxSize := 0
-	var currentStart = -1
+//go:noescape
+func findObjectBoundariesASM(data []byte, chunks []Chunk) (int, int)
 
-	for i := 0; i < len(data); i++ {
-		c := data[i]
-		if inString {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if c == '\\' {
-				escaped = true
-				continue
-			}
-			if c == '"' {
-				inString = false
-			}
-			continue
-		}
-		switch c {
-		case '"':
-			inString = true
-		case '{':
-			if depth == 0 {
-				currentStart = i
-			}
-			depth++
-		case '}':
-			depth--
-			if depth == 0 && currentStart != -1 {
-				if count < len(chunks) {
-					chunks[count] = Chunk{Start: currentStart, End: i + 1}
-					size := (i + 1) - currentStart
-					if size > maxSize {
-						maxSize = size
-					}
-				}
-				count++
-				currentStart = -1
-			}
-		case '[':
-			depth++
-		case ']':
-			depth--
-		}
-	}
-	return count, maxSize
-}
+//go:noescape
+func findObjectBoundariesEarlyExitASM(data []byte, chunks []Chunk) (int, int)
 
-func findObjectBoundariesEarlyExitASM(data []byte, chunks []Chunk) (int, int) {
-	count := 0
-	depth := 0
-	inString := false
-	escaped := false
-	maxSize := 0
-	var currentStart = -1
+//go:noescape
+func findArrayElementsEarlyExitASM(data []byte, chunks []Chunk) (int, int)
 
-	for i := 0; i < len(data); i++ {
-		c := data[i]
-		if inString {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if c == '\\' {
-				escaped = true
-				continue
-			}
-			if c == '"' {
-				inString = false
-			}
-			continue
-		}
-		switch c {
-		case '"':
-			inString = true
-		case '{':
-			if depth == 0 {
-				currentStart = i
-			}
-			depth++
-		case '}':
-			depth--
-			if depth == 0 && currentStart != -1 {
-				if count < len(chunks) {
-					chunks[count] = Chunk{Start: currentStart, End: i + 1}
-					size := (i + 1) - currentStart
-					if size > maxSize {
-						maxSize = size
-					}
-				}
-				count++
-				currentStart = -1
-				if count >= len(chunks) {
-					return count, maxSize
-				}
-			}
-		case '[':
-			depth++
-		case ']':
-			depth--
-		}
-	}
-	return count, maxSize
-}
 
-func findArrayElementsEarlyExitASM(data []byte, chunks []Chunk) (int, int) {
-	count := 0
-	depth := 0
-	inString := false
-	escaped := false
-	var currentStart = -1
 
-	for i := 0; i < len(data); i++ {
-		c := data[i]
-		if inString {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if c == '\\' {
-				escaped = true
-				continue
-			}
-			if c == '"' {
-				inString = false
-			}
-			continue
-		}
-		switch c {
-		case '"':
-			inString = true
-			if depth == 1 && currentStart == -1 {
-				currentStart = i
-			}
-		case '[':
-			if depth == 1 && currentStart == -1 {
-				currentStart = i
-			}
-			depth++
-		case ']':
-			depth--
-			if depth == 1 && currentStart != -1 {
-				if count < len(chunks) {
-					chunks[count] = Chunk{Start: currentStart, End: i + 1}
-				}
-				count++
-				currentStart = -1
-				if count >= len(chunks) {
-					return count, 0
-				}
-			}
-		case '{':
-			if depth == 1 && currentStart == -1 {
-				currentStart = i
-			}
-			depth++
-		case '}':
-			depth--
-		case 't', 'f', 'n', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-':
-			if depth == 1 && currentStart == -1 {
-				currentStart = i
-			}
-		case ',':
-			if depth == 1 && currentStart != -1 {
-				if count < len(chunks) {
-					chunks[count] = Chunk{Start: currentStart, End: i}
-				}
-				count++
-				currentStart = -1
-				if count >= len(chunks) {
-					return count, 0
-				}
-			}
-		}
-	}
-	if currentStart != -1 && depth == 1 {
-		if count < len(chunks) {
-			chunks[count] = Chunk{Start: currentStart, End: len(data)}
-		}
-		count++
-	}
-	return count, 0
-}
+

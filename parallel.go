@@ -138,6 +138,7 @@ func UnmarshalArrayParallel[T any](raw []byte, reg *Registry, dst []T) ([]T, err
 
 	// CHECK 1: JSON validity
 	if maxDepth != 0 {
+		fmt.Printf("DEBUG PARALLEL: count=%d, maxDepth=%d, rawInner=%q\n", count, maxDepth, rawInner)
 		reg.chunkPool.Put(buf[:cap(buf)])
 		return nil, errors.New("malformed json: unbalanced braces or brackets")
 	}
