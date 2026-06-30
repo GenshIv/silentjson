@@ -32,20 +32,20 @@ We desperately needed a lightning-fast alternative that didn't rely on JIT (Just
 Our latest scalability benchmarks (testing arrays from 10 to 100,000 objects) prove that `silentjson` is the fastest JSON serialization and deserialization library for Go, outperforming industry leaders like **Sonic** and **simdjson-go**.
 
 ### 1. Deserialization (Parsing / Unmarshal)
-We benchmarked unmarshaling a JSON array of 100,000 complex objects (~18MB payload).
+We benchmarked unmarshaling an array of 100,000 complex objects. Because Protobuf is a highly compact binary format, comparing by "MB/s" is mathematically invalid (1 MB of Protobuf contains far more objects than 1 MB of JSON). The only fair metric is **Objects processed per second**.
 
-| Library | Throughput (MB/s) | Latency (ns/op) | Memory Allocated | Allocs/op | Notes |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **SilentJSON** (Parallel) | **3458.96 MB/s** 👑 | **429 ns** 👑 | **0.14 MB** 👑 | **4** 👑 | Full Go Struct Binding |
-| **Sonic (Parallel)** | 2179.65 MB/s | 7,288,331 ns | 22.07 MB | 210068 | Full Go Struct Binding |
-| **Sonic** | 551.48 MB/s | 28,806,370 ns | 16.21 MB | 10002 | Full Go Struct Binding |
-| **simdjson-go** | 419.93 MB/s | 37,829,915 ns | 6.68 MB | 3 | **AST Only** (No Struct Binding) |
-| **Protobuf** | 232.54 MB/s | 29,267,715 ns | 39.12 MB | 1100019 | Binary Format |
-| **Standard (`encoding/json`)**| 110.94 MB/s | 143,188,857 ns | 3.90 MB | 509997 | Full Go Struct Binding |
+| Library | Objects/sec | Throughput (MB/s) | Latency (ns/op) | Memory Allocated | Allocs/op | Notes |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **SilentJSON** (Parallel) | **21,780,689 obj/s** 👑 | **3458.96 MB/s** 👑 | **4,591,223 ns** 👑 | **0.14 MB** 👑 | **4** 👑 | Full Go Struct Binding |
+| **Sonic (Parallel)** | 13,720,562 obj/s | 2179.65 MB/s | 7,288,331 ns | 22.07 MB | 210068 | Full Go Struct Binding |
+| **Sonic** | 3,471,454 obj/s | 551.48 MB/s | 28,806,370 ns | 16.21 MB | 10002 | Full Go Struct Binding |
+| **Protobuf** | 3,416,734 obj/s | 232.54 MB/s | 29,267,715 ns | 39.12 MB | 1100019 | Binary Format |
+| **simdjson-go** | 2,643,408 obj/s | 419.93 MB/s | 37,829,915 ns | 6.68 MB | 3 | **AST Only** (No Struct Binding) |
+| **Standard (`encoding/json`)**| 698,378 obj/s | 110.94 MB/s | 143,188,857 ns | 3.90 MB | 509997 | Full Go Struct Binding |
 
 > [!NOTE]
 > **What about `simdjson-go`?**
-> `simdjson-go` is a highly optimized C++ port utilizing SIMD instructions. However, its API is purely AST-based, making it notoriously difficult to work with for standard Go development compared to libraries that automatically map to Go structs. Furthermore, even though it skips the heavy work of struct mapping and reflection, **SilentJSON's parallel parsing architecture still outperforms its raw parsing speed by ~4x on large arrays**, while keeping the developer experience identical to `encoding/json`!
+> `simdjson-go` is a highly optimized C++ port utilizing SIMD instructions. However, its API is purely AST-based, making it notoriously difficult to work with for standard Go development compared to libraries that automatically map to Go structs. Furthermore, even though it skips the heavy work of struct mapping and reflection, **SilentJSON's parallel parsing architecture still outperforms its raw parsing speed by ~8x on large arrays**, while keeping the developer experience identical to `encoding/json`!
 >
 > **Developer Experience Comparison:**
 > | Approach | Libraries |
@@ -55,10 +55,10 @@ We benchmarked unmarshaling a JSON array of 100,000 complex objects (~18MB paylo
 
 ```mermaid
 xychart-beta
-    title "Parsing Throughput: 100k Objects (MB/s, Higher is Better)"
-    x-axis ["SilentJSON", "Sonic (Parallel)", "Sonic", "simdjson-go", "Protobuf", "Standard"]
-    y-axis "MB/s" 0 --> 3500
-    bar [3458, 2179, 551, 419, 232, 110]
+    title "Parsing Speed: 100k Objects (Millions of Objects/sec, Higher is Better)"
+    x-axis ["SilentJSON", "Sonic (Parallel)", "Sonic", "Protobuf", "simdjson-go", "Standard"]
+    y-axis "Millions Obj/sec" 0 --> 25
+    bar [21.78, 13.72, 3.47, 3.41, 2.64, 0.69]
 ```
 
 ### Scalability Across File Sizes (< 1 KB to 640 MB)
