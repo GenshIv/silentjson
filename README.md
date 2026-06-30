@@ -168,14 +168,14 @@ xychart-beta
 
 - **Unmatched Speed**: Up to **3000+ MB/s** decoding speed by parallelizing the unmarshalling of large arrays.
 - **Zero-Copy Architecture**: Maximizes performance and minimizes GC overhead through direct `[]byte` mapping.
-- **Cross-Platform**: SIMD-level acceleration for `amd64` (AVX2), with **Experimental `arm64` (Apple Silicon M-series, Linux ARM)** assembly support!
+- **Cross-Platform**: SIMD-level acceleration for `amd64` (AVX2) and `arm64` (NEON) with **Experimental Apple Silicon and Linux ARM support!**
 - **Effortless Integration**: Drop-in `UnmarshalArrayParallel` function that is fully compatible with native `[]struct{}` types.
 - **Developer Friendly**: No code generation (`go generate`) required.
-* **AVX2 Tape-Scanner:** Utilizes a Bitmask Iterator and SIMD instructions (like `simdjson`) to process JSON structures at blazing speeds without scalar loops.
+* **AVX2 & NEON Tape-Scanner:** Utilizes a Bitmask Iterator and SIMD instructions (like `simdjson`) to process JSON structures at blazing speeds without scalar loops.
 * **Zero-Allocation Marshaling:** `MarshalSlice` does not allocate any heap memory, eliminating GC pressure.
 * **Zero-Copy String Parsing:** Uses `unsafe.String` to map JSON string values directly from the input buffer.
 * **Precomputed Registry:** Uses `reflect` only once at startup to build a structural registry, avoiding runtime reflection entirely.
-* **Multi-Platform Native Assembly:** Works perfectly on Intel/AMD (AVX/AVX512) and features **experimental Apple Silicon (ARM64) support** via native AArch64 assembly.
+* **Multi-Platform Native Assembly:** Works perfectly on Intel/AMD (AVX/AVX512) and features **experimental Apple Silicon / Linux ARM64 support** via native AArch64 NEON assembly.
 * **Generics Support:** Clean, modern API for slices via Go 1.18+ generics.
 
 ## 📦 Installation
