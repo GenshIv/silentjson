@@ -36,11 +36,11 @@ We benchmarked unmarshaling an array of 100,000 complex objects. Because Protobu
 
 | Library | Objects/sec | Throughput (MB/s) | Latency (ns/op) | Memory Allocated | Allocs/op | Notes |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **SilentJSON** (Parallel) | **21,780,689 obj/s** 👑 | **3458.96 MB/s** 👑 | **4,591,223 ns** 👑 | **0.14 MB** 👑 | **4** 👑 | Full Go Struct Binding |
+| **SilentJSON** (Parallel) | **21,780,689 obj/s** 👑 | **3458.96 MB/s** 👑 | **4,591,223 ns** 👑 | **0.14 MB** 👑 | **4** | Full Go Struct Binding |
 | **Sonic (Parallel)** | 13,720,562 obj/s | 2179.65 MB/s | 7,288,331 ns | 22.07 MB | 210068 | Full Go Struct Binding |
 | **Sonic** | 3,471,454 obj/s | 551.48 MB/s | 28,806,370 ns | 16.21 MB | 10002 | Full Go Struct Binding |
 | **Protobuf** | 3,416,734 obj/s | 232.54 MB/s | 29,267,715 ns | 39.12 MB | 1100019 | Binary Format |
-| **simdjson-go** | 2,643,408 obj/s | 419.93 MB/s | 37,829,915 ns | 6.68 MB | 3 | **AST Only** (No Struct Binding) |
+| **simdjson-go** | 2,643,408 obj/s | 419.93 MB/s | 37,829,915 ns | 6.68 MB | 3 👑 | **AST Only** (No Struct Binding) |
 | **Standard (`encoding/json`)**| 698,378 obj/s | 110.94 MB/s | 143,188,857 ns | 3.90 MB | 509997 | Full Go Struct Binding |
 
 > [!NOTE]
