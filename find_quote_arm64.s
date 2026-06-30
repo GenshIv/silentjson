@@ -25,11 +25,83 @@ not_found:
     MOVD R2, ret+24(FP)
     RET
 
+DATA mask_data<>+0(SB)/8, $0x8040201008040201
+DATA mask_data<>+8(SB)/8, $0x8040201008040201
+GLOBL mask_data<>(SB), 8, $16
+
 // func skipSpaceASM(data []byte, start int) int
 TEXT ·skipSpaceASM(SB), NOSPLIT, $0-40
     MOVD data_base+0(FP), R0
     MOVD data_len+8(FP), R1
     MOVD start+24(FP), R2
+
+    // Load bitmask multiplier into V31
+    MOVD $mask_data<>(SB), R9
+    VLD1 (R9), [V31.B16]
+
+    // Load spaces into V27, V28, V29, V30
+    MOVD $0x2020202020202020, R3
+    VMOV R3, V27.D[0]
+    VMOV R3, V27.D[1]
+    MOVD $0x0909090909090909, R3
+    VMOV R3, V28.D[0]
+    VMOV R3, V28.D[1]
+    MOVD $0x0A0A0A0A0A0A0A0A, R3
+    VMOV R3, V29.D[0]
+    VMOV R3, V29.D[1]
+    MOVD $0x0D0D0D0D0D0D0D0D, R3
+    VMOV R3, V30.D[0]
+    VMOV R3, V30.D[1]
+
+skip_neon_loop:
+    SUB R2, R1, R4
+    CMP $16, R4
+    BLT skip_loop // fall back to scalar if less than 16 bytes
+
+    ADD R2, R0, R12
+    VLD1 (R12), [V0.B16]
+
+    // Compare with spaces
+    VCMEQ V27.B16, V0.B16, V1.B16 // ' '
+    VCMEQ V28.B16, V0.B16, V2.B16 // '\t'
+    VCMEQ V29.B16, V0.B16, V3.B16 // '\n'
+    VCMEQ V30.B16, V0.B16, V4.B16 // '\r'
+
+    // OR results together
+    VORR V1.B16, V2.B16, V1.B16
+    VORR V1.B16, V3.B16, V1.B16
+    VORR V1.B16, V4.B16, V1.B16
+
+    // Generate mask
+    VAND V31.B16, V1.B16, V1.B16
+    VADDP V1.B16, V1.B16, V1.B16
+    VADDP V1.B16, V1.B16, V1.B16
+    VADDP V1.B16, V1.B16, V1.B16
+    VMOV V1.D[0], R5
+
+    // Extract lower 16 bits of R5
+    AND $0xFFFF, R5
+
+    // Invert the lower 16 bits because 1 means space, 0 means non-space
+    EOR $0xFFFF, R5
+
+    CBZ R5, skip_neon_next
+
+    // Find trailing zeros in R5 (which is the index of first non-space)
+    // RBIT (Reverse Bits) then CLZ (Count Leading Zeros)
+    RBIT R5, R5
+    CLZ R5, R5
+    // CLZ is on 64 bits, but our mask was in the LOWER 16 bits.
+    // Wait, RBIT reverses all 64 bits. So the 16 bits move to the TOP 16 bits.
+    // So CLZ will return 0 if the 63rd bit (which was the 0th bit) is 1.
+    
+    ADD R5, R2, R2
+    MOVD R2, ret+32(FP)
+    RET
+
+skip_neon_next:
+    ADD $16, R2
+    B skip_neon_loop
 
 skip_loop:
     CMP R1, R2
@@ -37,15 +109,16 @@ skip_loop:
     
     ADD R2, R0, R12
     MOVBU (R12), R3
-    CMP $0x20, R3
+    CMP $0x20, R3 // ' '
     BEQ skip_next
-    CMP $0x09, R3
+    CMP $0x09, R3 // '\t'
     BEQ skip_next
-    CMP $0x0A, R3
+    CMP $0x0A, R3 // '\n'
     BEQ skip_next
-    CMP $0x0D, R3
+    CMP $0x0D, R3 // '\r'
     BEQ skip_next
     
+    // not space
     MOVD R2, ret+32(FP)
     RET
 
@@ -303,10 +376,81 @@ TEXT ·findArrayElementsEarlyExitASM(SB), NOSPLIT, $0-64
     MOVD $0, R9 // inString
     MOVD $0, R10 // stringEscape
 
+    // Load structural characters into V20-V26
+    MOVD $0x2222222222222222, R13
+    VMOV R13, V20.D[0]
+    VMOV R13, V20.D[1] // '"'
+    MOVD $0x5C5C5C5C5C5C5C5C, R13
+    VMOV R13, V21.D[0]
+    VMOV R13, V21.D[1] // '\'
+    MOVD $0x5B5B5B5B5B5B5B5B, R13
+    VMOV R13, V22.D[0]
+    VMOV R13, V22.D[1] // '['
+    MOVD $0x5D5D5D5D5D5D5D5D, R13
+    VMOV R13, V23.D[0]
+    VMOV R13, V23.D[1] // ']'
+    MOVD $0x7B7B7B7B7B7B7B7B, R13
+    VMOV R13, V24.D[0]
+    VMOV R13, V24.D[1] // '{'
+    MOVD $0x7D7D7D7D7D7D7D7D, R13
+    VMOV R13, V25.D[0]
+    VMOV R13, V25.D[1] // '}'
+    MOVD $0x2C2C2C2C2C2C2C2C, R13
+    VMOV R13, V26.D[0]
+    VMOV R13, V26.D[1] // ','
+
 fae_loop:
     CMP R1, R8
     BGE fae_end
 
+    // NEON FAST PATH CHECK
+    SUB R8, R1, R14
+    CMP $16, R14
+    BLT fae_scalar_char
+
+    ADD R8, R0, R12
+    VLD1 (R12), [V0.B16]
+
+    CBNZ R9, fae_neon_string
+
+fae_neon_struct:
+    // Check ", [, ], {, }, ,
+    VCMEQ V20.B16, V0.B16, V1.B16 // '"'
+    VCMEQ V22.B16, V0.B16, V2.B16 // '['
+    VCMEQ V23.B16, V0.B16, V3.B16 // ']'
+    VCMEQ V24.B16, V0.B16, V4.B16 // '{'
+    VCMEQ V25.B16, V0.B16, V5.B16 // '}'
+    VCMEQ V26.B16, V0.B16, V6.B16 // ','
+
+    VORR V1.B16, V2.B16, V1.B16
+    VORR V1.B16, V3.B16, V1.B16
+    VORR V1.B16, V4.B16, V1.B16
+    VORR V1.B16, V5.B16, V1.B16
+    VORR V1.B16, V6.B16, V1.B16
+
+    VMOV V1.D[0], R13
+    VMOV V1.D[1], R14
+    ORR R14, R13
+    CBZ R13, fae_neon_skip16
+    B fae_scalar_char
+
+fae_neon_string:
+    // Check ", \
+    VCMEQ V20.B16, V0.B16, V1.B16 // '"'
+    VCMEQ V21.B16, V0.B16, V2.B16 // '\'
+    
+    VORR V1.B16, V2.B16, V1.B16
+    VMOV V1.D[0], R13
+    VMOV V1.D[1], R14
+    ORR R14, R13
+    CBZ R13, fae_neon_skip16
+    B fae_scalar_char
+
+fae_neon_skip16:
+    ADD $16, R8
+    B fae_loop
+
+fae_scalar_char:
     ADD R8, R0, R12
     MOVBU (R12), R11
 
