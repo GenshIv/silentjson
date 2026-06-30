@@ -172,6 +172,7 @@ xychart-beta
 * **Zero-Allocation Marshaling:** `MarshalSlice` does not allocate any heap memory, eliminating GC pressure.
 * **Zero-Copy String Parsing:** Uses `unsafe.String` to map JSON string values directly from the input buffer.
 * **Precomputed Registry:** Uses `reflect` only once at startup to build a structural registry, avoiding runtime reflection entirely.
+* **Multi-Platform Native Assembly:** Works perfectly on Intel/AMD (AVX/AVX512) and features **experimental Apple Silicon (ARM64) support** via native AArch64 assembly.
 * **Generics Support:** Clean, modern API for slices via Go 1.18+ generics.
 
 ## 📦 Installation
