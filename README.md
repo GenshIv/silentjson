@@ -1,4 +1,9 @@
 # silentjson: The "Just Works" High-Performance JSON Parser for Go
+
+[![Go Reference](https://pkg.go.dev/badge/github.com/GenshIv/silentjson.svg)](https://pkg.go.dev/github.com/GenshIv/silentjson)
+[![Go Report Card](https://goreportcard.com/badge/github.com/GenshIv/silentjson)](https://goreportcard.com/report/github.com/GenshIv/silentjson)
+[![Tests](https://github.com/GenshIv/silentjson/actions/workflows/test.yml/badge.svg)](https://github.com/GenshIv/silentjson/actions/workflows/test.yml)
+
 ![silentjson.jpg](assets/silentjson.jpg)
 `silentjson` is a highly optimized, reflection-free, and zero-allocation JSON library for Go that delivers extreme performance **without requiring any code generation.**
 
