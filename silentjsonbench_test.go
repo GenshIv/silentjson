@@ -14,6 +14,7 @@ import (
 	"unsafe"
 
 	"github.com/GenshIv/silentjson/pb"
+	"github.com/buger/jsonparser"
 	"github.com/bytedance/sonic"
 	simdjson "github.com/minio/simdjson-go"
 	jsoniter "github.com/json-iterator/go"
@@ -291,6 +292,41 @@ func BenchmarkNestedComparison(b *testing.B) {
 			}
 		}
 	})
+
+	b.Run("Buger_Jsonparser", func(b *testing.B) {
+		b.SetBytes(int64(len(hugeJSONData)))
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			_, err := jsonparser.ArrayEach(hugeJSONData, func(value []byte, dataType jsonparser.ValueType, offset int, err error) {
+				var emp Employee
+				id, _ := jsonparser.GetInt(value, "id")
+				emp.ID = int(id)
+				emp.IsActive, _ = jsonparser.GetBoolean(value, "is_active")
+				emp.Balance, _ = jsonparser.GetFloat(value, "balance")
+
+				emp.Address.City, _ = jsonparser.GetString(value, "address", "city")
+				zip, _ := jsonparser.GetInt(value, "address", "zip")
+				emp.Address.Zip = int(zip)
+
+				jsonparser.ArrayEach(value, func(val []byte, dataType jsonparser.ValueType, offset int, err error) {
+					str, _ := jsonparser.ParseString(val)
+					emp.Tags = append(emp.Tags, str)
+				}, "tags")
+
+				jsonparser.ArrayEach(value, func(val []byte, dataType jsonparser.ValueType, offset int, err error) {
+					sc, _ := jsonparser.ParseInt(val)
+					emp.Scores = append(emp.Scores, int(sc))
+				}, "scores")
+
+				_ = emp
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }
 
 // BenchmarkLargeScaleGeneration tests serialization (marshal/generation)
@@ -479,6 +515,40 @@ func BenchmarkLargeScaleComparison(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			var e pb.Employees
 			_ = proto.Unmarshal(rawPB, &e)
+		}
+	})
+
+	b.Run("Buger_Jsonparser", func(b *testing.B) {
+		b.SetBytes(int64(len(rawJSON)))
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			_, err := jsonparser.ArrayEach(rawJSON, func(value []byte, dataType jsonparser.ValueType, offset int, err error) {
+				var emp Employee
+				id, _ := jsonparser.GetInt(value, "id")
+				emp.ID = int(id)
+				emp.IsActive, _ = jsonparser.GetBoolean(value, "is_active")
+				emp.Balance, _ = jsonparser.GetFloat(value, "balance")
+
+				emp.Address.City, _ = jsonparser.GetString(value, "address", "city")
+				zip, _ := jsonparser.GetInt(value, "address", "zip")
+				emp.Address.Zip = int(zip)
+
+				jsonparser.ArrayEach(value, func(val []byte, dataType jsonparser.ValueType, offset int, err error) {
+					str, _ := jsonparser.ParseString(val)
+					emp.Tags = append(emp.Tags, str)
+				}, "tags")
+
+				jsonparser.ArrayEach(value, func(val []byte, dataType jsonparser.ValueType, offset int, err error) {
+					sc, _ := jsonparser.ParseInt(val)
+					emp.Scores = append(emp.Scores, int(sc))
+				}, "scores")
+
+				_ = emp
+			})
+			if err != nil {
+				b.Fatal(err)
+			}
 		}
 	})
 }

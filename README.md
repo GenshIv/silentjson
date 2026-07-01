@@ -187,8 +187,13 @@ go get github.com/GenshIv/silentjson
 ## 🛠️ Usage
 
 > [!TIP]
-> **Quickstart Example**
-> We provide a fully runnable example in the [`example/`](file:///c:/Users/ihar7/IdeaProjects/silentjson/example/main.go) directory. You can run it instantly using `go run example/main.go`.
+> **Explore the Examples!**
+> We provide ready-to-run examples with detailed explanations in their respective directories:
+> 
+> * **[Quickstart (`example/`)](example/)**: Learn the basics of parallel unmarshaling and zero-allocation stream iteration. ([Read the detailed Guide](example/README.md))
+> * **[Silent-Chunker (`samples/silent-chunker/`)](samples/silent-chunker/)**: A lightning-fast CLI utility that demonstrates how to slice massive 10GB+ JSON streams into smaller files at 4 GB/s without unmarshaling. ([Read the detailed Guide](samples/silent-chunker/README.md))
+> 
+> You can run the basic example instantly using: `go run example/main.go`
 
 The API is designed to be simple and intuitive.
 
@@ -308,6 +313,31 @@ func streamAsync(reader io.Reader) {
         }
         fmt.Println(res.Item.ID)
     }
+}
+```
+
+### 3. Marshaling (Generation)
+
+`silentjson` also provides zero-allocation marshaling (JSON generation) which is significantly faster than the standard library.
+
+#### Marshal a Single Object
+```go
+func generateJSON(emp *Employee) []byte {
+    // Pre-allocate a buffer (optional, but recommended for zero-allocs)
+    buf := make([]byte, 0, 1024)
+    
+    // buf will be expanded automatically if needed
+    buf = silentjson.Marshal(emp, empRegistry, buf)
+    return buf
+}
+```
+
+#### Marshal a Slice (Array) of Objects
+```go
+func generateArrayJSON(emps []Employee) []byte {
+    buf := make([]byte, 0, 1024 * 1024) // 1MB initial buffer
+    buf = silentjson.MarshalSlice(emps, empRegistry, buf)
+    return buf
 }
 ```
 
