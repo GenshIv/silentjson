@@ -8,8 +8,6 @@ import (
 	"io"
 	"os"
 	"reflect"
-	"runtime"
-	"sync"
 	"testing"
 	"unsafe"
 
@@ -386,42 +384,6 @@ func BenchmarkLargeScaleComparison(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			copy(buf, rawJSON)
 			_, _ = UnmarshalArrayParallel[Employee](buf, reg, dst)
-		}
-	})
-
-	b.Run("SonicParallel", func(b *testing.B) {
-		b.SetBytes(int64(len(rawJSON)))
-		b.ReportAllocs()
-		b.ResetTimer()
-		buf := make([]byte, len(rawJSON))
-		for i := 0; i < b.N; i++ {
-			copy(buf, rawJSON)
-
-			chunks := make([]Chunk, len(benchEmpSlice)+1000)
-			count, _ := findObjectBoundariesASM(buf, chunks)
-
-			workers := runtime.GOMAXPROCS(0)
-			batchSize := (count + workers - 1) / workers
-			var wg sync.WaitGroup
-			for w := 0; w < workers; w++ {
-				start := w * batchSize
-				end := start + batchSize
-				if end > count {
-					end = count
-				}
-				if start >= count {
-					break
-				}
-				wg.Add(1)
-				go func(start, end int) {
-					defer wg.Done()
-					for idx := start; idx < end; idx++ {
-						chunk := chunks[idx]
-						_ = sonic.Unmarshal(buf[chunk.Start:chunk.End], &dst[idx])
-					}
-				}(start, end)
-			}
-			wg.Wait()
 		}
 	})
 

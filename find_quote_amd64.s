@@ -5,7 +5,7 @@
 // data (s_ptr, s_len): +0(FP), +8(FP)
 // Invisible space: +16(FP) (8 bytes)
 // ret: +24(FP)
-TEXT ·findQuoteAsm(SB), NOSPLIT, $0-32 // 32 bytes to cover all offsets
+TEXT ·findQuoteAVX2(SB), NOSPLIT, $0-32 // 32 bytes to cover all offsets
 
     // Read arguments from stack.
     MOVQ s_ptr+0(FP), AX     // AX = pointer to start of slice.
@@ -39,7 +39,7 @@ NOT_FOUND:
 
 
 // func scanJSONStringASM(src []byte) (end int, hasEscape bool)
-TEXT ·scanJSONStringASM(SB), NOSPLIT, $0-33
+TEXT ·scanJSONStringAVX2(SB), NOSPLIT, $0-33
     MOVQ src_base+0(FP), AX
     MOVQ src_len+8(FP), BX
 
@@ -90,7 +90,7 @@ scan_eof:
 // AVX2: copies s into buf with surrounding quotes, scanning for '"' and '\\'.
 // Returns (newBuf, -1)   if string is fully written.
 // Returns (buf, -2)      if not enough space in buf.
-TEXT ·appendStringASM(SB), NOSPLIT, $0-72
+TEXT ·appendStringAVX2(SB), NOSPLIT, $0-72
     MOVQ buf_base+0(FP), DI    // DI = buf.data
     MOVQ buf_len+8(FP), R11    // R11 = buf.len
     MOVQ buf_cap+16(FP), DX    // DX = buf.cap
@@ -239,7 +239,7 @@ asw_overflow:
     MOVQ $-2, ret1+64(FP)
     RET
 
-TEXT ·parseShortStringASM2(SB), NOSPLIT, $0-40
+TEXT ·parseShortStringAVX2_2(SB), NOSPLIT, $0-40
     MOVQ src_base+0(FP), SI
     MOVQ src_len+8(FP), BX
 
@@ -339,7 +339,7 @@ eof:
 
 
 // func parseShortStringASM(src []byte) ([]byte, int64)
-TEXT ·parseShortStringASM(SB), $24-56
+TEXT ·parseShortStringAVX2(SB), $24-56
     MOVQ src_base+0(FP), R12
     MOVQ src_len+8(FP), BX
 
@@ -620,7 +620,7 @@ copy_eof:
     RET
 
 // func findObjectBoundariesASM(data []byte, chunks []Chunk) (ret0 int, ret1 int)
-TEXT ·findObjectBoundariesASM(SB), NOSPLIT, $8-64
+TEXT ·findObjectBoundariesAVX2(SB), NOSPLIT, $8-64
     // 1. Arguments:
     // data_ptr (0), data_len (8), data_cap (16)
     // chunks_ptr (24), chunks_len (32), chunks_cap (40)
@@ -894,7 +894,7 @@ done:
 
 
 // func skipValueASM(raw []byte, start int) int
-TEXT ·skipValueASM(SB), NOSPLIT, $0-24
+TEXT ·skipValueAVX2(SB), NOSPLIT, $0-24
     // Load arguments (Go ABI)
     MOVQ raw_base+0(FP), SI
     MOVQ raw_len+8(FP), BX
@@ -959,7 +959,7 @@ done_err:
     RET
 
 // func appendIntASM(buf []byte, val int64) []byte
-TEXT ·appendIntASM(SB), NOSPLIT, $0-56
+TEXT ·appendIntAVX2(SB), NOSPLIT, $0-56
     MOVQ buf_base+0(FP), DI    // Base
     MOVQ buf_len+8(FP), SI     // Len
     MOVQ buf_cap+16(FP), R12   // Cap
@@ -1040,7 +1040,7 @@ done:
     RET
 
 // func skipSpaceASM(raw []byte, start int) int
-TEXT ·skipSpaceASM(SB), NOSPLIT, $0-40
+TEXT ·skipSpaceAVX2(SB), NOSPLIT, $0-40
     MOVQ raw_base+0(FP), SI
     MOVQ raw_len+8(FP), BX
     MOVQ start+24(FP), CX
@@ -1111,7 +1111,7 @@ ss_done:
 
 
 // func findObjectBoundariesEarlyExitASM(data []byte, chunks []Chunk) (ret0 int, ret1 int)
-TEXT ·findObjectBoundariesEarlyExitASM(SB), NOSPLIT, $8-64
+TEXT ·findObjectBoundariesEarlyExitAVX2(SB), NOSPLIT, $8-64
     // 1. Arguments:
     // data_ptr (0), data_len (8), data_cap (16)
     // chunks_ptr (24), chunks_len (32), chunks_cap (40)
@@ -1386,7 +1386,7 @@ done:
 // func skipValueASM(raw []byte, start int) int
 
 // func findArrayElementsEarlyExitASM(data []byte, chunks []Chunk) (ret0 int, ret1 int)
-TEXT ·findArrayElementsEarlyExitASM(SB), NOSPLIT, $8-64
+TEXT ·findArrayElementsEarlyExitAVX2(SB), NOSPLIT, $8-64
     MOVQ data_base+0(FP), SI
     MOVQ data_len+8(FP), BX
     MOVQ chunks_base+24(FP), DI

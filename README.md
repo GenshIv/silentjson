@@ -26,7 +26,7 @@ We desperately needed a lightning-fast alternative that didn't rely on JIT (Just
 * **Input Buffer Immutability:** Because strings are mapped directly via zero-copy, the underlying `rawJSON` byte slice **must not be modified** while the parsed objects are still in use.
 * **Memory Retention (Zero-Copy Side Effect):** Because strings hold direct references to the original `rawJSON` buffer, retaining even a single parsed string in memory will prevent the entire underlying JSON byte array from being garbage collected. If you only need to store a small subset of parsed data for a long time, explicitly copy the strings (e.g., using `strings.Clone(val)`).
 * **CPU Usage (Parallel Parsing):** `UnmarshalArrayParallel` is designed to use all available CPU cores to maximize speed for large payloads. It is ideal for batch processing or data pipelines. Avoid using it inside individual, high-concurrency API handlers, as this can lead to excessive goroutine creation. For per-request parsing, `UnmarshalSlice` is the better choice.
-* **CPU Architecture Requirements:** The `amd64` implementation currently requires **AVX-512** instructions. It will not work on processors lacking AVX-512 (e.g., modern Intel Core Ultra or older CPUs). The `arm64` implementation requires ARM NEON.
+* **CPU Architecture Requirements:** The `amd64` implementation uses **AVX2** instructions by default for maximum performance. If AVX2 is not available, it seamlessly falls back to a pure Go scalar implementation. The `arm64` implementation requires ARM NEON.
 
 ## Performance Deep Dive
 
@@ -61,6 +61,22 @@ xychart-beta
     y-axis "Millions Obj/sec" 0 --> 25
     bar [21.78, 13.72, 3.47, 3.41, 2.64, 0.69]
 ```
+
+### Hardware Flexibility (AVX2 vs Pure Go)
+`silentjson` dynamically detects CPU features at runtime. If AVX2 is available, it uses blazing-fast SIMD vector instructions. If not, it gracefully falls back to a highly optimized, pure Go scalar implementation—ensuring your application **never crashes** on older hardware while still delivering incredible multithreaded performance.
+
+Here is a head-to-head comparison demonstrating how `silentjson` performs with and without AVX2 against `Sonic`:
+
+```text
+Library         AVX2        Speed           Allocs
+--------------------------------------------------
+SilentJSON      Yes         3706 MB/s       132
+SilentJSON      No          676 MB/s        70
+Sonic           Yes         682 MB/s        10002
+Sonic           No          479 MB/s        10002
+```
+*Note: Even in fallback (pure Go) mode, our parallel architecture allows `silentjson` to match or beat the speed of Sonic's AVX2 JIT-compiled parser, while using 140x fewer allocations!*
+
 
 ### Scalability Across File Sizes (< 1 KB to 640 MB)
 Our CLMUL-accelerated parallel scanner not only reaches incredible peaks but maintains its performance lead across all file sizes.
@@ -169,14 +185,14 @@ xychart-beta
 
 - **Unmatched Speed**: Up to **3000+ MB/s** decoding speed by parallelizing the unmarshalling of large arrays.
 - **Zero-Copy Architecture**: Maximizes performance and minimizes GC overhead through direct `[]byte` mapping.
-- **Cross-Platform**: SIMD-level acceleration for `amd64` (AVX-512) and `arm64` (NEON) with **Experimental Apple Silicon and Linux ARM support!**
+- **Cross-Platform**: SIMD-level acceleration for `amd64` (AVX2) and `arm64` (NEON) with **Experimental Apple Silicon and Linux ARM support!**
 - **Effortless Integration**: Drop-in `UnmarshalArrayParallel` function that is fully compatible with native `[]struct{}` types.
 - **Developer Friendly**: No code generation (`go generate`) required.
 * **AVX2 & NEON Tape-Scanner:** Utilizes a Bitmask Iterator and SIMD instructions (like `simdjson`) to process JSON structures at blazing speeds without scalar loops.
 * **Zero-Allocation Marshaling:** `MarshalSlice` does not allocate any heap memory, eliminating GC pressure.
 * **Zero-Copy String Parsing:** Uses `unsafe.String` to map JSON string values directly from the input buffer.
 * **Precomputed Registry:** Uses `reflect` only once at startup to build a structural registry, avoiding runtime reflection entirely.
-* **Multi-Platform Native Assembly:** Works perfectly on Intel/AMD (AVX-512) and features **experimental Apple Silicon / Linux ARM64 support** via native AArch64 NEON assembly.
+* **Multi-Platform Native Assembly:** Works perfectly on Intel/AMD (AVX2 + Scalar Fallback) and features **experimental Apple Silicon / Linux ARM64 support** via native AArch64 NEON assembly.
 * **Generics Support:** Clean, modern API for slices via Go 1.18+ generics.
 
 ## 📦 Installation
@@ -357,7 +373,7 @@ go test -bench=.
 
 ## 📝 TODO / Roadmap
 
-- [ ] **AVX2 Fallback**: Implement an AVX2 assembly path for `amd64` to support Intel Core Ultra and older x86_64 processors that lack AVX-512.
+- [x] **Scalar Fallback**: Implemented a pure Go scalar fallback for older processors that lack AVX2.
 - [ ] **vtprotobuf Benchmarks**: Add `vtprotobuf` to the benchmark suite for a fair comparison against allocation-free protobuf parsing.
 
 ## 🤝 Contributing
