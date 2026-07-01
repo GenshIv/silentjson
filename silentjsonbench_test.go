@@ -16,7 +16,7 @@ import (
 	"github.com/GenshIv/silentjson/pb"
 	"github.com/buger/jsonparser"
 	"github.com/bytedance/sonic"
-	simdjson "github.com/minio/simdjson-go"
+	goccyjson "github.com/goccy/go-json"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/naoina/toml"
 	"google.golang.org/protobuf/proto"
@@ -210,71 +210,16 @@ func BenchmarkNestedComparison(b *testing.B) {
 			}
 		}
 	})
-
-	b.Run("Simdjson", func(b *testing.B) {
+	b.Run("Goccy", func(b *testing.B) {
+		dst := make([]Employee, recordCount)
 		b.SetBytes(int64(len(hugeJSONData)))
 		b.ReportAllocs()
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			parsed, err := simdjson.Parse(hugeJSONData, nil)
+			err := goccyjson.Unmarshal(hugeJSONData, &dst)
 			if err != nil {
 				b.Fatal(err)
-			}
-			iter := parsed.Iter()
-			if iter.Type() == simdjson.TypeArray {
-				array, _ := iter.Array(nil)
-				array.ForEach(func(i simdjson.Iter) {
-					if i.Type() == simdjson.TypeObject {
-						obj, _ := i.Object(nil)
-						var emp Employee
-
-						var elem simdjson.Element
-
-						if obj.FindKey("id", &elem) != nil {
-							id, _ := elem.Iter.Int()
-							emp.ID = int(id)
-						}
-						if obj.FindKey("is_active", &elem) != nil {
-							emp.IsActive, _ = elem.Iter.Bool()
-						}
-						if obj.FindKey("balance", &elem) != nil {
-							emp.Balance, _ = elem.Iter.Float()
-						}
-						if obj.FindKey("address", &elem) != nil {
-							if elem.Type == simdjson.TypeObject {
-								addrObj, _ := elem.Iter.Object(nil)
-								var subElem simdjson.Element
-								if addrObj.FindKey("city", &subElem) != nil {
-									emp.Address.City, _ = subElem.Iter.String()
-								}
-								if addrObj.FindKey("zip", &subElem) != nil {
-									zip, _ := subElem.Iter.Int()
-									emp.Address.Zip = int(zip)
-								}
-							}
-						}
-						if obj.FindKey("tags", &elem) != nil {
-							if elem.Type == simdjson.TypeArray {
-								tagsArr, _ := elem.Iter.Array(nil)
-								tagsArr.ForEach(func(t simdjson.Iter) {
-									tagStr, _ := t.String()
-									emp.Tags = append(emp.Tags, tagStr)
-								})
-							}
-						}
-						if obj.FindKey("scores", &elem) != nil {
-							if elem.Type == simdjson.TypeArray {
-								scoresArr, _ := elem.Iter.Array(nil)
-								scoresArr.ForEach(func(s simdjson.Iter) {
-									scoreInt, _ := s.Int()
-									emp.Scores = append(emp.Scores, int(scoreInt))
-								})
-							}
-						}
-						_ = emp
-					}
-				})
 			}
 		}
 	})
@@ -498,15 +443,6 @@ func BenchmarkLargeScaleComparison(b *testing.B) {
 		}
 	})
 
-	b.Run("Simdjson_AST", func(b *testing.B) {
-		b.SetBytes(int64(len(rawJSON)))
-		b.ReportAllocs()
-		b.ResetTimer()
-		var pj *simdjson.ParsedJson
-		for i := 0; i < b.N; i++ {
-			pj, _ = simdjson.Parse(rawJSON, pj)
-		}
-	})
 
 	b.Run("Protobuf", func(b *testing.B) {
 		b.SetBytes(int64(len(rawPB)))
