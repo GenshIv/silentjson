@@ -549,7 +549,7 @@ Latest results on AMD Ryzen 9 7950X3D showing consistent high performance:
 **SilentJSON Architecture Comparison (100k objects):**
 ```
 AVX2 Mode:       26,255 MB/s ⭐ (26,255x faster than single object)
-Scalar Mode:        829 MB/s  (+32x over Sonic)
+Scalar Mode:        829 MB/s 
 Sonic (JIT):        584 MB/s
 Standard JSON:      117 MB/s
 ```
