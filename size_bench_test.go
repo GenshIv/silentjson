@@ -11,7 +11,7 @@ import (
 	"github.com/bytedance/sonic"
 )
 
-var sizesToTest = []int{5, 100, 1000, 10000, 100000, 1000000, 5000000} // Number of elements
+var sizesToTest = []int{5, 100, 1000, 10000, 100000} // Number of elements
 
 func BenchmarkSizeScalability(b *testing.B) {
 	for _, numElements := range sizesToTest {
