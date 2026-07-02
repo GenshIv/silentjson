@@ -1,4 +1,3 @@
-
 package silentjson
 
 import (
@@ -6,10 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"reflect"
 	"testing"
-	"unsafe"
 
 	"github.com/GenshIv/silentjson/pb"
 	"github.com/buger/jsonparser"
@@ -42,8 +39,6 @@ const (
 	benchSliceSize = 100_000
 )
 
-var testFileName = fmt.Sprintf("nested_huge_data_%d.json", recordCount)
-
 type EmpSlice []Employee
 
 var (
@@ -52,82 +47,62 @@ var (
 )
 
 func init() {
-	if _, err := os.Stat(testFileName); os.IsNotExist(err) {
-		fmt.Printf("Generating file %s (Chaos-mode)...\n", testFileName)
-		file, _ := os.Create(testFileName)
-		file.WriteString("[\n")
+	var buf bytes.Buffer
+	buf.WriteString("[\n")
 
-		escapedCount := 0
+	escapedCount := 0
 
-		for i := 0; i < recordCount; i++ {
-			city := fmt.Sprintf("Warsaw_%d", i%100)
-			if escapedCount < 100 {
-				city = fmt.Sprintf("Warsaw \\\"Central\\\" %d", i)
-				escapedCount++
-			}
-			if i%17 == 0 {
-				city = ""
-			}
-
-			tagsStr := `"backend","go","fast"`
-			scoresStr := "10,20,30"
-			if i%7 == 0 {
-				tagsStr = ""
-			}
-			if i%11 == 0 {
-				scoresStr = ""
-			}
-
-			balanceStr := fmt.Sprintf("%.2f", float64(i)*1.15)
-			if i%13 == 0 {
-				balanceStr = "null"
-			}
-
-			var line string
-			switch i % 3 {
-			case 0:
-				line = fmt.Sprintf(`{"id":%d,"unknown_arr":[1,2,{"nest":true}],"is_active":%t,"balance":%s,"address":{"city":"%s","zip":%d},"tags":[%s],"scores":[%s]}`,
-					i, i%2 == 0, balanceStr, city, 10000+i, tagsStr, scoresStr)
-			case 1:
-				line = fmt.Sprintf(`{"scores":[%s],"address":{"zip":%d,"city":"%s"},"junk":{"foo":"bar"},"balance":%s,"tags":[%s],"is_active":%t,"id":%d}`,
-					scoresStr, 10000+i, city, balanceStr, tagsStr, i%2 == 0, i)
-			case 2:
-				line = fmt.Sprintf(`{"is_active":%t,"tags":[%s],"id":%d,"ignore_me":null,"scores":[%s],"balance":%s,"address":{"zip":%d,"city":"%s"}}`,
-					i%2 == 0, tagsStr, i, scoresStr, balanceStr, 10000+i, city)
-			}
-
-			file.WriteString(line)
-			if i < recordCount-1 {
-				file.WriteString(",\n")
-			} else {
-				file.WriteString("\n")
-			}
+	for i := 0; i < recordCount; i++ {
+		city := fmt.Sprintf("Warsaw_%d", i%100)
+		if escapedCount < 100 {
+			city = fmt.Sprintf("Warsaw \\\"Central\\\" %d", i)
+			escapedCount++
 		}
-		file.WriteString("]\n")
-		file.Close()
-	}
+		if i%17 == 0 {
+			city = ""
+		}
 
-	hugeJSONData, _ = os.ReadFile(testFileName)
-	printMemoryAnalytics()
+		tagsStr := `"backend","go","fast"`
+		scoresStr := "10,20,30"
+		if i%7 == 0 {
+			tagsStr = ""
+		}
+		if i%11 == 0 {
+			scoresStr = ""
+		}
+
+		balanceStr := fmt.Sprintf("%.2f", float64(i)*1.15)
+		if i%13 == 0 {
+			balanceStr = "null"
+		}
+
+		var line string
+		switch i % 3 {
+		case 0:
+			line = fmt.Sprintf(`{"id":%d,"unknown_arr":[1,2,{"nest":true}],"is_active":%t,"balance":%s,"address":{"city":"%s","zip":%d},"tags":[%s],"scores":[%s]}`,
+				i, i%2 == 0, balanceStr, city, 10000+i, tagsStr, scoresStr)
+		case 1:
+			line = fmt.Sprintf(`{"scores":[%s],"address":{"zip":%d,"city":"%s"},"junk":{"foo":"bar"},"balance":%s,"tags":[%s],"is_active":%t,"id":%d}`,
+				scoresStr, 10000+i, city, balanceStr, tagsStr, i%2 == 0, i)
+		case 2:
+			line = fmt.Sprintf(`{"is_active":%t,"tags":[%s],"id":%d,"ignore_me":null,"scores":[%s],"balance":%s,"address":{"zip":%d,"city":"%s"}}`,
+				i%2 == 0, tagsStr, i, scoresStr, balanceStr, 10000+i, city)
+		}
+
+		buf.WriteString(line)
+		if i < recordCount-1 {
+			buf.WriteString(",\n")
+		} else {
+			buf.WriteString("\n")
+		}
+	}
+	buf.WriteString("]\n")
+
+	hugeJSONData = buf.Bytes()
 	initMarshalData()
 }
 
-func printMemoryAnalytics() {
-	baseStructSize := unsafe.Sizeof(Employee{})
-	sliceBackingArraysSize := uintptr(4*16 + 3*8)
-	totalPerRecord := baseStructSize + sliceBackingArraysSize
-	totalMB := float64(totalPerRecord*uintptr(recordCount)) / 1024 / 1024
-	bufferMB := float64(len(hugeJSONData)) / 1024 / 1024
-
-	fmt.Printf("\n=== MEMORY ANALYTICS ===\n")
-	fmt.Printf("1. Source JSON buffer (Zero-Copy Source): %.2f MB\n", bufferMB)
-	fmt.Printf("2. Average size of Employee + arrays: %d bytes\n", totalPerRecord)
-	fmt.Printf("3. Total RAM for %d records: %.2f MB\n", recordCount, totalMB)
-	fmt.Printf("================================\n\n")
-}
-
 func initMarshalData() {
-	fmt.Printf("Generating slice of %d structures for Marshal...\n", benchSliceSize)
 	benchEmpSlice = make([]Employee, benchSliceSize)
 	for i := 0; i < benchSliceSize; i++ {
 		city := fmt.Sprintf("Warsaw_%d", i%100)
@@ -147,7 +122,6 @@ func initMarshalData() {
 			Scores: []int{i % 10, i % 20, i % 30},
 		}
 	}
-	fmt.Println("Marshal slice is ready!")
 }
 
 // --- BENCHMARKS ---
@@ -405,7 +379,6 @@ func BenchmarkLargeScaleComparison(b *testing.B) {
 		}
 	})
 
-
 	b.Run("Protobuf", func(b *testing.B) {
 		b.SetBytes(int64(len(rawPB)))
 		b.ReportAllocs()
@@ -556,7 +529,27 @@ func BenchmarkStreamComparison(b *testing.B) {
 			r := bytes.NewReader(hugeJSONData)
 			dec := NewStreamDecoder[Employee](r, reg)
 			ch := dec.NextChan(100) // Buffer of 100 for maximum throughput
-			
+
+			for res := range ch {
+				if res.Err != nil {
+					b.Fatal(res.Err)
+				}
+				_ = res.Item
+			}
+		}
+	})
+
+	b.Run("SilentJSON_Stream_NextChanParallel", func(b *testing.B) {
+		reg := BuildRegistry(reflect.TypeOf(Employee{}))
+		b.SetBytes(int64(len(hugeJSONData)))
+		b.ReportAllocs()
+		b.ResetTimer()
+
+		for i := 0; i < b.N; i++ {
+			r := bytes.NewReader(hugeJSONData)
+			dec := NewStreamDecoder[Employee](r, reg)
+			ch := dec.NextChanParallel(16, 100)
+
 			for res := range ch {
 				if res.Err != nil {
 					b.Fatal(res.Err)
@@ -645,7 +638,6 @@ func initTOMLData() {
 		buf.WriteString(fmt.Sprintf("zip = %d\n\n", emp.Address.Zip))
 	}
 	hugeTOMLData = buf.Bytes()
-	fmt.Printf("Generated %d MB of TOML data\n", len(hugeTOMLData)/1024/1024)
 }
 
 func BenchmarkTOMLComparison(b *testing.B) {

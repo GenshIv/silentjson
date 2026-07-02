@@ -307,7 +307,42 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 				}
 			}
 		} else {
-			info, ok = reg.NameMap[keySlice]
+			var hash uint32
+			if keyLen <= 8 {
+				hash = hashU64(keyU64)
+			} else {
+				hash = hashBytes(decoded)
+			}
+			keysLenPtr := unsafe.Pointer(unsafe.SliceData(reg.HashKeysLen))
+			keysU64Ptr := unsafe.Pointer(unsafe.SliceData(reg.HashKeysU64))
+			keysStrPtr := unsafe.Pointer(unsafe.SliceData(reg.HashKeysStr))
+			valsPtr := unsafe.Pointer(unsafe.SliceData(reg.HashValues))
+
+			idx := hash & reg.HashMask
+			for {
+				length := int(*(*uint8)(unsafe.Pointer(uintptr(keysLenPtr) + uintptr(idx))))
+				if length == 0 {
+					break
+				}
+				if keyLen <= 8 {
+					u64Val := *(*uint64)(unsafe.Pointer(uintptr(keysU64Ptr) + uintptr(idx)*8))
+					if length == keyLen && u64Val == keyU64 {
+						valIdx := *(*int16)(unsafe.Pointer(uintptr(valsPtr) + uintptr(idx)*2))
+						info = reg.Fields[valIdx]
+						ok = true
+						break
+					}
+				} else {
+					strVal := *(*string)(unsafe.Pointer(uintptr(keysStrPtr) + uintptr(idx)*16))
+					if strVal == keySlice {
+						valIdx := *(*int16)(unsafe.Pointer(uintptr(valsPtr) + uintptr(idx)*2))
+						info = reg.Fields[valIdx]
+						ok = true
+						break
+					}
+				}
+				idx = (idx + 1) & reg.HashMask
+			}
 		}
 		if ok {
 			switch info.Type {
@@ -389,7 +424,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 				}
 				*(*[]int)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = slice
 				i += consumed
-			
+
 			case TypeStructSlice:
 				if (charTable[raw[i]] & charOpenBracket) == 0 {
 					return 0, fmt.Errorf("%w: expected struct slice value", ErrTypeMismatch)
@@ -403,19 +438,42 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 					continue
 				}
 
-				slicePtr := reflect.NewAt(info.SliceType, unsafe.Pointer(uintptr(ptr)+info.Offset))
-				sliceVal := slicePtr.Elem()
-				sliceVal.SetLen(0)
+				header := (*reflect.SliceHeader)(unsafe.Pointer(uintptr(ptr) + info.Offset))
+				if header.Cap == 0 {
+					newSlice := reflect.MakeSlice(info.SliceType, 0, 16)
+					header.Data = newSlice.Pointer()
+					header.Cap = 16
+				}
+				header.Len = 0
+				elemSize := info.ElemType.Size()
 
 				for {
-					elemPtr := reflect.New(info.ElemType)
-					consumed, err := parseObjectAt(raw[i:], info.Sub, unsafe.Pointer(elemPtr.Pointer()))
+					if header.Len >= header.Cap {
+						newCap := header.Cap * 2
+						if newCap == 0 {
+							newCap = 16
+						}
+						oldSlice := reflect.NewAt(info.SliceType, unsafe.Pointer(header)).Elem()
+						newSlice := reflect.MakeSlice(info.SliceType, header.Len, newCap)
+						reflect.Copy(newSlice, oldSlice)
+						header.Data = newSlice.Pointer()
+						header.Cap = newCap
+					}
+
+					elemPtr := unsafe.Pointer(header.Data + uintptr(header.Len)*elemSize)
+
+					// Zero the memory quickly using Go's optimized memclr
+					b := unsafe.Slice((*byte)(elemPtr), elemSize)
+					for j := range b {
+						b[j] = 0
+					}
+
+					consumed, err := parseObjectAt(raw[i:], info.Sub, elemPtr)
 					if err != nil {
 						return 0, err
 					}
+					header.Len++
 					i += consumed
-
-					sliceVal.Set(reflect.Append(sliceVal, elemPtr.Elem()))
 
 					for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
 						i++

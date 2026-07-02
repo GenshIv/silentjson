@@ -105,8 +105,6 @@ func TestZeroCopy_String(t *testing.T) {
 
 	if diff >= uintptr(len(payload)) {
 		t.Errorf("Zero-copy failed: string is allocated outside the original payload memory! diff: %d", diff)
-	} else {
-		t.Logf("Zero-copy verified: string offset from payload start is %d bytes", diff)
 	}
 }
 
@@ -394,4 +392,3 @@ func TestParseNestedStructures(t *testing.T) {
 		t.Errorf("Deeply nested worker name mismatched. Expected Charlie, got %s", company.Departments[1].Workers[0].Name)
 	}
 }
-
