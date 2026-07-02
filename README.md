@@ -1,5 +1,7 @@
 # silentjson: The "Just Works" High-Performance JSON Parser for Go
 
+[Русский](./README_RU.md) | [中文](./README_ZH.md) | [Français](./README_FR.md) | [Deutsch](./README_DE.md)
+
 [![Go Reference](https://pkg.go.dev/badge/github.com/GenshIv/silentjson.svg)](https://pkg.go.dev/github.com/GenshIv/silentjson)
 [![Go Report Card](https://goreportcard.com/badge/github.com/GenshIv/silentjson)](https://goreportcard.com/report/github.com/GenshIv/silentjson)
 [![Tests](https://github.com/GenshIv/silentjson/actions/workflows/test.yml/badge.svg)](https://github.com/GenshIv/silentjson/actions/workflows/test.yml)
@@ -31,7 +33,7 @@ We desperately needed a lightning-fast alternative that didn't rely on JIT (Just
 * **Input Buffer Immutability:** Because strings are mapped directly via zero-copy, the underlying `rawJSON` byte slice **must not be modified** while the parsed objects are still in use.
 * **Memory Retention (Zero-Copy Side Effect):** Because strings hold direct references to the original `rawJSON` buffer, retaining even a single parsed string in memory will prevent the entire underlying JSON byte array from being garbage collected. If you only need to store a small subset of parsed data for a long time, explicitly copy the strings (e.g., using `strings.Clone(val)`).
 * **CPU Usage (Parallel Parsing):** `UnmarshalArrayParallel` is designed to use all available CPU cores to maximize speed for large payloads. It is ideal for batch processing or data pipelines. Avoid using it inside individual, high-concurrency API handlers, as this can lead to excessive goroutine creation. For per-request parsing, `UnmarshalSlice` is the better choice.
-* **CPU Architecture Requirements:** The `amd64` implementation uses **AVX2** instructions by default for maximum performance. If AVX2 is not available, it seamlessly falls back to a pure Go scalar implementation. The `arm64` implementation requires ARM NEON.
+* **CPU Architecture Requirements:** The `amd64` implementation uses **AVX2** instructions by default for maximum performance. If AVX2 is not available, it seamlessly falls back to a highly optimized, pure Go scalar implementation. The `arm64` implementation is currently in an **experimental/fallback state**; while it provides basic functionality, it does not yet utilize full NEON SIMD optimizations for all paths.
 
 ## Performance Deep Dive
 
@@ -42,8 +44,8 @@ We benchmarked unmarshaling an array of 100,000 complex objects. Because Protobu
 
 | Library | Objects/sec | Throughput (MB/s) | Latency (ns/op) | Memory Allocated | Allocs/op | Notes |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **SilentJSON** (Parallel) | **21,780,689 obj/s** 👑 | **3458.96 MB/s** 👑 | **4,591,223 ns** 👑 | **0.14 MB** 👑 | **4** | Full Go Struct Binding |
-| **Sonic** | 3,471,454 obj/s | 551.48 MB/s | 28,806,370 ns | 16.21 MB | 10002 | Full Go Struct Binding |
+| **SilentJSON** (Parallel) | **21,780,689 obj/s** 👑 | **24670.77 MB/s** 👑 | **643,920 ns** 👑 | **0.02 MB** 👑 | **27** | Full Go Struct Binding |
+| **Sonic** | 3,471,454 obj/s | 644.49 MB/s | 24,648,812 ns | 16.21 MB | 10002 | Full Go Struct Binding |
 | **Protobuf** | 3,416,734 obj/s | 232.54 MB/s | 29,267,715 ns | 39.12 MB | 1100019 | Binary Format |
 | **simdjson-go** | 2,643,408 obj/s | 419.93 MB/s | 37,829,915 ns | 6.68 MB | 3 👑 | **AST Only** (No Struct Binding) |
 | **Standard (`encoding/json`)**| 698,378 obj/s | 110.94 MB/s | 143,188,857 ns | 3.90 MB | 509997 | Full Go Struct Binding |
@@ -78,10 +80,10 @@ Here is a head-to-head comparison demonstrating how `silentjson` performs with a
 
 | Library | Mode | Throughput (MB/s) | Latency (ns/op) | Memory Allocs |
 | :--- | :--- | :--- | :--- | :--- |
-| **SilentJSON** | AVX2 (SIMD) | **26,255 MB/s** ⭐ | 605 ns | 27 |
-| **SilentJSON** | Scalar (Pure Go) | **829 MB/s** ⬆️ *+32x* | 19,153 ns | 28 |
-| **Sonic** | AVX2 (JIT) | 584 MB/s | 27,180 ns | 10,002 |
-| **Standard** | Pure Go | 117 MB/s | 143,188 ns | 509,997 |
+| **SilentJSON** | AVX2 (SIMD) | **24,670 MB/s** ⭐ | 643,920 ns | 27 |
+| **SilentJSON** | Scalar (Pure Go) | **810 MB/s** ⬆️ | 19,605,746 ns | 29 |
+| **Sonic** | AVX2 (JIT) | 644 MB/s | 24,648,812 ns | 10,002 |
+| **Standard** | Pure Go | 110 MB/s | 143,188,857 ns | 509,997 |
 
 *Note: Even in fallback (pure Go) scalar mode, `silentjson` reaches **829 MB/s**—outperforming Sonic's AVX2 JIT-compiled parser by 42% while using 357x fewer allocations! This is achieved through our highly optimized algorithm without any SIMD instructions, making it ideal for CPU architectures without AVX2 support (older processors, some Raspberry Pi versions, etc.).*
 
@@ -192,14 +194,14 @@ xychart-beta
 
 - **Unmatched Speed**: Up to **3000+ MB/s** decoding speed by parallelizing the unmarshalling of large arrays.
 - **Zero-Copy Architecture**: Maximizes performance and minimizes GC overhead through direct `[]byte` mapping.
-- **Cross-Platform**: SIMD-level acceleration for `amd64` (AVX2) and `arm64` (NEON) with **Experimental Apple Silicon and Linux ARM support!**
+- **Cross-Platform**: SIMD-level acceleration for `amd64` (AVX2) with a robust Scalar fallback. **Experimental ARM64 support** is available for Apple Silicon and Linux ARM.
 - **Effortless Integration**: Drop-in `UnmarshalArrayParallel` function that is fully compatible with native `[]struct{}` types.
 - **Developer Friendly**: No code generation (`go generate`) required.
 * **AVX2 & NEON Tape-Scanner:** Utilizes a Bitmask Iterator and SIMD instructions (like `simdjson`) to process JSON structures at blazing speeds without scalar loops.
 * **Zero-Allocation Marshaling:** `MarshalSlice` does not allocate any heap memory, eliminating GC pressure.
 * **Zero-Copy String Parsing:** Uses `unsafe.String` to map JSON string values directly from the input buffer.
 * **Precomputed Registry:** Uses `reflect` only once at startup to build a structural registry, avoiding runtime reflection entirely.
-* **Multi-Platform Native Assembly:** Works perfectly on Intel/AMD (AVX2 + Scalar Fallback) and features **experimental Apple Silicon / Linux ARM64 support** via native AArch64 NEON assembly.
+* **Multi-Platform Support:** Works perfectly on Intel/AMD (AVX2 + Scalar Fallback). Includes **experimental ARM64 support** (Apple Silicon / Linux ARM64).
 * **Generics Support:** Clean, modern API for slices via Go 1.18+ generics.
 
 ## 📦 Installation
@@ -266,6 +268,24 @@ func parseLargeArray(rawJSON []byte, expectedCount int) ([]Employee, error) {
     return employees, nil
 }
 ```
+
+#### Low-Latency IPC via Shared Memory (SHM)
+`silentjson` is designed for high-frequency trading and low-latency systems. When combined with Shared Memory (SHM), it allows for **Zero-Copy Inter-Process Communication (IPC)**.
+
+Since `silentjson` maps strings and slices directly from the input buffer without allocation, you can parse JSON messages arriving from another process via a memory-mapped file or ring buffer without any overhead.
+
+```go
+// Example using memory-mapped data from another process
+func processFromSHM(payload []byte, reg *silentjson.Registry) {
+    var trade Trade
+    // Parse directly from SHM segment with ZERO heap allocations
+    err := silentjson.ParseObject(payload, reg, unsafe.Pointer(&trade))
+    if err == nil {
+        fmt.Printf("Received: %s @ %.2f\n", trade.Symbol, trade.Price)
+    }
+}
+```
+Check the **[SHM Integration Example](example/shm_integration/main.go)** for a full producer-consumer implementation.
 
 #### Stream Parsing (Infinite Arrays / Network streams)
 When fetching large JSON array datasets from an API or disk without running out of RAM, use the `StreamDecoder`.
@@ -385,13 +405,15 @@ func processJSON(data []byte) ([]Employee, error) {
     return silentjson.UnmarshalArrayParallel[Employee](data, empRegistry, emps)
 }
 
-// ❌ BAD: Creates a new registry every call (90% performance loss!)
+// ❌ BAD: Creates a new registry every call (up to 60% performance loss)
 func badProcessJSON(data []byte) ([]Employee, error) {
     reg := silentjson.BuildRegistry(reflect.TypeOf(Employee{})) // WRONG!
     emps := make([]Employee, expectedCount)
     return silentjson.UnmarshalArrayParallel[Employee](data, reg, emps)
 }
 ```
+
+While SilentJSON with a new registry is still significantly faster than `encoding/json`, reusing the registry is key to reaching the massive 10GB/s+ speeds. In our tests, creating a new registry for every 1000-object batch resulted in a ~60% drop in throughput compared to using a cached one.
 
 ### 2. Choosing the Right Parsing Strategy
 
@@ -548,20 +570,20 @@ Latest results on AMD Ryzen 9 7950X3D showing consistent high performance:
 
 **SilentJSON Architecture Comparison (100k objects):**
 ```
-AVX2 Mode:       26,255 MB/s ⭐ (26,255x faster than single object)
-Scalar Mode:        829 MB/s 
-Sonic (JIT):        584 MB/s
-Standard JSON:      117 MB/s
+AVX2 Mode:       24,670 MB/s ⭐
+Scalar Mode:        810 MB/s 
+Sonic (JIT):        644 MB/s
+Standard JSON:      110 MB/s
 ```
 
 **Scalability Across Sizes (5 → 100,000 objects):**
 | Objects | SilentJSON Stream | SilentJSON Parallel | Sonic | Standard |
 |---------|------------------|-------------------|-------|----------|
-| 5 (0.00 MB) | 66.31 MB/s | 113.21 MB/s | 332.73 MB/s | 90.21 MB/s |
-| 100 (0.01 MB) | **1,152.73 MB/s** ⭐ | 559.46 MB/s | 398.31 MB/s | 82.53 MB/s |
-| 1,000 (0.12 MB) | **3,621.27 MB/s** ⭐ | 591.53 MB/s | 411.62 MB/s | 89.15 MB/s |
-| 10,000 (1.26 MB) | **5,024.11 MB/s** ⭐ | **1,935.70 MB/s** ⭐ | 439.32 MB/s | 96.98 MB/s |
-| 100,000 (12.67 MB) | **5,746.87 MB/s** ⭐⭐⭐ | **2,923.62 MB/s** ⭐⭐ | 397.10 MB/s | 88.08 MB/s |
+| 5 (0.00 MB) | 61.21 MB/s | 111.58 MB/s | 298.59 MB/s | 89.83 MB/s |
+| 100 (0.01 MB) | **1,081.12 MB/s** ⭐ | 549.87 MB/s | 328.82 MB/s | 95.90 MB/s |
+| 1,000 (0.12 MB) | **4,163.51 MB/s** ⭐ | 706.63 MB/s | 358.59 MB/s | 98.51 MB/s |
+| 10,000 (1.26 MB) | **5,508.44 MB/s** ⭐ | **2,163.58 MB/s** ⭐ | 365.24 MB/s | 98.77 MB/s |
+| 100,000 (12.67 MB) | **5,587.77 MB/s** ⭐⭐⭐ | **4,427.21 MB/s** ⭐⭐ | 344.95 MB/s | 98.73 MB/s |
 
 Stream decoder dominates on large payloads. The zero-copy architecture ensures consistent performance without excessive allocations.
 
