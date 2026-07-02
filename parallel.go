@@ -294,3 +294,96 @@ CLEANUP:
 	}
 	return dst[:itemsFound], nil
 }
+
+// MarshalSliceParallel serializes a slice into a JSON array using multiple goroutines.
+func MarshalSliceParallel[S ~[]T, T any](slice S, reg *Registry, buf []byte) []byte {
+	n := len(slice)
+	if n == 0 {
+		return append(buf, '[', ']')
+	}
+
+	// Use sequential for small slices
+	if n < 100 {
+		return MarshalSlice(slice, reg, buf)
+	}
+
+	workers := runtime.GOMAXPROCS(0)
+	if workers > 16 {
+		workers = 16
+	}
+
+	// Calculate chunks
+	chunkSize := (n + workers - 1) / workers
+	if chunkSize < 50 {
+		chunkSize = 50
+		workers = (n + chunkSize - 1) / chunkSize
+	}
+
+	type chunkResult struct {
+		data []byte
+		idx  int
+	}
+
+	results := make([][]byte, workers)
+	var wg sync.WaitGroup
+
+	// Estimated size per element to preallocate chunk buffers
+	// We can use a heuristic or just start with a reasonable size.
+	// Based on benchEmpSlice, average size is ~250 bytes.
+	avgElemSize := 256
+	if n > 0 {
+		// If we have some hint from buf capacity, use it
+		if cap(buf) > 0 {
+			avgElemSize = cap(buf) / n
+			if avgElemSize < 16 {
+				avgElemSize = 16
+			}
+		}
+	}
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(workerIdx int) {
+			defer wg.Done()
+			start := workerIdx * chunkSize
+			end := start + chunkSize
+			if end > n {
+				end = n
+			}
+
+			if start >= end {
+				return
+			}
+
+			// Preallocate chunk buffer
+			cBuf := make([]byte, 0, (end-start)*avgElemSize)
+			for j := start; j < end; j++ {
+				if j > start {
+					cBuf = append(cBuf, ',')
+				}
+				ptr := unsafe.Pointer(&slice[j])
+				cBuf = MarshalObject(ptr, reg, cBuf)
+			}
+			results[workerIdx] = cBuf
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Combine results
+	buf = append(buf, '[')
+	first := true
+	for i := 0; i < workers; i++ {
+		if len(results[i]) == 0 {
+			continue
+		}
+		if !first {
+			buf = append(buf, ',')
+		}
+		buf = append(buf, results[i]...)
+		first = false
+	}
+	buf = append(buf, ']')
+
+	return buf
+}

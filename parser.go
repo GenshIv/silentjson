@@ -3,7 +3,10 @@ package silentjson
 import (
 	"fmt"
 	"reflect"
+	"strconv"
 	"unsafe"
+
+	"github.com/cespare/ryu"
 )
 
 func skipValue(raw []byte, i int) int {
@@ -173,18 +176,52 @@ func MarshalObject(ptr unsafe.Pointer, reg *Registry, buf []byte) []byte {
 	buf = append(buf, '{')
 	fields := reg.Fields
 
-	if len(fields) > 0 {
-		// First field (no comma before it)
-		f := &fields[0]
-		buf = append(buf, f.EncodedKey...)
-		buf = f.Marshaler(unsafe.Pointer(uintptr(ptr)+f.Offset), buf)
-
-		// Remaining fields
-		for i := 1; i < len(fields); i++ {
+	for i := 0; i < len(fields); i++ {
+		f := &fields[i]
+		if i > 0 {
 			buf = append(buf, ',')
-			f := &fields[i]
-			buf = append(buf, f.EncodedKey...)
-			buf = f.Marshaler(unsafe.Pointer(uintptr(ptr)+f.Offset), buf)
+		}
+		buf = append(buf, f.EncodedKey...)
+
+		fieldPtr := unsafe.Pointer(uintptr(ptr) + f.Offset)
+		switch f.Type {
+		case TypeInt:
+			val := *(*int64)(fieldPtr)
+			newBuf := appendIntASM(buf, val)
+			if len(newBuf) == len(buf) {
+				buf = strconv.AppendInt(buf, val, 10)
+			} else {
+				buf = newBuf
+			}
+		case TypeString:
+			s := *(*string)(fieldPtr)
+			newBuf, specialPos := appendStringASM(buf, s)
+			if specialPos == -1 {
+				buf = newBuf
+			} else if specialPos == -2 {
+				buf = appendJSONStringGo(buf, s)
+			} else {
+				buf = newBuf
+				for j := specialPos; j < len(s); j++ {
+					c := s[j]
+					if (charTable[c] & (charString | charEscape)) != 0 {
+						buf = append(buf, '\\', c)
+					} else {
+						buf = append(buf, c)
+					}
+				}
+				buf = append(buf, '"')
+			}
+		case TypeBool:
+			if *(*bool)(fieldPtr) {
+				buf = append(buf, 't', 'r', 'u', 'e')
+			} else {
+				buf = append(buf, 'f', 'a', 'l', 's', 'e')
+			}
+		case TypeFloat:
+			buf = ryu.AppendFloat64(buf, *(*float64)(fieldPtr))
+		default:
+			buf = f.Marshaler(fieldPtr, buf)
 		}
 	}
 

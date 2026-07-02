@@ -289,6 +289,26 @@ func BenchmarkLargeScaleGeneration(b *testing.B) {
 			buf = MarshalSlice(benchEmpSlice, reg, buf)
 		}
 	})
+	b.Run("SilentJSON-Parallel", func(b *testing.B) {
+		const InitialCap = 25 * 1024 * 1024 // 25 MB
+		const MaxCap = 100 * 1024 * 1024    // 100 MB - limit for reset
+
+		reg := BuildRegistry(reflect.TypeOf(Employee{}))
+		buf := make([]byte, 0, InitialCap)
+
+		buf = MarshalSliceParallel(benchEmpSlice, reg, buf)
+		b.SetBytes(int64(len(buf)))
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			if cap(buf) > MaxCap {
+				buf = make([]byte, 0, InitialCap)
+			} else {
+				buf = buf[:0]
+			}
+			buf = MarshalSliceParallel(benchEmpSlice, reg, buf)
+		}
+	})
 
 	b.Run("Sonic", func(b *testing.B) {
 		sample, _ := sonic.Marshal(benchEmpSlice)

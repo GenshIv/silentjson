@@ -392,3 +392,45 @@ func TestParseNestedStructures(t *testing.T) {
 		t.Errorf("Deeply nested worker name mismatched. Expected Charlie, got %s", company.Departments[1].Workers[0].Name)
 	}
 }
+
+func TestMarshalSliceParallel_Correctness(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(TestUser{}))
+	users := make([]TestUser, 1000)
+	for i := 0; i < 1000; i++ {
+		users[i] = TestUser{
+			ID:       i,
+			Name:     fmt.Sprintf("User_%d", i),
+			IsActive: i%2 == 0,
+			Balance:  float64(i) * 1.5,
+			Tags:     []string{"tag1", "tag2"},
+		}
+	}
+
+	seqBuf := MarshalSlice(users, reg, nil)
+	parBuf := MarshalSliceParallel(users, reg, nil)
+
+	if string(seqBuf) != string(parBuf) {
+		t.Errorf("Parallel marshal output differs from sequential marshal output")
+		// Find first mismatch
+		minLen := len(seqBuf)
+		if len(parBuf) < minLen {
+			minLen = len(parBuf)
+		}
+		for i := 0; i < minLen; i++ {
+			if seqBuf[i] != parBuf[i] {
+				t.Logf("First mismatch at index %d: seq='%c', par='%c'", i, seqBuf[i], parBuf[i])
+				start := i - 10
+				if start < 0 {
+					start = 0
+				}
+				end := i + 50
+				if end > minLen {
+					end = minLen
+				}
+				t.Logf("Context seq: %s", string(seqBuf[start:end]))
+				t.Logf("Context par: %s", string(parBuf[start:end]))
+				break
+			}
+		}
+	}
+}

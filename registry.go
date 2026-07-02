@@ -144,18 +144,27 @@ func BuildRegistry(typ reflect.Type) *Registry {
 				info.ElemType = field.Type.Elem()
 
 				info.Marshaler = func(ptr unsafe.Pointer, buf []byte) []byte {
-					header := (*reflect.SliceHeader)(unsafe.Pointer(uintptr(ptr) + info.Offset))
+					slicePtr := (*[]any)(unsafe.Pointer(uintptr(ptr) + info.Offset))
+					// We don't know the exact type here for unsafe.Slice,
+					// but we have info.ElemType.Size().
+					// However, we can use the reflect.SliceHeader logic safely
+					// or just keep it as is if it's already working.
+					// Let's use a slightly more modern way if possible.
+					h := (*struct {
+						Data uintptr
+						Len  int
+						Cap  int
+					})(unsafe.Pointer(slicePtr))
+
 					buf = append(buf, '[')
-					elemSize := info.ElemType.Size()
-					for i := 0; i < header.Len; i++ {
+					eSize := info.ElemType.Size()
+					for i := 0; i < h.Len; i++ {
 						if i > 0 {
 							buf = append(buf, ',')
 						}
-						elemPtr := unsafe.Pointer(header.Data + uintptr(i)*elemSize)
-						buf = MarshalObject(elemPtr, info.Sub, buf)
+						buf = MarshalObject(unsafe.Pointer(h.Data+uintptr(i)*eSize), info.Sub, buf)
 					}
-					buf = append(buf, ']')
-					return buf
+					return append(buf, ']')
 				}
 			}
 		}
@@ -235,37 +244,37 @@ func hashU64(x uint64) uint32 {
 }
 
 func MarshalFloat(ptr unsafe.Pointer, buf []byte) []byte {
-	val := *(*float64)(ptr)
-	return ryu.AppendFloat64(buf, val)
+	return ryu.AppendFloat64(buf, *(*float64)(ptr))
 }
 
 func MarshalBool(ptr unsafe.Pointer, buf []byte) []byte {
 	if *(*bool)(ptr) {
-		return append(buf, "true"...)
+		return append(buf, 't', 'r', 'u', 'e')
 	}
-	return append(buf, "false"...)
+	return append(buf, 'f', 'a', 'l', 's', 'e')
 }
 
 func MarshalString(ptr unsafe.Pointer, buf []byte) []byte {
 	s := *(*string)(ptr)
 
 	newBuf, specialPos := appendStringASM(buf, s)
-	switch specialPos {
-	case -1:
+	if specialPos == -1 {
 		return newBuf
-	case -2:
+	}
+	if specialPos == -2 {
 		return appendJSONStringGo(buf, s)
-	default:
-		buf = newBuf
-		for i := specialPos; i < len(s); i++ {
-			c := s[i]
-			if (charTable[c] & (charString | charEscape)) != 0 {
-				buf = append(buf, '\\')
-			}
+	}
+
+	buf = newBuf
+	for i := specialPos; i < len(s); i++ {
+		c := s[i]
+		if (charTable[c] & (charString | charEscape)) != 0 {
+			buf = append(buf, '\\', c)
+		} else {
 			buf = append(buf, c)
 		}
-		return append(buf, '"')
 	}
+	return append(buf, '"')
 }
 
 func appendJSONStringGo(buf []byte, s string) []byte {
@@ -273,27 +282,28 @@ func appendJSONStringGo(buf []byte, s string) []byte {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if (charTable[c] & (charString | charEscape)) != 0 {
-			buf = append(buf, '\\')
+			buf = append(buf, '\\', c)
+		} else {
+			buf = append(buf, c)
 		}
-		buf = append(buf, c)
 	}
-	buf = append(buf, '"')
-	return buf
+	return append(buf, '"')
 }
 
 func MarshalIntSlice(ptr unsafe.Pointer, buf []byte) []byte {
 	slice := *(*[]int)(ptr)
 	if slice == nil {
-		return append(buf, "null"...)
+		return append(buf, 'n', 'u', 'l', 'l')
 	}
 	buf = append(buf, '[')
 	for i, v := range slice {
 		if i > 0 {
 			buf = append(buf, ',')
 		}
-		newBuf := appendIntASM(buf, int64(v))
+		val := int64(v)
+		newBuf := appendIntASM(buf, val)
 		if len(newBuf) == len(buf) {
-			buf = strconv.AppendInt(buf, int64(v), 10)
+			buf = strconv.AppendInt(buf, val, 10)
 		} else {
 			buf = newBuf
 		}
@@ -304,7 +314,7 @@ func MarshalIntSlice(ptr unsafe.Pointer, buf []byte) []byte {
 func MarshalStringSlice(ptr unsafe.Pointer, buf []byte) []byte {
 	slice := *(*[]string)(ptr)
 	if slice == nil {
-		return append(buf, "null"...)
+		return append(buf, 'n', 'u', 'l', 'l')
 	}
 	buf = append(buf, '[')
 	for i := range slice {
