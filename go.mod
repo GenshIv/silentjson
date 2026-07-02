@@ -3,7 +3,7 @@ module github.com/GenshIv/silentjson
 go 1.26.3
 
 require (
-	github.com/GenshIv/hft-ipc v1.2.1
+	github.com/GenshIv/hft-ipc v1.2.3
 	github.com/GenshIv/intHache v1.0.0
 	github.com/buger/jsonparser v1.2.0
 	github.com/bytedance/sonic v1.15.2
