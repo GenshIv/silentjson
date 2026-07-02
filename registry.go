@@ -34,11 +34,18 @@ type FieldInfo struct {
 	ElemType   reflect.Type
 }
 
+// HashEntry removed in favor of SoA
+
 // Registry: Map for parsing lookup, Fields for fast sequential generation
 type Registry struct {
 	Map         map[int64]FieldInfo
 	NameMap     map[string]FieldInfo
 	Fields      []FieldInfo
+	HashKeysU64 []uint64
+	HashKeysStr []string
+	HashKeysLen []uint8
+	HashValues  []int16
+	HashMask    uint32
 	chunkPool   sync.Pool
 	CopyStrings bool
 }
@@ -63,7 +70,7 @@ func BuildRegistry(typ reflect.Type) *Registry {
 
 		parts := strings.Split(tag, ",")
 		key := parts[0]
-		
+
 		keyLen := len(key)
 		var keyU64 uint64
 		if keyLen > 0 && keyLen <= 8 {
@@ -135,7 +142,7 @@ func BuildRegistry(typ reflect.Type) *Registry {
 				info.Sub = BuildRegistry(field.Type.Elem())
 				info.SliceType = field.Type
 				info.ElemType = field.Type.Elem()
-				
+
 				info.Marshaler = func(ptr unsafe.Pointer, buf []byte) []byte {
 					header := (*reflect.SliceHeader)(unsafe.Pointer(uintptr(ptr) + info.Offset))
 					buf = append(buf, '[')
@@ -167,7 +174,64 @@ func BuildRegistry(typ reflect.Type) *Registry {
 		reg.NameMap[key] = info
 		reg.Fields = append(reg.Fields, info)
 	}
+
+	// Build Custom Lock-Free Hash Table if > 16 fields
+	if len(reg.Fields) > 16 {
+		size := 1
+		for size <= len(reg.Fields)*2 {
+			size *= 2
+		}
+		reg.HashKeysU64 = make([]uint64, size)
+		reg.HashKeysStr = make([]string, size)
+		reg.HashKeysLen = make([]uint8, size)
+		reg.HashValues = make([]int16, size)
+		reg.HashMask = uint32(size - 1)
+
+		for i := 0; i < len(reg.Fields); i++ {
+			f := reg.Fields[i]
+			var idx uint32
+			if f.KeyLen <= 8 {
+				idx = hashU64(f.KeyUint64) & reg.HashMask
+			} else {
+				idx = hashString(f.Key) & reg.HashMask
+			}
+			for {
+				if reg.HashKeysLen[idx] == 0 {
+					reg.HashKeysU64[idx] = f.KeyUint64
+					reg.HashKeysStr[idx] = f.Key
+					reg.HashKeysLen[idx] = uint8(f.KeyLen)
+					reg.HashValues[idx] = int16(i)
+					break
+				}
+				idx = (idx + 1) & reg.HashMask
+			}
+		}
+	}
+
 	return reg
+}
+
+func hashString(s string) uint32 {
+	h := uint32(2166136261)
+	for i := 0; i < len(s); i++ {
+		h = (h ^ uint32(s[i])) * 16777619
+	}
+	return h
+}
+
+func hashBytes(b []byte) uint32 {
+	h := uint32(2166136261)
+	for i := 0; i < len(b); i++ {
+		h = (h ^ uint32(b[i])) * 16777619
+	}
+	return h
+}
+
+// hashU64 is a fast mixing function for our 64-bit integer keys
+func hashU64(x uint64) uint32 {
+	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
+	x = (x ^ (x >> 27)) * 0x94d049bb133111eb
+	return uint32(x ^ (x >> 31))
 }
 
 func MarshalFloat(ptr unsafe.Pointer, buf []byte) []byte {

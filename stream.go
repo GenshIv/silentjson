@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"unsafe"
 )
 
@@ -41,7 +42,7 @@ func (d *StreamDecoder[T]) fill() error {
 	if d.isEOF {
 		return nil
 	}
-	
+
 	// If buffer is too small to hold a reasonable object, we might need to grow it,
 	// but for now, we just slide the remaining data to the beginning.
 	if d.head > 0 {
@@ -126,7 +127,7 @@ func (d *StreamDecoder[T]) nextChunk() ([]byte, error) {
 			// chunkBuf[0].End is the index of the comma or closing bracket
 			endIdx := d.head + chunkBuf[0].End
 			chunk := d.buf[d.head:endIdx]
-			
+
 			// If it ended on a bracket, NextRawBlock/nextChunk handles it by seeing ']' on next call
 			// For comma, we skip it by pointing d.head exactly at it so the next iteration skips it.
 			d.head = endIdx
@@ -158,7 +159,7 @@ func (d *StreamDecoder[T]) Decode(obj *T) error {
 	return ParseObject(chunk, d.reg, unsafe.Pointer(obj))
 }
 
-// Next processes the remainder of the JSON array, unmarshaling each object into an internal reusable instance 
+// Next processes the remainder of the JSON array, unmarshaling each object into an internal reusable instance
 // and passing it to the provided callback. This enables strictly zero-allocation stream processing.
 // If the callback returns false, the iteration stops early.
 func (d *StreamDecoder[T]) Next(cb func(obj *T) bool) error {
@@ -203,7 +204,7 @@ type StreamResult[T any] struct {
 
 // NextChan launches a background goroutine that parses objects and sends them to the returned channel.
 // It uses a Ring Buffer of size `bufferSize` to achieve ZERO allocations during streaming.
-// WARNING: The returned pointer is reused after `bufferSize` iterations. You must not retain 
+// WARNING: The returned pointer is reused after `bufferSize` iterations. You must not retain
 // references to it or its slices indefinitely.
 func (d *StreamDecoder[T]) NextChan(bufferSize int) <-chan StreamResult[*T] {
 	if bufferSize < 1 {
@@ -235,6 +236,145 @@ func (d *StreamDecoder[T]) NextChan(bufferSize int) <-chan StreamResult[*T] {
 			ch <- StreamResult[*T]{Item: obj}
 			i++
 		}
+	}()
+
+	return ch
+}
+
+type streamBatch[T any] struct {
+	raw     []byte
+	count   int
+	baseIdx int
+	done    chan error
+}
+
+// NextChanParallel launches a worker pool to parse the JSON stream concurrently.
+// It uses double buffering for raw IO data, eliminating pauses between disk reads and CPU parsing.
+// The objects are guaranteed to be returned in the original JSON array order.
+func (d *StreamDecoder[T]) NextChanParallel(workers int, bufferSize int) <-chan StreamResult[*T] {
+	if workers < 1 {
+		workers = 1
+	}
+	if bufferSize < 1 {
+		bufferSize = 1
+	}
+
+	ch := make(chan StreamResult[*T], bufferSize)
+
+	const batchSize = 64
+	const maxRawSize = 1024 * 1024 // 1MB max raw slice per batch
+	rawRingSize := workers * 2
+
+	// ringSize must hold bufferSize + max possible in-flight items + padding
+	ringSize := bufferSize + (rawRingSize+2)*batchSize + 16
+	ring := make([]T, ringSize)
+
+	// Double buffering pool
+	rawPool := &sync.Pool{
+		New: func() interface{} {
+			return make([]byte, maxRawSize)
+		},
+	}
+
+	taskCh := make(chan streamBatch[T], rawRingSize)
+
+	// Launch workers
+	for w := 0; w < workers; w++ {
+		go func() {
+			for task := range taskCh {
+				if d.isEOF && task.count == 0 { // Just in case
+					task.done <- nil
+					continue
+				}
+
+				chunks := d.reg.chunkPool.Get().([]Chunk)
+				if cap(chunks) < task.count {
+					chunks = make([]Chunk, task.count)
+				}
+				chunks = chunks[:task.count]
+
+				c, _ := findArrayElementsEarlyExitASM(task.raw, chunks)
+				if c > len(chunks) {
+					c = len(chunks)
+				}
+
+				var err error
+				for i := 0; i < c; i++ {
+					obj := &ring[(task.baseIdx+i)%ringSize]
+					chunkRaw := task.raw[chunks[i].Start:chunks[i].End]
+					if parseErr := ParseObject(chunkRaw, d.reg, unsafe.Pointer(obj)); parseErr != nil {
+						err = parseErr
+						break
+					}
+				}
+				d.reg.chunkPool.Put(chunks[:cap(chunks)])
+				task.done <- err
+				rawPool.Put(task.raw[:cap(task.raw)]) // Return buffer to pool
+			}
+		}()
+	}
+
+	// Producer and Submitter
+	go func() {
+		defer close(taskCh)
+
+		batchQueue := make(chan streamBatch[T], rawRingSize)
+
+		// Submitter
+		go func() {
+			defer close(ch)
+			for batch := range batchQueue {
+				err := <-batch.done
+				if err != nil {
+					ch <- StreamResult[*T]{Err: err}
+					return // stop Submitter
+				}
+				for i := 0; i < batch.count; i++ {
+					ch <- StreamResult[*T]{Item: &ring[(batch.baseIdx+i)%ringSize]}
+				}
+			}
+		}()
+
+		itemsFound := 0
+		rawIdx := 0
+		for {
+			rawChunk, count, err := d.NextRawBlock(batchSize, maxRawSize)
+			if err != nil && err != io.EOF {
+				done := make(chan error, 1)
+				done <- err
+				batchQueue <- streamBatch[T]{done: done}
+				return
+			}
+			if count == 0 {
+				break
+			}
+
+			myRaw := rawPool.Get().([]byte)
+			if len(rawChunk) > cap(myRaw) {
+				myRaw = make([]byte, len(rawChunk)*2)
+			}
+			myRaw = myRaw[:cap(myRaw)]
+			copy(myRaw, rawChunk)
+			myRaw = myRaw[:len(rawChunk)]
+
+			done := make(chan error, 1)
+			batch := streamBatch[T]{
+				raw:     myRaw,
+				count:   count,
+				baseIdx: itemsFound,
+				done:    done,
+			}
+			itemsFound += count
+			rawIdx++
+
+			batchQueue <- batch
+			taskCh <- batch
+
+			if err == io.EOF {
+				break
+			}
+		}
+		close(batchQueue)
 	}()
 
 	return ch
@@ -305,19 +445,13 @@ func (d *StreamDecoder[T]) NextRawBlock(maxCount int, maxSize int) ([]byte, int,
 			chunks = make([]Chunk, chunkSize)
 		}
 
-		limitSize := maxSize
-		if limitSize > 0 && limitSize < 1024 {
-			limitSize = 1024
-		}
-
+		// We pass the full available buffer.
+		// findArrayElementsEarlyExitASM will stop when it fills chunks[:chunkSize].
 		dataToScan := d.buf[d.head:d.tail]
-		if limitSize > 0 && len(dataToScan) > limitSize {
-			dataToScan = dataToScan[:limitSize]
-		}
 
 		count, _ := findArrayElementsEarlyExitASM(dataToScan, chunks[:chunkSize])
 
-		if count == 0 && limitSize > 0 && d.tail-d.head > limitSize {
+		if count == 0 && d.tail-d.head > 1024*1024 { // Fallback if 1 huge object
 			count, _ = findArrayElementsEarlyExitASM(d.buf[d.head:d.tail], chunks[:1])
 		}
 

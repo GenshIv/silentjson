@@ -101,127 +101,196 @@ func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 	return target, nil
 }
 
+type parseTask struct {
+	chunks  []Chunk
+	baseIdx int
+}
+
 func UnmarshalArrayParallel[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
 
-	buf := reg.chunkPool.Get().([]Chunk)
-	need := estimateChunkCapacity(raw)
-	if cap(buf) < need {
-		buf = make([]Chunk, need)
-	}
-
 	startIdx := skipSpaceASM(raw, 0)
 	if startIdx < 0 || startIdx >= len(raw) || raw[startIdx] != '[' {
-		reg.chunkPool.Put(buf[:cap(buf)])
 		return nil, errors.New("expected '[' at the beginning of array")
 	}
 	startIdx++
 	rawInner := raw[startIdx:]
 
-	count, maxDepth := findArrayElementsEarlyExitASM(rawInner, buf[:len(buf)])
-
-	if count < 0 || count > len(buf) {
-		reg.chunkPool.Put(buf[:cap(buf)])
-		return nil, fmt.Errorf("asm returned invalid count: %d", count)
+	structSize := unsafe.Sizeof(*new(T))
+	if len(dst) == 0 {
+		return dst[:0], nil
 	}
-
-	validCount := 0
-	for i := 0; i < count; i++ {
-		if buf[i].Start != buf[i].End {
-			buf[validCount] = buf[i]
-			validCount++
-		}
-	}
-	count = validCount
-
-	// CHECK 1: JSON validity
-	if maxDepth != 0 {
-		fmt.Printf("DEBUG PARALLEL: count=%d, maxDepth=%d, rawInner=%q\n", count, maxDepth, rawInner)
-		reg.chunkPool.Put(buf[:cap(buf)])
-		return nil, errors.New("malformed json: unbalanced braces or brackets")
-	}
-
-	// CHECK 3: dst capacity
-	if count > len(dst) {
-		reg.chunkPool.Put(buf[:cap(buf)])
-		return nil, fmt.Errorf("dst capacity insufficient: need %d, have %d", count, len(dst))
-	}
-	target := dst[:count]
-
-	if len(target) == 0 {
-		reg.chunkPool.Put(buf[:cap(buf)])
-		return target, nil
-	}
-
-	if err := parseArrayParallelChunks(rawInner, buf[:count], reg, unsafe.Pointer(&target[0]), unsafe.Sizeof(*new(T))); err != nil {
-		reg.chunkPool.Put(buf[:cap(buf)])
-		return nil, err
-	}
-	reg.chunkPool.Put(buf[:cap(buf)])
-	return target, nil
-}
-
-func parseArrayParallelChunks(raw []byte, chunks []Chunk, reg *Registry, basePtr unsafe.Pointer, structSize uintptr) error {
-	if len(chunks) == 0 {
-		return nil
-	}
+	basePtr := unsafe.Pointer(&dst[0])
 
 	workers := runtime.GOMAXPROCS(0)
-	const minChunksPerWorker = 128
-	maxUsefulWorkers := (len(chunks) + minChunksPerWorker - 1) / minChunksPerWorker
-	if workers > maxUsefulWorkers {
-		workers = maxUsefulWorkers
-	}
-	if workers <= 1 {
-		for idx := 0; idx < len(chunks); idx++ {
-			chunk := chunks[idx]
-			itemPtr := unsafe.Pointer(uintptr(basePtr) + (uintptr(idx) * structSize))
-			if err := ParseObject(raw[chunk.Start:chunk.End], reg, itemPtr); err != nil {
-				return err
-			}
-		}
-		return nil
+	if workers > 16 {
+		workers = 16
 	}
 
-	batchSize := (len(chunks) + workers - 1) / workers
-	errCh := make(chan error, 1)
+	const batchSize = 1024
+	var itemsFound int
+	var offset int
+	var fatalErr error
+
+	// Fast path for single core or tiny arrays
+	if workers <= 1 {
+		buf := reg.chunkPool.Get().([]Chunk)
+		if cap(buf) < batchSize {
+			buf = make([]Chunk, batchSize)
+		}
+		for offset < len(rawInner) {
+			count, maxDepth := findArrayElementsEarlyExitASM(rawInner[offset:], buf[:batchSize])
+			if count == 0 {
+				break
+			}
+			stepAdvance := buf[count-1].End
+			if stepAdvance == 0 {
+				break
+			}
+
+			validCount := 0
+			for i := 0; i < count; i++ {
+				if buf[i].Start != buf[i].End {
+					buf[validCount].Start = buf[i].Start + offset
+					buf[validCount].End = buf[i].End + offset
+					validCount++
+				}
+			}
+			if maxDepth != 0 && count < batchSize {
+				fatalErr = errors.New("malformed json: unbalanced braces or brackets")
+				break
+			}
+			if itemsFound+validCount > len(dst) {
+				fatalErr = fmt.Errorf("dst capacity insufficient: need %d", itemsFound+validCount)
+				break
+			}
+			for i := 0; i < validCount; i++ {
+				chunk := buf[i]
+				itemPtr := unsafe.Pointer(uintptr(basePtr) + (uintptr(itemsFound+i) * structSize))
+				if err := ParseObject(rawInner[chunk.Start:chunk.End], reg, itemPtr); err != nil {
+					fatalErr = err
+					break
+				}
+			}
+			if fatalErr != nil {
+				break
+			}
+			itemsFound += validCount
+			offset += stepAdvance
+		}
+		reg.chunkPool.Put(buf[:cap(buf)])
+		if fatalErr != nil {
+			return nil, fatalErr
+		}
+		return dst[:itemsFound], nil
+	}
+
+	// PIPELINED PARALLEL PARSING
+	taskCh := make(chan parseTask, workers*2)
+	errCh := make(chan error, workers)
 	var wg sync.WaitGroup
 
 	for w := 0; w < workers; w++ {
-		start := w * batchSize
-		if start >= len(chunks) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for task := range taskCh {
+				for i := 0; i < len(task.chunks); i++ {
+					chunk := task.chunks[i]
+					itemPtr := unsafe.Pointer(uintptr(basePtr) + (uintptr(task.baseIdx+i) * structSize))
+					if err := ParseObject(rawInner[chunk.Start:chunk.End], reg, itemPtr); err != nil {
+						select {
+						case errCh <- err:
+						default:
+						}
+						// Stop processing this batch on error
+						break
+					}
+				}
+				reg.chunkPool.Put(task.chunks[:cap(task.chunks)])
+			}
+		}()
+	}
+
+	for offset < len(rawInner) {
+		select {
+		case err := <-errCh:
+			fatalErr = err
+			goto CLEANUP
+		default:
+		}
+
+		batch := reg.chunkPool.Get().([]Chunk)
+		if cap(batch) < batchSize {
+			batch = make([]Chunk, batchSize)
+		}
+		batch = batch[:batchSize]
+
+		count, maxDepth := findArrayElementsEarlyExitASM(rawInner[offset:], batch)
+		if count > len(batch) {
+			count = len(batch)
+		}
+		if count == 0 {
+			reg.chunkPool.Put(batch[:cap(batch)])
 			break
 		}
-		end := start + batchSize
-		if end > len(chunks) {
-			end = len(chunks)
+		stepAdvance := batch[count-1].End
+		if stepAdvance == 0 {
+			reg.chunkPool.Put(batch[:cap(batch)])
+			break
 		}
 
-		wg.Add(1)
-		go func(start, end int) {
-			defer wg.Done()
-			for idx := start; idx < end; idx++ {
-				chunk := chunks[idx]
-				itemPtr := unsafe.Pointer(uintptr(basePtr) + (uintptr(idx) * structSize))
-				if err := ParseObject(raw[chunk.Start:chunk.End], reg, itemPtr); err != nil {
-					select {
-					case errCh <- err:
-					default:
-					}
-					return
-				}
+		validCount := 0
+		for i := 0; i < count; i++ {
+			if batch[i].Start != batch[i].End {
+				batch[validCount].Start = batch[i].Start + offset
+				batch[validCount].End = batch[i].End + offset
+				validCount++
 			}
-		}(start, end)
+		}
+
+		if maxDepth != 0 && count < batchSize {
+			reg.chunkPool.Put(batch[:cap(batch)])
+			fatalErr = errors.New("malformed json: unbalanced braces or brackets")
+			goto CLEANUP
+		}
+
+		if itemsFound+validCount > len(dst) {
+			reg.chunkPool.Put(batch[:cap(batch)])
+			fatalErr = fmt.Errorf("dst capacity insufficient: need %d", itemsFound+validCount)
+			goto CLEANUP
+		}
+
+		if validCount > 0 {
+			taskCh <- parseTask{
+				chunks:  batch[:validCount],
+				baseIdx: itemsFound,
+			}
+			itemsFound += validCount
+			offset += stepAdvance
+		} else {
+			reg.chunkPool.Put(batch[:cap(batch)])
+			offset += stepAdvance
+		}
 	}
 
+CLEANUP:
+	close(taskCh)
 	wg.Wait()
 
+	// Check if any error was reported while waiting
 	select {
 	case err := <-errCh:
-		return err
+		if fatalErr == nil {
+			fatalErr = err
+		}
 	default:
-		return nil
 	}
+
+	if fatalErr != nil {
+		return nil, fatalErr
+	}
+	return dst[:itemsFound], nil
 }

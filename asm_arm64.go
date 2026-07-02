@@ -2,6 +2,8 @@
 
 package silentjson
 
+import "bytes"
+
 //go:noescape
 func findQuoteAsm(data []byte) int
 
@@ -32,7 +34,7 @@ func parseShortStringASM2(src []byte) (int64, int64) {
 		return 0, -1
 	}
 	if !hasEscape {
-		return int64(end), int64(end+1)
+		return int64(end), int64(end + 1)
 	}
 	writeIdx := 0
 	for readIdx := 0; readIdx < end; readIdx++ {
@@ -64,7 +66,7 @@ func parseShortStringASM2(src []byte) (int64, int64) {
 			writeIdx++
 		}
 	}
-	return int64(writeIdx), int64(end+1)
+	return int64(writeIdx), int64(end + 1)
 }
 
 func appendIntASM(buf []byte, val int64) []byte {
@@ -113,15 +115,11 @@ func skipValueASM(raw []byte, start int) int {
 }
 
 func findQuoteOrEscapeASM(b []byte) (int, bool) {
-	for i := 0; i < len(b); i++ {
-		if b[i] == '"' {
-			return i, false
-		}
-		if b[i] == '\\' {
-			return i, true
-		}
+	idx := bytes.IndexAny(b, "\"\\")
+	if idx == -1 {
+		return -1, false
 	}
-	return -1, false
+	return idx, b[idx] == '\\'
 }
 
 //go:noescape
@@ -132,7 +130,3 @@ func findObjectBoundariesEarlyExitASM(data []byte, chunks []Chunk) (int, int)
 
 //go:noescape
 func findArrayElementsEarlyExitASM(data []byte, chunks []Chunk) (int, int)
-
-
-
-

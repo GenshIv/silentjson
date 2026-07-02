@@ -1,5 +1,7 @@
 package silentjson
 
+import "bytes"
+
 func scanJSONStringScalar(src []byte) (int, bool) {
 	hasEscape := false
 	for i := 0; i < len(src); i++ {
@@ -27,7 +29,7 @@ func parseShortStringScalar2(src []byte) (int64, int64) {
 		return 0, -1
 	}
 	if !hasEscape {
-		return int64(end), int64(end+1)
+		return int64(end), int64(end + 1)
 	}
 	writeIdx := 0
 	for readIdx := 0; readIdx < end; readIdx++ {
@@ -59,7 +61,7 @@ func parseShortStringScalar2(src []byte) (int64, int64) {
 			writeIdx++
 		}
 	}
-	return int64(writeIdx), int64(end+1)
+	return int64(writeIdx), int64(end + 1)
 }
 
 func appendIntScalar(buf []byte, val int64) []byte {
@@ -101,24 +103,15 @@ func appendStringScalar(buf []byte, s string) ([]byte, int) {
 }
 
 func findQuoteScalar(data []byte) int {
-	for i := 0; i < len(data); i++ {
-		if data[i] == '"' {
-			return i
-		}
-	}
-	return -1
+	return bytes.IndexByte(data, '"')
 }
 
 func findQuoteOrEscapeScalar(b []byte) (int, bool) {
-	for i := 0; i < len(b); i++ {
-		if b[i] == '"' {
-			return i, false
-		}
-		if b[i] == '\\' {
-			return i, true
-		}
+	idx := bytes.IndexAny(b, "\"\\")
+	if idx == -1 {
+		return -1, false
 	}
-	return -1, false
+	return idx, b[idx] == '\\'
 }
 
 func skipSpaceScalar(data []byte, start int) int {
@@ -131,30 +124,33 @@ func skipSpaceScalar(data []byte, start int) int {
 }
 
 func findObjectBoundariesEarlyExitScalar(data []byte, chunks []Chunk) (int, int) {
-	inString := false
-	escape := false
 	depth := 0
 	count := 0
 	start := skipSpaceScalar(data, 0)
-	
+
 	for i := start; i < len(data); i++ {
 		c := data[i]
-		if escape {
-			escape = false
-			continue
-		}
-		if c == '\\' && inString {
-			escape = true
-			continue
-		}
+
 		if c == '"' {
-			inString = !inString
+			// Fast string scanning: skip until unescaped quote
+			i++
+			// Most strings don't have escapes - fast path
+			for i < len(data) && data[i] != '"' && data[i] != '\\' {
+				i++
+			}
+			// Now handle escapes if needed
+			for i < len(data) {
+				if data[i] == '\\' && i+1 < len(data) {
+					i += 2 // Skip escape sequence
+				} else if data[i] == '"' {
+					break
+				} else {
+					i++
+				}
+			}
 			continue
 		}
-		if inString {
-			continue
-		}
-		
+
 		switch c {
 		case '{', '[':
 			depth++
@@ -176,7 +172,13 @@ func findObjectBoundariesEarlyExitScalar(data []byte, chunks []Chunk) (int, int)
 					chunks[count] = Chunk{Start: start, End: i}
 				}
 				count++
-				start = skipSpaceScalar(data, i+1)
+				// Inline space skipping to avoid function call in hot loop
+				i++
+				for i < len(data) && (charTable[data[i]]&charSpace) != 0 {
+					i++
+				}
+				i-- // Compensate for loop increment
+				start = i
 			}
 		}
 	}
@@ -188,30 +190,33 @@ func findObjectBoundariesScalar(data []byte, chunks []Chunk) (int, int) {
 }
 
 func findArrayElementsEarlyExitScalar(data []byte, chunks []Chunk) (int, int) {
-	inString := false
-	escape := false
 	depth := 0
 	count := 0
 	start := skipSpaceScalar(data, 0)
-	
+
 	for i := start; i < len(data); i++ {
 		c := data[i]
-		if escape {
-			escape = false
-			continue
-		}
-		if c == '\\' && inString {
-			escape = true
-			continue
-		}
+
 		if c == '"' {
-			inString = !inString
+			// Fast string scanning: skip until unescaped quote
+			i++
+			// Most strings don't have escapes - fast path
+			for i < len(data) && data[i] != '"' && data[i] != '\\' {
+				i++
+			}
+			// Now handle escapes if needed
+			for i < len(data) {
+				if data[i] == '\\' && i+1 < len(data) {
+					i += 2 // Skip escape sequence
+				} else if data[i] == '"' {
+					break
+				} else {
+					i++
+				}
+			}
 			continue
 		}
-		if inString {
-			continue
-		}
-		
+
 		switch c {
 		case '{', '[':
 			depth++
@@ -233,7 +238,13 @@ func findArrayElementsEarlyExitScalar(data []byte, chunks []Chunk) (int, int) {
 					chunks[count] = Chunk{Start: start, End: i}
 				}
 				count++
-				start = skipSpaceScalar(data, i+1)
+				// Inline space skipping to avoid function call in hot loop
+				i++
+				for i < len(data) && (charTable[data[i]]&charSpace) != 0 {
+					i++
+				}
+				i-- // Compensate for loop increment
+				start = i
 			}
 		}
 	}

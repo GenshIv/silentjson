@@ -24,7 +24,7 @@ const (
 type Address struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	City          string                 `protobuf:"bytes,1,opt,name=city,proto3" json:"city,omitempty"`
-	Zip           int32                  `protobuf:"varint,2,opt,name=zip,proto3" json:"zip,omitempty"` // В Proto лучше указывать конкретный размер (int32 или int64)
+	Zip           int32                  `protobuf:"varint,2,opt,name=zip,proto3" json:"zip,omitempty"` // Use int32 or int64 to specify exact size in proto
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -157,7 +157,7 @@ func (x *Employee) GetScores() []int64 {
 	return nil
 }
 
-// Обертка для списка (для бенчмарка)
+// Wrapper for list of employees (used for benchmarking)
 type Employees struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	List          []*Employee            `protobuf:"bytes,1,rep,name=list,proto3" json:"list,omitempty"`
