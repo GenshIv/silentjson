@@ -48,5 +48,9 @@ employees, err := silentjson.UnmarshalArrayParallel[Employee](rawJSON, empRegist
 err := silentjson.ParseObject(shmPayload, reg, unsafe.Pointer(&trade))
 ```
 
+## 📰 Медиа и Сообщество
+* **[Habr]** [silentjson v2.0.0: Уперлись в железо, или как мы выжали максимум из парсинга JSON в Go](https://habr.com/ru/news/1055022/)
+* **[Reddit]** [silentjson v2.0.0: Hitting the hardware limits, or how we squeezed the maximum out of JSON parsing in Go](https://www.reddit.com/r/HiLoad/comments/1ulspzc/silentjson_v200_hitting_the_hardware_limits_or/)
+
 ## 📄 Лицензия
 Лицензия MIT. Подробности в файле [LICENSE](LICENSE).
