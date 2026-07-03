@@ -1,5 +1,7 @@
 # silentjson: The "Just Works" High-Performance JSON Parser for Go
 
+**Author: Igor Ivanuto**
+
 [Русский](./README_RU.md) | [中文](./README_ZH.md) | [Français](./README_FR.md) | [Deutsch](./README_DE.md)
 
 ## 📰 Media & Community

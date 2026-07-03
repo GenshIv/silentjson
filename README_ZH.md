@@ -1,5 +1,7 @@
 # silentjson: 适用于 Go 的高性能 JSON 解析器
 
+**作者: Igor Ivanuto**
+
 `silentjson` 是一个高度优化的、无反射、零分配的 Go 语言 JSON 库，在**无需任何代码生成**的情况下提供极速性能。
 
 ## 🚀 为什么选择 `silentjson`?

@@ -1,5 +1,7 @@
 # silentjson: Hochleistungs-JSON-Parser für Go
 
+**Autor: Igor Ivanuto**
+
 `silentjson` ist eine hochoptimierte, reflexionsfreie und allokationsfreie JSON-Bibliothek für Go, die extreme Performance bietet, **ohne dass eine Codegenerierung erforderlich ist.**
 
 ## 🚀 Warum `silentjson`?
