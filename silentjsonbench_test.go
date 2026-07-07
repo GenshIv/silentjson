@@ -8,7 +8,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/GenshIv/silentjson/pb"
+	"github.com/GenshIv/silentjson/v2/pb"
 	"github.com/buger/jsonparser"
 	"github.com/bytedance/sonic"
 	goccyjson "github.com/goccy/go-json"

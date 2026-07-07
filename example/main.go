@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/GenshIv/silentjson"
+	"github.com/GenshIv/silentjson/v2"
 )
 
 type Employee struct {
@@ -42,12 +42,12 @@ func main() {
 	}
 
 	fmt.Println("\n🚀 Running Stream Decoder with Zero-Allocation Next() iterator...")
-	
+
 	// 5. Stream Parsing Example
 	// We use the same JSON payload but read it as a stream.
 	streamReader := bytes.NewReader(rawJSON)
 	decoder := silentjson.NewStreamDecoder[Employee](streamReader, registry)
-	
+
 	fmt.Println("✅ Successfully streamed employees:")
 	err = decoder.Next(func(emp *Employee) bool {
 		// Inside this callback, `emp` points to a single reusable struct inside the decoder.
@@ -55,7 +55,7 @@ func main() {
 		fmt.Printf("   - [%d] %s (Active: %t)\n", emp.ID, emp.Name, emp.IsActive)
 		return true // continue iteration
 	})
-	
+
 	if err != nil {
 		fmt.Printf("Stream Error: %v\n", err)
 	}

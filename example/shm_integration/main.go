@@ -10,7 +10,7 @@ import (
 
 	"github.com/GenshIv/hft-ipc/ringbuf"
 	"github.com/GenshIv/hft-ipc/shm"
-	"github.com/GenshIv/silentjson"
+	"github.com/GenshIv/silentjson/v2"
 )
 
 type Trade struct {

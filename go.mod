@@ -1,4 +1,4 @@
-module github.com/GenshIv/silentjson
+module github.com/GenshIv/silentjson/v2
 
 go 1.26.3
 

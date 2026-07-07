@@ -8,7 +8,7 @@ import (
 	"os"
 	"reflect"
 
-	"github.com/GenshIv/silentjson"
+	"github.com/GenshIv/silentjson/v2"
 )
 
 func main() {
@@ -105,7 +105,7 @@ func main() {
 			out.WriteString(",\n")
 			byteCount += 2
 		}
-		
+
 		n, _ := out.Write(raw)
 		byteCount += n
 		objCount += count

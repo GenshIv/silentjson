@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/GenshIv/silentjson"
+	"github.com/GenshIv/silentjson/v2"
 )
 
 func TestStreamDecoderNextRaw(t *testing.T) {
