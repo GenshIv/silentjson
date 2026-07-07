@@ -1,6 +1,7 @@
 package silentjson
 
 import (
+	"strconv"
 	"unsafe"
 )
 
@@ -86,23 +87,8 @@ func fastParseInt(buf []byte) int {
 }
 
 func fastParseFloat(buf []byte) float64 {
-	res, fraction, div := 0.0, 0.0, 1.0
-	inFrac := false
-	for _, b := range buf {
-		if (charTable[b] & charDot) != 0 {
-			inFrac = true
-			continue
-		}
-		if (charTable[b] & charDigit) != 0 {
-			if inFrac {
-				fraction = fraction*10 + float64(b-'0')
-				div *= 10
-			} else {
-				res = res*10 + float64(b-'0')
-			}
-		}
-	}
-	return res + (fraction / div)
+	val, _ := strconv.ParseFloat(unsafe.String(unsafe.SliceData(buf), len(buf)), 64)
+	return val
 }
 
 func parseJSONString(raw []byte, start int, copyStrings bool) (string, int, error) {
