@@ -48,17 +48,40 @@ type Registry struct {
 	HashMask    uint32
 	chunkPool   sync.Pool
 	CopyStrings bool
+	IsSlice     bool
+	SliceType   reflect.Type
+	ElemType    reflect.Type
+	ElemSub     *Registry
 }
 
 // BuildRegistry constructs a registry for a given struct type.
 func BuildRegistry(typ reflect.Type) *Registry {
-	reg := &Registry{
-		Map:     make(map[int64]FieldInfo),
-		NameMap: make(map[string]FieldInfo),
-		Fields:  make([]FieldInfo, 0, typ.NumField()),
-	}
+
+	reg := &Registry{}
 	reg.chunkPool.New = func() any {
 		return make([]Chunk, 131072)
+	}
+
+	// Добавляем поддержку корневых слайсов
+	if typ.Kind() == reflect.Slice {
+		reg.IsSlice = true
+		reg.SliceType = typ
+		reg.ElemType = typ.Elem()
+		// Если это слайс структур, строим дочерний реестр для полей структуры
+		if reg.ElemType.Kind() == reflect.Struct {
+			reg.ElemSub = BuildRegistry(reg.ElemType)
+		}
+		return reg
+	}
+
+	reg.Map = make(map[int64]FieldInfo)
+	reg.NameMap = make(map[string]FieldInfo)
+	// Предотвращаем панику NumField() если это не структура
+	if typ.Kind() == reflect.Struct {
+		reg.Fields = make([]FieldInfo, 0, typ.NumField())
+	} else {
+		reg.Fields = make([]FieldInfo, 0)
+		return reg
 	}
 
 	for i := 0; i < typ.NumField(); i++ {

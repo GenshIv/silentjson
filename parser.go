@@ -192,8 +192,89 @@ func MarshalObject(ptr unsafe.Pointer, reg *Registry, buf []byte) []byte {
 	return buf
 }
 
+func parseRootSlice(raw []byte, reg *Registry, ptr unsafe.Pointer) error {
+	// Здесь ptr трактуется как указатель на слайс: *[]T
+	// Нам потребуются метаданные из reg.SliceType и reg.ElemType.
+	if reg.SliceType == nil || reg.ElemType == nil {
+		return fmt.Errorf("registry missing slice type metadata for root slice parsing")
+	}
+
+	// Логика аналогична TypeStructSlice из parseObjectAt:
+	header := (*reflect.SliceHeader)(ptr)
+	if header.Cap == 0 {
+		newSlice := reflect.MakeSlice(reg.SliceType, 0, 16)
+		header.Data = newSlice.Pointer()
+		header.Cap = 16
+	}
+	header.Len = 0
+	elemSize := reg.ElemType.Size()
+
+	i := 1 // пропускаем '['
+	for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+		i++
+	}
+	if i < len(raw) && raw[i] == ']' {
+		return nil
+	}
+
+	for {
+		if header.Len >= header.Cap {
+			newCap := header.Cap * 2
+			oldSlice := reflect.NewAt(reg.SliceType, ptr).Elem()
+			newSlice := reflect.MakeSlice(reg.SliceType, header.Len, newCap)
+			reflect.Copy(newSlice, oldSlice)
+			header.Data = newSlice.Pointer()
+			header.Cap = newCap
+		}
+
+		elemPtr := unsafe.Pointer(header.Data + uintptr(header.Len)*elemSize)
+
+		// Очистка памяти элемента
+		b := unsafe.Slice((*byte)(elemPtr), elemSize)
+		for j := range b {
+			b[j] = 0
+		}
+
+		consumed, err := parseObjectAt(raw[i:], reg.ElemSub, elemPtr)
+		if err != nil {
+			return err
+		}
+		header.Len++
+		i += consumed
+
+		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+			i++
+		}
+		if i >= len(raw) {
+			return ErrUnexpectedEOF
+		}
+		if raw[i] == ',' {
+			i++
+			for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+				i++
+			}
+		} else if raw[i] == ']' {
+			break
+		} else {
+			return fmt.Errorf("unexpected char in root slice parsing")
+		}
+	}
+	return nil
+}
+
 // ParseObject parses a single JSON object and maps it directly into memory via unsafe.Pointer.
 func ParseObject(raw []byte, reg *Registry, ptr unsafe.Pointer) error {
+
+	i := 0
+	for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+		i++
+	}
+
+	if i < len(raw) && raw[i] == '[' {
+		// Мы обнаружили массив на верхнем уровне!
+		return parseRootSlice(raw[i:], reg, ptr)
+	}
+
 	n, err := parseObjectAt(raw, reg, ptr)
 	if err != nil {
 		return err
