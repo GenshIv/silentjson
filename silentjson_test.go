@@ -392,3 +392,63 @@ func TestParseNestedStructures(t *testing.T) {
 		t.Errorf("Deeply nested worker name mismatched. Expected Charlie, got %s", company.Departments[1].Workers[0].Name)
 	}
 }
+
+type NestedSliceObj struct {
+	Name    string   `json:"name"`
+	Scores  []int    `json:"scores"`
+	Tags    []string `json:"tags"`
+	Friends []struct {
+		ID   int    `json:"id"`
+		Name string `json:"name"`
+	} `json:"friends"`
+}
+
+func TestParseObject_WithInternalSlices(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(NestedSliceObj{}))
+
+	payload := []byte(`{
+		"name": "Igor",
+		"scores": [10, 20, 30],
+		"tags": ["go", "fast"],
+		"friends": [
+			{"id": 1, "name": "Alice"},
+			{"id": 2, "name": "Bob"}
+		]
+	}`)
+
+	var actual NestedSliceObj
+	buf := make([]byte, len(payload))
+	copy(buf, payload)
+
+	err := ParseObject(buf, reg, unsafe.Pointer(&actual))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Проверка простых слайсов
+	if !reflect.DeepEqual(actual.Scores, []int{10, 20, 30}) {
+		t.Errorf("scores mismatch: got %v", actual.Scores)
+	}
+	if !reflect.DeepEqual(actual.Tags, []string{"go", "fast"}) {
+		t.Errorf("tags mismatch: got %v", actual.Tags)
+	}
+
+	// Проверка слайса структур
+	if len(actual.Friends) != 2 {
+		t.Fatalf("expected 2 friends, got %d", len(actual.Friends))
+	}
+	if actual.Friends[0].Name != "Alice" || actual.Friends[1].ID != 2 {
+		t.Errorf("friends data mismatch: %+v", actual.Friends)
+	}
+
+	// Тест на пустые слайсы
+	payloadEmpty := []byte(`{"name":"Empty","scores":[],"tags":[],"friends":[]}`)
+	var actualEmpty NestedSliceObj
+	if err := ParseObject(payloadEmpty, reg, unsafe.Pointer(&actualEmpty)); err != nil {
+		t.Fatalf("unexpected error on empty slices: %v", err)
+	}
+	if len(actualEmpty.Scores) != 0 || len(actualEmpty.Tags) != 0 || len(actualEmpty.Friends) != 0 {
+		t.Errorf("expected empty slices, got: scores=%d, tags=%d, friends=%d",
+			len(actualEmpty.Scores), len(actualEmpty.Tags), len(actualEmpty.Friends))
+	}
+}
