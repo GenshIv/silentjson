@@ -181,6 +181,23 @@ func BuildRegistry(typ reflect.Type) *Registry {
 					return buf
 				}
 			}
+		case reflect.Ptr:
+			// Support *int, *int64, *string, *bool, *float64
+			elemKind := field.Type.Elem().Kind()
+			switch elemKind {
+			case reflect.Int, reflect.Int64:
+				info.Type = TypeIntPtr
+				info.Marshaler = MarshalIntPtr
+			case reflect.String:
+				info.Type = TypeStringPtr
+				info.Marshaler = MarshalStringPtr
+			case reflect.Bool:
+				info.Type = TypeBoolPtr
+				info.Marshaler = MarshalBoolPtr
+			case reflect.Float64, reflect.Float32:
+				info.Type = TypeFloatPtr
+				info.Marshaler = MarshalFloatPtr
+			}
 		}
 
 		// If OmitEmpty is present, wrap marshaler in a check
@@ -346,4 +363,38 @@ func MarshalInt(ptr unsafe.Pointer, buf []byte) []byte {
 		return strconv.AppendInt(buf, val, 10)
 	}
 	return newBuf
+}
+
+// Pointer type marshalers
+
+func MarshalIntPtr(ptr unsafe.Pointer, buf []byte) []byte {
+	valPtr := (**int64)(ptr)
+	if *valPtr == nil {
+		return append(buf, "null"...)
+	}
+	return MarshalInt(unsafe.Pointer(*valPtr), buf)
+}
+
+func MarshalStringPtr(ptr unsafe.Pointer, buf []byte) []byte {
+	valPtr := (**string)(ptr)
+	if *valPtr == nil {
+		return append(buf, "null"...)
+	}
+	return MarshalString(unsafe.Pointer(*valPtr), buf)
+}
+
+func MarshalBoolPtr(ptr unsafe.Pointer, buf []byte) []byte {
+	valPtr := (**bool)(ptr)
+	if *valPtr == nil {
+		return append(buf, "null"...)
+	}
+	return MarshalBool(unsafe.Pointer(*valPtr), buf)
+}
+
+func MarshalFloatPtr(ptr unsafe.Pointer, buf []byte) []byte {
+	valPtr := (**float64)(ptr)
+	if *valPtr == nil {
+		return append(buf, "null"...)
+	}
+	return MarshalFloat(unsafe.Pointer(*valPtr), buf)
 }

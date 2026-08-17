@@ -74,6 +74,11 @@ const (
 	TypeStringSlice
 	TypeIntSlice
 	TypeStructSlice
+	// Pointer types
+	TypeIntPtr
+	TypeStringPtr
+	TypeBoolPtr
+	TypeFloatPtr
 )
 
 func fastParseInt(buf []byte) int {

@@ -506,6 +506,90 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 				*(*[]int)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = slice
 				i += consumed
 
+			case TypeIntPtr:
+				if i < len(raw) && i+3 < len(raw) && raw[i] == 'n' && raw[i+1] == 'u' && raw[i+2] == 'l' && raw[i+3] == 'l' {
+					*(**int64)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = nil
+					i += 4
+				} else {
+					valStart := i
+					for i < len(raw) && (charTable[raw[i]]&maskValueEnd) == 0 {
+						i++
+					}
+					val := int64(fastParseInt(raw[valStart:i]))
+					ptrPtr := (**int64)(unsafe.Pointer(uintptr(ptr) + info.Offset))
+					if *ptrPtr == nil {
+						*ptrPtr = new(int64)
+					}
+					**ptrPtr = val
+				}
+
+			case TypeStringPtr:
+				if i < len(raw) && i+3 < len(raw) && raw[i] == 'n' && raw[i+1] == 'u' && raw[i+2] == 'l' && raw[i+3] == 'l' {
+					*(**string)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = nil
+					i += 4
+				} else {
+					if (charTable[raw[i]] & charString) == 0 {
+						return 0, fmt.Errorf("%w: expected string value", ErrTypeMismatch)
+					}
+					i++
+					written, consumed := parseShortStringASM2(raw[i:])
+					if consumed < 0 {
+						return 0, ErrUnexpectedEOF
+					}
+					decoded := raw[i : i+int(written)]
+					var strVal string
+					if reg.CopyStrings {
+						strVal = string(decoded)
+					} else {
+						strVal = unsafe.String(unsafe.SliceData(decoded), len(decoded))
+					}
+					ptrPtr := (**string)(unsafe.Pointer(uintptr(ptr) + info.Offset))
+					if *ptrPtr == nil {
+						*ptrPtr = new(string)
+					}
+					**ptrPtr = strVal
+					i += int(consumed)
+				}
+
+			case TypeBoolPtr:
+				if i < len(raw) && i+3 < len(raw) && raw[i] == 'n' && raw[i+1] == 'u' && raw[i+2] == 'l' && raw[i+3] == 'l' {
+					*(**bool)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = nil
+					i += 4
+				} else {
+					var val bool
+					if i+3 < len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == trueMagic {
+						val = true
+						i += 4
+					} else if i+4 < len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == falsePrefixMagic && (charTable[raw[i+4]]&charLetterE) != 0 {
+						val = false
+						i += 5
+					} else {
+						return 0, fmt.Errorf("%w: expected boolean value", ErrTypeMismatch)
+					}
+					ptrPtr := (**bool)(unsafe.Pointer(uintptr(ptr) + info.Offset))
+					if *ptrPtr == nil {
+						*ptrPtr = new(bool)
+					}
+					**ptrPtr = val
+				}
+
+			case TypeFloatPtr:
+				if i < len(raw) && i+3 < len(raw) && raw[i] == 'n' && raw[i+1] == 'u' && raw[i+2] == 'l' && raw[i+3] == 'l' {
+					*(**float64)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = nil
+					i += 4
+				} else {
+					valStart := i
+					for i < len(raw) && (charTable[raw[i]]&maskValueEnd) == 0 {
+						i++
+					}
+					val := fastParseFloat(raw[valStart:i])
+					ptrPtr := (**float64)(unsafe.Pointer(uintptr(ptr) + info.Offset))
+					if *ptrPtr == nil {
+						*ptrPtr = new(float64)
+					}
+					**ptrPtr = val
+				}
+
 			case TypeStructSlice:
 				if (charTable[raw[i]] & charOpenBracket) == 0 {
 					return 0, fmt.Errorf("%w: expected struct slice value", ErrTypeMismatch)

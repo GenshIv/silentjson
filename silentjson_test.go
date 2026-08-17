@@ -452,3 +452,60 @@ func TestParseObject_WithInternalSlices(t *testing.T) {
 			len(actualEmpty.Scores), len(actualEmpty.Tags), len(actualEmpty.Friends))
 	}
 }
+
+func TestPointerTypes(t *testing.T) {
+	type TestStruct struct {
+		ID       int64    `json:"id"`
+		Name     string   `json:"name"`
+		ParentID *int64   `json:"parent_id,omitempty"`
+		Active   *bool    `json:"is_active,omitempty"`
+		Score    *float64 `json:"score,omitempty"`
+		Alias    *string  `json:"alias,omitempty"`
+	}
+
+	reg := BuildRegistry(reflect.TypeOf(TestStruct{}))
+
+	// Test with non-null pointers
+	jsonData := []byte(`{"id":42,"name":"test","parent_id":10,"is_active":true,"score":3.14,"alias":"tst"}`)
+	var obj TestStruct
+	err := ParseObject(jsonData, reg, unsafe.Pointer(&obj))
+	if err != nil {
+		t.Fatalf("ParseObject failed: %v", err)
+	}
+	if obj.ID != 42 {
+		t.Errorf("ID = %d, want 42", obj.ID)
+	}
+	if obj.Name != "test" {
+		t.Errorf("Name = %q, want \"test\"", obj.Name)
+	}
+	if obj.ParentID == nil || *obj.ParentID != 10 {
+		t.Errorf("ParentID = %v, want 10", obj.ParentID)
+	}
+	if obj.Active == nil || !*obj.Active {
+		t.Errorf("Active = %v, want true", obj.Active)
+	}
+	if obj.Score == nil || *obj.Score != 3.14 {
+		t.Errorf("Score = %v, want 3.14", obj.Score)
+	}
+	if obj.Alias == nil || *obj.Alias != "tst" {
+		t.Errorf("Alias = %v, want \"tst\"", obj.Alias)
+	}
+
+	// Test with null pointers
+	jsonData2 := []byte(`{"id":1,"name":"x","parent_id":null,"is_active":null}`)
+	var obj2 TestStruct
+	err = ParseObject(jsonData2, reg, unsafe.Pointer(&obj2))
+	if err != nil {
+		t.Fatalf("ParseObject failed: %v", err)
+	}
+	if obj2.ParentID != nil {
+		t.Errorf("ParentID = %v, want nil", obj2.ParentID)
+	}
+	if obj2.Active != nil {
+		t.Errorf("Active = %v, want nil", obj2.Active)
+	}
+
+	// Test marshal back
+	buf := Marshal(&obj, reg, nil)
+	t.Logf("Marshaled: %s", string(buf))
+}
