@@ -89,7 +89,7 @@ func GetInt64Value(data []byte, key string) (int64, bool) {
 }
 
 // InjectFieldBeforeClose inserts a field before the closing '}' of a JSON object.
-// Finds the last '}' at depth 0, inserts ,"<key>":"<value>" before it.
+// Inserts ,"<key>":"<value>" right before the final '}'.
 // No parse, no alloc except the result buffer.
 func InjectFieldBeforeClose(data []byte, key, value string) []byte {
 	if len(data) == 0 || data[len(data)-1] != '}' {
@@ -99,71 +99,15 @@ func InjectFieldBeforeClose(data []byte, key, value string) []byte {
 	// Escape value for JSON string
 	escaped := escapeJSONString(value)
 
-	// Find the closing brace at depth 0 (scan from end)
-	depth := 1
-	for i := len(data) - 2; i >= 0; i-- {
-		c := data[i]
-		if c == '"' {
-			// Skip string
-			for i > 0 {
-				i--
-				if data[i] == '\\' {
-					continue
-				}
-				if data[i] == '"' {
-					break
-				}
-			}
-		} else if c == '}' {
-			depth++
-		} else if c == ']' {
-			// Skip array
-			depth++
-			for i > 0 && depth > 0 {
-				i--
-				c2 := data[i]
-				if c2 == '"' {
-					for i > 0 {
-						i--
-						if data[i] == '\\' {
-							continue
-						}
-						if data[i] == '"' {
-							break
-						}
-					}
-				} else if c2 == ']' || c2 == '}' {
-					depth++
-				} else if c2 == '[' || c2 == '{' {
-					depth--
-				}
-			}
-		} else if c == '{' {
-			depth--
-			if depth == 0 {
-				// Found the matching open brace, insert after it
-				insert := make([]byte, 0, 4+len(key)+3+len(escaped))
-				insert = append(insert, ',', '"')
-				insert = append(insert, key...)
-				insert = append(insert, '"', ':', '"')
-				insert = append(insert, escaped...)
-				insert = append(insert, '"')
-				result := make([]byte, 0, len(data)+len(insert))
-				result = append(result, data[:i+1]...)
-				result = append(result, insert...)
-				result = append(result, data[i+1:]...)
-				return result
-			}
-		}
-	}
-
-	// Fallback: insert before last '}'
+	// Build insert: ,"key":"value"
 	insert := make([]byte, 0, 4+len(key)+3+len(escaped))
 	insert = append(insert, ',', '"')
 	insert = append(insert, key...)
 	insert = append(insert, '"', ':', '"')
 	insert = append(insert, escaped...)
 	insert = append(insert, '"')
+
+	// Result: all bytes except last '}' + insert + '}'
 	result := make([]byte, 0, len(data)+len(insert))
 	result = append(result, data[:len(data)-1]...)
 	result = append(result, insert...)
