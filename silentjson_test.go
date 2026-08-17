@@ -335,7 +335,7 @@ func TestParseObject_DeepErrors(t *testing.T) {
 	}
 }
 
-// Nested structure for depth testing
+// Nested structure for depth testing ()
 type Department struct {
 	Name    string     `json:"name"`
 	Workers []TestUser `json:"workers"`
