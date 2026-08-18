@@ -172,27 +172,42 @@ func Marshal[T any](obj *T, reg *Registry, buf []byte) []byte {
 func MarshalObject(ptr unsafe.Pointer, reg *Registry, buf []byte) []byte {
 
 	if ptr == nil {
-		return append(buf, []byte("null")...)
+		return append(buf, "null"...)
 	}
 
 	buf = append(buf, '{')
 	fields := reg.Fields
 
-	if len(fields) > 0 {
-		// First field (no comma before it)
-		f := &fields[0]
-		buf = append(buf, f.EncodedKey...)
+	first := true
+	for i := 0; i < len(fields); i++ {
+		f := &fields[i]
 		ptrNew := unsafe.Pointer(uintptr(ptr) + f.Offset)
-		buf = f.Marshaler(ptrNew, buf)
 
-		// Remaining fields
-		for i := 1; i < len(fields); i++ {
-			buf = append(buf, ',')
-			f := &fields[i]
+		// Check OmitEmpty before adding anything to buf
+		if f.OmitEmpty {
+			// We need a temporary check for empty values
+			// Since we don't have a universal IsEmpty, we rely on the marshaler to skip if OmitEmpty is true
+			// But the current field marshaler for OmitEmpty returns buf as-is if empty.
+
+			// Let's use a small temporary buffer to check if it's empty
+			tmpBuf := f.Marshaler(ptrNew, nil)
+			if len(tmpBuf) == 0 {
+				continue
+			}
+
+			if !first {
+				buf = append(buf, ',')
+			}
 			buf = append(buf, f.EncodedKey...)
-			ptrNew := unsafe.Pointer(uintptr(ptr) + f.Offset)
+			buf = append(buf, tmpBuf...)
+		} else {
+			if !first {
+				buf = append(buf, ',')
+			}
+			buf = append(buf, f.EncodedKey...)
 			buf = f.Marshaler(ptrNew, buf)
 		}
+		first = false
 	}
 
 	buf = append(buf, '}')

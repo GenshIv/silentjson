@@ -15,6 +15,8 @@ import (
 var (
 	ErrUnexpectedEOF = errors.New("zerojson: unexpected end of JSON input")
 	ErrTypeMismatch  = errors.New("zerojson: json type mismatch")
+
+	globalRegistryCache sync.Map // reflect.Type -> *Registry
 )
 
 type MarshalFunc func(ptr unsafe.Pointer, buf []byte) []byte
@@ -56,8 +58,14 @@ type Registry struct {
 
 // BuildRegistry constructs a registry for a given struct type.
 func BuildRegistry(typ reflect.Type) *Registry {
+	if cached, ok := globalRegistryCache.Load(typ); ok {
+		return cached.(*Registry)
+	}
 
 	reg := &Registry{}
+	// Pre-store in cache to handle recursion
+	globalRegistryCache.Store(typ, reg)
+
 	reg.chunkPool.New = func() any {
 		return make([]Chunk, 131072)
 	}
@@ -175,19 +183,14 @@ func BuildRegistry(typ reflect.Type) *Registry {
 				info.ElemType = field.Type.Elem()
 
 				info.Marshaler = func(fieldPtr unsafe.Pointer, buf []byte) []byte {
-					// fieldPtr := unsafe.Pointer(uintptr(ptr) + info.Offset)
-
 					hdr := (*struct {
 						Data uintptr
 						Len  int
 						Cap  int
 					})(fieldPtr)
 
-					// ДЕБАГ-ПЕЧАТЬ: Посмотрим, что реально лежит в заголовке слайса
-					// println("SLICE DATA:", hdr.Data, "LEN:", hdr.Len, "CAP:", hdr.Cap)
-
 					if hdr.Data == 0 {
-						return append(buf, []byte("null")...)
+						return append(buf, "null"...)
 					}
 
 					if hdr.Len == 0 {
@@ -196,15 +199,51 @@ func BuildRegistry(typ reflect.Type) *Registry {
 
 					buf = append(buf, '[')
 					elemSize := info.ElemType.Size()
-					// println("ELEM SIZE:", elemSize)
 
 					for i := 0; i < hdr.Len; i++ {
 						if i > 0 {
 							buf = append(buf, ',')
 						}
 						elemPtr := unsafe.Pointer(hdr.Data + uintptr(i)*elemSize)
-						// println("  -> ELEM", i, "PTR:", elemPtr)
 						buf = MarshalObject(elemPtr, info.Sub, buf)
+					}
+					buf = append(buf, ']')
+					return buf
+				}
+			} else if field.Type.Elem().Kind() == reflect.Ptr && field.Type.Elem().Elem().Kind() == reflect.Struct {
+				info.Type = TypeStructSlice
+				info.Sub = BuildRegistry(field.Type.Elem().Elem())
+				info.SliceType = field.Type
+				info.ElemType = field.Type.Elem()
+
+				info.Marshaler = func(fieldPtr unsafe.Pointer, buf []byte) []byte {
+					hdr := (*struct {
+						Data uintptr
+						Len  int
+						Cap  int
+					})(fieldPtr)
+
+					if hdr.Data == 0 {
+						return append(buf, "null"...)
+					}
+
+					if hdr.Len == 0 {
+						return append(buf, '[', ']')
+					}
+
+					buf = append(buf, '[')
+					elemSize := info.ElemType.Size()
+
+					for i := 0; i < hdr.Len; i++ {
+						if i > 0 {
+							buf = append(buf, ',')
+						}
+						elemPtr := *(*unsafe.Pointer)(unsafe.Pointer(hdr.Data + uintptr(i)*elemSize))
+						if elemPtr == nil {
+							buf = append(buf, "null"...)
+						} else {
+							buf = MarshalObject(elemPtr, info.Sub, buf)
+						}
 					}
 					buf = append(buf, ']')
 					return buf
@@ -228,14 +267,14 @@ func BuildRegistry(typ reflect.Type) *Registry {
 				info.Marshaler = MarshalFloatPtr
 			case reflect.Struct:
 				info.Type = TypeStructPtr
-				info.Sub = BuildRegistry(field.Type)
+				info.Sub = BuildRegistry(field.Type.Elem())
 				// Special marshaler for nested structures
 				info.Marshaler = func(ptr unsafe.Pointer, buf []byte) []byte {
-					valPtr := (**float64)(ptr)
-					if *valPtr == nil {
+					valPtr := *(*unsafe.Pointer)(ptr)
+					if valPtr == nil {
 						return append(buf, "null"...)
 					}
-					return MarshalObject(unsafe.Pointer(*valPtr), info.Sub, buf)
+					return MarshalObject(valPtr, info.Sub, buf)
 				}
 			}
 
@@ -245,6 +284,38 @@ func BuildRegistry(typ reflect.Type) *Registry {
 		if info.OmitEmpty {
 			orig := info.Marshaler
 			info.Marshaler = func(ptr unsafe.Pointer, buf []byte) []byte {
+				// Check if value is empty
+				switch field.Type.Kind() {
+				case reflect.Slice:
+					hdr := (*struct {
+						Data uintptr
+						Len  int
+						Cap  int
+					})(ptr)
+					if hdr.Data == 0 || hdr.Len == 0 {
+						return buf
+					}
+				case reflect.Ptr:
+					if *(*unsafe.Pointer)(ptr) == nil {
+						return buf
+					}
+				case reflect.String:
+					if *(*string)(ptr) == "" {
+						return buf
+					}
+				case reflect.Int, reflect.Int64:
+					if *(*int64)(ptr) == 0 {
+						return buf
+					}
+				case reflect.Float64, reflect.Float32:
+					if *(*float64)(ptr) == 0 {
+						return buf
+					}
+				case reflect.Bool:
+					if !*(*bool)(ptr) {
+						return buf
+					}
+				}
 				return orig(ptr, buf)
 			}
 		}
