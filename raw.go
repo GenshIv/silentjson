@@ -103,19 +103,15 @@ func InjectFieldBeforeClose(data []byte, key, value string) []byte {
 	// Escape value for JSON string
 	escaped := escapeJSONString(value)
 
-	// Build insert: ,"key":"value"
-	insert := make([]byte, 0, 4+len(key)+3+len(escaped))
-	insert = append(insert, ',', '"')
-	insert = append(insert, key...)
-	insert = append(insert, '"', ':', '"')
-	insert = append(insert, escaped...)
-	insert = append(insert, '"')
-
-	// Result: all bytes except last '}' + insert + '}'
-	result := make([]byte, 0, len(data)+len(insert))
+	// Single allocation: [data[:len-1] + ","key":"escaped"" + }
+	insertLen := 4 + len(key) + 3 + len(escaped)
+	result := make([]byte, 0, len(data)+insertLen)
 	result = append(result, data[:len(data)-1]...)
-	result = append(result, insert...)
-	result = append(result, '}')
+	result = append(result, ',', '"')
+	result = append(result, key...)
+	result = append(result, '"', ':', '"')
+	result = append(result, escaped...)
+	result = append(result, '"', '}')
 	return result
 }
 

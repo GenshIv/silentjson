@@ -223,7 +223,7 @@ func parseRootSlice(raw []byte, reg *Registry, ptr unsafe.Pointer) error {
 
 	// Логика аналогична TypeStructSlice из parseObjectAt:
 	header := (*reflect.SliceHeader)(ptr)
-	if header.Cap == 0 {
+	if header.Data == 0 || header.Cap == 0 {
 		newSlice := reflect.MakeSlice(reg.SliceType, 0, 16)
 		header.Data = newSlice.Pointer()
 		header.Cap = 16
@@ -249,12 +249,21 @@ func parseRootSlice(raw []byte, reg *Registry, ptr unsafe.Pointer) error {
 			header.Cap = newCap
 		}
 
-		elemPtr := unsafe.Pointer(header.Data + uintptr(header.Len)*elemSize)
-
-		// Очистка памяти элемента
-		b := unsafe.Slice((*byte)(elemPtr), elemSize)
-		for j := range b {
-			b[j] = 0
+		var elemPtr unsafe.Pointer
+		if reg.ElemType.Kind() == reflect.Ptr {
+			// Для слайса указателей (например, []*Struct)
+			// Выделяем память под саму структуру
+			newObjPtr := reflect.New(reg.ElemType.Elem()).Pointer()
+			// Записываем этот указатель в массив слайса
+			*(*unsafe.Pointer)(unsafe.Pointer(header.Data + uintptr(header.Len)*elemSize)) = unsafe.Pointer(newObjPtr)
+			elemPtr = unsafe.Pointer(newObjPtr)
+		} else {
+			elemPtr = unsafe.Pointer(header.Data + uintptr(header.Len)*elemSize)
+			// Очистка памяти элемента
+			b := unsafe.Slice((*byte)(elemPtr), elemSize)
+			for j := range b {
+				b[j] = 0
+			}
 		}
 
 		consumed, err := parseObjectAt(raw[i:], reg.ElemSub, elemPtr)
@@ -539,6 +548,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 					}
 					val := int64(fastParseInt(raw[valStart:i]))
 					ptrPtr := (**int64)(unsafe.Pointer(uintptr(ptr) + info.Offset))
+					//ptrPtr := (**int64)(ptr)
 					if *ptrPtr == nil {
 						*ptrPtr = new(int64)
 					}
@@ -626,7 +636,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 				}
 
 				header := (*reflect.SliceHeader)(unsafe.Pointer(uintptr(ptr) + info.Offset))
-				if header.Cap == 0 {
+				if header.Data == 0 || header.Cap == 0 {
 					newSlice := reflect.MakeSlice(info.SliceType, 0, 16)
 					header.Data = newSlice.Pointer()
 					header.Cap = 16
@@ -647,12 +657,18 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 						header.Cap = newCap
 					}
 
-					elemPtr := unsafe.Pointer(header.Data + uintptr(header.Len)*elemSize)
-
-					// Zero the memory quickly using Go's optimized memclr
-					b := unsafe.Slice((*byte)(elemPtr), elemSize)
-					for j := range b {
-						b[j] = 0
+					var elemPtr unsafe.Pointer
+					if info.ElemType.Kind() == reflect.Ptr {
+						newObjPtr := reflect.New(info.ElemType.Elem()).Pointer()
+						*(*unsafe.Pointer)(unsafe.Pointer(header.Data + uintptr(header.Len)*elemSize)) = unsafe.Pointer(newObjPtr)
+						elemPtr = unsafe.Pointer(newObjPtr)
+					} else {
+						elemPtr = unsafe.Pointer(header.Data + uintptr(header.Len)*elemSize)
+						// Zero the memory quickly using Go's optimized memclr
+						b := unsafe.Slice((*byte)(elemPtr), elemSize)
+						for j := range b {
+							b[j] = 0
+						}
 					}
 
 					consumed, err := parseObjectAt(raw[i:], info.Sub, elemPtr)

@@ -75,9 +75,11 @@ func BuildRegistry(typ reflect.Type) *Registry {
 		reg.IsSlice = true
 		reg.SliceType = typ
 		reg.ElemType = typ.Elem()
-		// Если это слайс структур, строим дочерний реестр для полей структуры
+		// Если это слайс структур или указателей на структуры, строим дочерний реестр для полей структуры
 		if reg.ElemType.Kind() == reflect.Struct {
 			reg.ElemSub = BuildRegistry(reg.ElemType)
+		} else if reg.ElemType.Kind() == reflect.Ptr && reg.ElemType.Elem().Kind() == reflect.Struct {
+			reg.ElemSub = BuildRegistry(reg.ElemType.Elem())
 		}
 		return reg
 	}
