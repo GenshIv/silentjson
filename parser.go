@@ -170,6 +170,11 @@ func Marshal[T any](obj *T, reg *Registry, buf []byte) []byte {
 
 // MarshalObject performs recursive structure-to-JSON serialization.
 func MarshalObject(ptr unsafe.Pointer, reg *Registry, buf []byte) []byte {
+
+	if ptr == nil {
+		return append(buf, []byte("null")...)
+	}
+
 	buf = append(buf, '{')
 	fields := reg.Fields
 
@@ -177,14 +182,16 @@ func MarshalObject(ptr unsafe.Pointer, reg *Registry, buf []byte) []byte {
 		// First field (no comma before it)
 		f := &fields[0]
 		buf = append(buf, f.EncodedKey...)
-		buf = f.Marshaler(unsafe.Pointer(uintptr(ptr)+f.Offset), buf)
+		ptrNew := unsafe.Pointer(uintptr(ptr) + f.Offset)
+		buf = f.Marshaler(ptrNew, buf)
 
 		// Remaining fields
 		for i := 1; i < len(fields); i++ {
 			buf = append(buf, ',')
 			f := &fields[i]
 			buf = append(buf, f.EncodedKey...)
-			buf = f.Marshaler(unsafe.Pointer(uintptr(ptr)+f.Offset), buf)
+			ptrNew := unsafe.Pointer(uintptr(ptr) + f.Offset)
+			buf = f.Marshaler(ptrNew, buf)
 		}
 	}
 

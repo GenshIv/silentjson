@@ -79,6 +79,9 @@ const (
 	TypeStringPtr
 	TypeBoolPtr
 	TypeFloatPtr
+	TypeStructPtr
+	// Raw JSON message
+	TypeRawMessage
 )
 
 func fastParseInt(buf []byte) int {

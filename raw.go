@@ -5,6 +5,10 @@ import (
 	"unsafe"
 )
 
+// RawMessage is a raw encoded JSON value, similar to json.RawMessage.
+// It is serialized as-is by silentjson.Marshal without any escaping or modification.
+type RawMessage []byte
+
 // GetStringValue returns the string value for a given key in a JSON object.
 // Format expected: "key":"value" or "key": "value"
 // Returns (value, ok). O(n) scan, no alloc except the returned string.
@@ -164,6 +168,54 @@ slow:
 }
 
 var hex = "0123456789abcdef"
+
+// EscapeStringInto writes a JSON-escaped string into w, without quotes.
+// No allocations except for control chars via small buffer.
+func EscapeStringInto(w interface{ Write([]byte) (int, error) }, s string) {
+	if s == "" {
+		return
+	}
+
+	// Fast path: no escaping needed
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '"' || c == '\\' || c < 0x20 {
+			goto slow
+		}
+	}
+	_, _ = w.Write([]byte(s))
+	return
+
+slow:
+	buf := make([]byte, 0, len(s)+8)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '"':
+			buf = append(buf, '\\', '"')
+		case '\\':
+			buf = append(buf, '\\', '\\')
+		case '\n':
+			buf = append(buf, '\\', 'n')
+		case '\r':
+			buf = append(buf, '\\', 'r')
+		case '\t':
+			buf = append(buf, '\\', 't')
+		case '\b':
+			buf = append(buf, '\\', 'b')
+		case '\f':
+			buf = append(buf, '\\', 'f')
+		default:
+			if c < 0x20 {
+				buf = append(buf, '\\', 'u', '0', '0',
+					hex[c>>4], hex[c&0x0f])
+			} else {
+				buf = append(buf, c)
+			}
+		}
+	}
+	_, _ = w.Write(buf)
+}
 
 // findBytes finds the first occurrence of pattern in data.
 // Simple O(n*m) scan, sufficient for short patterns like "\"key\":".

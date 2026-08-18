@@ -133,7 +133,12 @@ func BuildRegistry(typ reflect.Type) *Registry {
 		}
 
 		// Bind marshaler based on type
+		// Special handling for silentjson.RawMessage
+
 		switch field.Type.Kind() {
+		case reflect.TypeOf(RawMessage(nil)).Elem().Kind():
+			info.Type = TypeRawMessage
+			info.Marshaler = MarshalRawMessage
 		case reflect.Int, reflect.Int64:
 			info.Type = TypeInt
 			info.Marshaler = MarshalInt // Uses our new appendIntASM
@@ -157,6 +162,9 @@ func BuildRegistry(typ reflect.Type) *Registry {
 			if field.Type.Elem().Kind() == reflect.String {
 				info.Type = TypeStringSlice
 				info.Marshaler = MarshalStringSlice
+			} else if field.Type.Elem().Kind() == reflect.TypeOf(RawMessage(nil)).Kind() {
+				info.Type = TypeRawMessage
+				info.Marshaler = MarshalRawMessageSlice
 			} else if field.Type.Elem().Kind() == reflect.Int {
 				info.Type = TypeIntSlice
 				info.Marshaler = MarshalIntSlice
@@ -166,15 +174,36 @@ func BuildRegistry(typ reflect.Type) *Registry {
 				info.SliceType = field.Type
 				info.ElemType = field.Type.Elem()
 
-				info.Marshaler = func(ptr unsafe.Pointer, buf []byte) []byte {
-					header := (*reflect.SliceHeader)(unsafe.Pointer(uintptr(ptr) + info.Offset))
+				info.Marshaler = func(fieldPtr unsafe.Pointer, buf []byte) []byte {
+					// fieldPtr := unsafe.Pointer(uintptr(ptr) + info.Offset)
+
+					hdr := (*struct {
+						Data uintptr
+						Len  int
+						Cap  int
+					})(fieldPtr)
+
+					// ДЕБАГ-ПЕЧАТЬ: Посмотрим, что реально лежит в заголовке слайса
+					// println("SLICE DATA:", hdr.Data, "LEN:", hdr.Len, "CAP:", hdr.Cap)
+
+					if hdr.Data == 0 {
+						return append(buf, []byte("null")...)
+					}
+
+					if hdr.Len == 0 {
+						return append(buf, '[', ']')
+					}
+
 					buf = append(buf, '[')
 					elemSize := info.ElemType.Size()
-					for i := 0; i < header.Len; i++ {
+					// println("ELEM SIZE:", elemSize)
+
+					for i := 0; i < hdr.Len; i++ {
 						if i > 0 {
 							buf = append(buf, ',')
 						}
-						elemPtr := unsafe.Pointer(header.Data + uintptr(i)*elemSize)
+						elemPtr := unsafe.Pointer(hdr.Data + uintptr(i)*elemSize)
+						// println("  -> ELEM", i, "PTR:", elemPtr)
 						buf = MarshalObject(elemPtr, info.Sub, buf)
 					}
 					buf = append(buf, ']')
@@ -197,7 +226,19 @@ func BuildRegistry(typ reflect.Type) *Registry {
 			case reflect.Float64, reflect.Float32:
 				info.Type = TypeFloatPtr
 				info.Marshaler = MarshalFloatPtr
+			case reflect.Struct:
+				info.Type = TypeStructPtr
+				info.Sub = BuildRegistry(field.Type)
+				// Special marshaler for nested structures
+				info.Marshaler = func(ptr unsafe.Pointer, buf []byte) []byte {
+					valPtr := (**float64)(ptr)
+					if *valPtr == nil {
+						return append(buf, "null"...)
+					}
+					return MarshalObject(unsafe.Pointer(*valPtr), info.Sub, buf)
+				}
 			}
+
 		}
 
 		// If OmitEmpty is present, wrap marshaler in a check
@@ -287,6 +328,7 @@ func MarshalBool(ptr unsafe.Pointer, buf []byte) []byte {
 }
 
 func MarshalString(ptr unsafe.Pointer, buf []byte) []byte {
+	defer recover()
 	s := *(*string)(ptr)
 
 	newBuf, specialPos := appendStringASM(buf, s)
@@ -397,4 +439,30 @@ func MarshalFloatPtr(ptr unsafe.Pointer, buf []byte) []byte {
 		return append(buf, "null"...)
 	}
 	return MarshalFloat(unsafe.Pointer(*valPtr), buf)
+}
+
+// MarshalRawMessage writes a RawMessage as raw JSON without any escaping.
+func MarshalRawMessage(ptr unsafe.Pointer, buf []byte) []byte {
+
+	val := *(*RawMessage)(ptr)
+	if len(val) == 0 {
+		return append(buf, "null"...)
+	}
+	return append(buf, val...)
+}
+
+// MarshalRawMessage writes a RawMessage as raw JSON without any escaping.
+func MarshalRawMessageSlice(ptr unsafe.Pointer, buf []byte) []byte {
+	slice := *(*[]RawMessage)(ptr)
+	if slice == nil {
+		return append(buf, "null"...)
+	}
+	buf = append(buf, '[')
+	for i := range slice {
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		buf = MarshalRawMessage(unsafe.Pointer(&slice[i]), buf)
+	}
+	return append(buf, ']')
 }
