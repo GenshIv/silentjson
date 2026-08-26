@@ -2,6 +2,7 @@ package silentjson
 
 import (
 	"strconv"
+	"unicode/utf8"
 	"unsafe"
 )
 
@@ -136,6 +137,25 @@ func unescapeStringInPlace(raw []byte) string {
 				raw[writeIdx] = '\b'
 			case 'f':
 				raw[writeIdx] = '\f'
+			case 'u':
+				// Handle unicode escape \uXXXX
+				if readIdx+4 < len(raw) {
+					// Parse the hex value
+					hexStr := string(raw[readIdx+1 : readIdx+5])
+					codePoint, err := strconv.ParseUint(hexStr, 16, 32)
+					if err == nil {
+						// Convert to UTF-8
+						runeVal := rune(codePoint)
+						var buf [4]byte
+						n := utf8.EncodeRune(buf[:], runeVal)
+						copy(raw[writeIdx:writeIdx+n], buf[:n])
+						writeIdx += n
+						readIdx += 4 // Skip the hex digits
+						continue
+					}
+				}
+				// Fallback: copy 'u' and continue
+				raw[writeIdx] = raw[readIdx]
 			default:
 				raw[writeIdx] = raw[readIdx] // Fallback for unknown escapes
 			}

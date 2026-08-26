@@ -145,143 +145,145 @@ func BuildRegistry(typ reflect.Type) *Registry {
 		// Bind marshaler based on type
 		// Special handling for silentjson.RawMessage
 
-		switch field.Type.Kind() {
-		case reflect.TypeOf(RawMessage(nil)).Elem().Kind():
+		if field.Type == reflect.TypeOf(RawMessage(nil)) {
+
 			info.Type = TypeRawMessage
 			info.Marshaler = MarshalRawMessage
-		case reflect.Int, reflect.Int64:
-			info.Type = TypeInt
-			info.Marshaler = MarshalInt // Uses our new appendIntASM
-		case reflect.Float64, reflect.Float32:
-			info.Type = TypeFloat
-			info.Marshaler = MarshalFloat // Implement via appendFloatASM or fmt.AppendFloat
-		case reflect.String:
-			info.Type = TypeString
-			info.Marshaler = MarshalString
-		case reflect.Bool:
-			info.Type = TypeBool
-			info.Marshaler = MarshalBool
-		case reflect.Struct:
-			info.Type = TypeStruct
-			info.Sub = BuildRegistry(field.Type)
-			// Special marshaler for nested structures
-			info.Marshaler = func(ptr unsafe.Pointer, buf []byte) []byte {
-				return MarshalObject(ptr, info.Sub, buf)
-			}
-		case reflect.Slice:
-			if field.Type.Elem().Kind() == reflect.String {
-				info.Type = TypeStringSlice
-				info.Marshaler = MarshalStringSlice
-			} else if field.Type.Elem().Kind() == reflect.TypeOf(RawMessage(nil)).Kind() {
-				info.Type = TypeRawMessage
-				info.Marshaler = MarshalRawMessageSlice
-			} else if field.Type.Elem().Kind() == reflect.Int {
-				info.Type = TypeIntSlice
-				info.Marshaler = MarshalIntSlice
-			} else if field.Type.Elem().Kind() == reflect.Struct {
-				info.Type = TypeStructSlice
-				info.Sub = BuildRegistry(field.Type.Elem())
-				info.SliceType = field.Type
-				info.ElemType = field.Type.Elem()
-
-				info.Marshaler = func(fieldPtr unsafe.Pointer, buf []byte) []byte {
-					hdr := (*struct {
-						Data uintptr
-						Len  int
-						Cap  int
-					})(fieldPtr)
-
-					if hdr.Data == 0 {
-						return append(buf, "null"...)
-					}
-
-					if hdr.Len == 0 {
-						return append(buf, '[', ']')
-					}
-
-					buf = append(buf, '[')
-					elemSize := info.ElemType.Size()
-
-					for i := 0; i < hdr.Len; i++ {
-						if i > 0 {
-							buf = append(buf, ',')
-						}
-						elemPtr := unsafe.Pointer(hdr.Data + uintptr(i)*elemSize)
-						buf = MarshalObject(elemPtr, info.Sub, buf)
-					}
-					buf = append(buf, ']')
-					return buf
-				}
-			} else if field.Type.Elem().Kind() == reflect.Ptr && field.Type.Elem().Elem().Kind() == reflect.Struct {
-				info.Type = TypeStructSlice
-				info.Sub = BuildRegistry(field.Type.Elem().Elem())
-				info.SliceType = field.Type
-				info.ElemType = field.Type.Elem()
-
-				info.Marshaler = func(fieldPtr unsafe.Pointer, buf []byte) []byte {
-					hdr := (*struct {
-						Data uintptr
-						Len  int
-						Cap  int
-					})(fieldPtr)
-
-					if hdr.Data == 0 {
-						return append(buf, "null"...)
-					}
-
-					if hdr.Len == 0 {
-						return append(buf, '[', ']')
-					}
-
-					buf = append(buf, '[')
-					elemSize := info.ElemType.Size()
-
-					for i := 0; i < hdr.Len; i++ {
-						if i > 0 {
-							buf = append(buf, ',')
-						}
-						elemPtr := *(*unsafe.Pointer)(unsafe.Pointer(hdr.Data + uintptr(i)*elemSize))
-						if elemPtr == nil {
-							buf = append(buf, "null"...)
-						} else {
-							buf = MarshalObject(elemPtr, info.Sub, buf)
-						}
-					}
-					buf = append(buf, ']')
-					return buf
-				}
-			}
-		case reflect.Ptr:
-			// Support *int, *int64, *string, *bool, *float64
-			elemKind := field.Type.Elem().Kind()
-			switch elemKind {
+		} else {
+			switch field.Type.Kind() {
 			case reflect.Int, reflect.Int64:
-				info.Type = TypeIntPtr
-				info.Marshaler = MarshalIntPtr
-			case reflect.String:
-				info.Type = TypeStringPtr
-				info.Marshaler = MarshalStringPtr
-			case reflect.Bool:
-				info.Type = TypeBoolPtr
-				info.Marshaler = MarshalBoolPtr
+				info.Type = TypeInt
+				info.Marshaler = MarshalInt // Uses our new appendIntASM
 			case reflect.Float64, reflect.Float32:
-				info.Type = TypeFloatPtr
-				info.Marshaler = MarshalFloatPtr
+				info.Type = TypeFloat
+				info.Marshaler = MarshalFloat // Implement via appendFloatASM or fmt.AppendFloat
+			case reflect.String:
+				info.Type = TypeString
+				info.Marshaler = MarshalString
+			case reflect.Bool:
+				info.Type = TypeBool
+				info.Marshaler = MarshalBool
 			case reflect.Struct:
-				info.Type = TypeStructPtr
-				info.Sub = BuildRegistry(field.Type.Elem())
+				info.Type = TypeStruct
+				info.Sub = BuildRegistry(field.Type)
 				// Special marshaler for nested structures
 				info.Marshaler = func(ptr unsafe.Pointer, buf []byte) []byte {
-					valPtr := *(*unsafe.Pointer)(ptr)
-					if valPtr == nil {
-						return append(buf, "null"...)
-					}
-					return MarshalObject(valPtr, info.Sub, buf)
+					return MarshalObject(ptr, info.Sub, buf)
 				}
+			case reflect.Slice:
+				if field.Type.Elem().Kind() == reflect.String {
+					info.Type = TypeStringSlice
+					info.Marshaler = MarshalStringSlice
+				} else if field.Type.Elem().Kind() == reflect.TypeOf(RawMessage(nil)).Kind() {
+					info.Type = TypeRawMessage
+					info.Marshaler = MarshalRawMessageSlice
+				} else if field.Type.Elem().Kind() == reflect.Int {
+					info.Type = TypeIntSlice
+					info.Marshaler = MarshalIntSlice
+				} else if field.Type.Elem().Kind() == reflect.Struct {
+					info.Type = TypeStructSlice
+					info.Sub = BuildRegistry(field.Type.Elem())
+					info.SliceType = field.Type
+					info.ElemType = field.Type.Elem()
+
+					info.Marshaler = func(fieldPtr unsafe.Pointer, buf []byte) []byte {
+						hdr := (*struct {
+							Data uintptr
+							Len  int
+							Cap  int
+						})(fieldPtr)
+
+						if hdr.Data == 0 {
+							return append(buf, "null"...)
+						}
+
+						if hdr.Len == 0 {
+							return append(buf, '[', ']')
+						}
+
+						buf = append(buf, '[')
+						elemSize := info.ElemType.Size()
+
+						for i := 0; i < hdr.Len; i++ {
+							if i > 0 {
+								buf = append(buf, ',')
+							}
+							elemPtr := unsafe.Pointer(hdr.Data + uintptr(i)*elemSize)
+							buf = MarshalObject(elemPtr, info.Sub, buf)
+						}
+						buf = append(buf, ']')
+						return buf
+					}
+				} else if field.Type.Elem().Kind() == reflect.Ptr && field.Type.Elem().Elem().Kind() == reflect.Struct {
+					info.Type = TypeStructSlice
+					info.Sub = BuildRegistry(field.Type.Elem().Elem())
+					info.SliceType = field.Type
+					info.ElemType = field.Type.Elem()
+
+					info.Marshaler = func(fieldPtr unsafe.Pointer, buf []byte) []byte {
+						hdr := (*struct {
+							Data uintptr
+							Len  int
+							Cap  int
+						})(fieldPtr)
+
+						if hdr.Data == 0 {
+							return append(buf, "null"...)
+						}
+
+						if hdr.Len == 0 {
+							return append(buf, '[', ']')
+						}
+
+						buf = append(buf, '[')
+						elemSize := info.ElemType.Size()
+
+						for i := 0; i < hdr.Len; i++ {
+							if i > 0 {
+								buf = append(buf, ',')
+							}
+							elemPtr := *(*unsafe.Pointer)(unsafe.Pointer(hdr.Data + uintptr(i)*elemSize))
+							if elemPtr == nil {
+								buf = append(buf, "null"...)
+							} else {
+								buf = MarshalObject(elemPtr, info.Sub, buf)
+							}
+						}
+						buf = append(buf, ']')
+						return buf
+					}
+				}
+			case reflect.Ptr:
+				// Support *int, *int64, *string, *bool, *float64
+				elemKind := field.Type.Elem().Kind()
+				switch elemKind {
+				case reflect.Int, reflect.Int64:
+					info.Type = TypeIntPtr
+					info.Marshaler = MarshalIntPtr
+				case reflect.String:
+					info.Type = TypeStringPtr
+					info.Marshaler = MarshalStringPtr
+				case reflect.Bool:
+					info.Type = TypeBoolPtr
+					info.Marshaler = MarshalBoolPtr
+				case reflect.Float64, reflect.Float32:
+					info.Type = TypeFloatPtr
+					info.Marshaler = MarshalFloatPtr
+				case reflect.Struct:
+					info.Type = TypeStructPtr
+					info.Sub = BuildRegistry(field.Type.Elem())
+					// Special marshaler for nested structures
+					info.Marshaler = func(ptr unsafe.Pointer, buf []byte) []byte {
+						valPtr := *(*unsafe.Pointer)(ptr)
+						if valPtr == nil {
+							return append(buf, "null"...)
+						}
+						return MarshalObject(valPtr, info.Sub, buf)
+					}
+				}
+
 			}
-
 		}
-
 		// If OmitEmpty is present, wrap marshaler in a check
 		if info.OmitEmpty {
 			orig := info.Marshaler

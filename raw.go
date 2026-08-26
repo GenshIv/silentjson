@@ -92,25 +92,60 @@ func GetInt64Value(data []byte, key string) (int64, bool) {
 	return val, true
 }
 
+// InjectFieldBeforeClose инжектит поле перед закрывающей фигурной скобкой.
+// Если передан готовый буфер `dst`, аллокаций вообще не будет.
+func InjectFieldBeforeClose(data []byte, key, value []byte) []byte {
+
+	// Считаем точную длину: data[:-1] + ',' + '"' + key + '"' + ':' + '"' + value + '"' + '}'
+	bodyLen := len(data) - 1
+	insertLen := 1 + 1 + len(key) + 3 + len(value) + 2 // , " key " : " value " }
+	totalLen := bodyLen + insertLen
+
+	// Иначе аллоцируем ровно один раз под итоговый размер
+	result := make([]byte, totalLen)
+	copy(result, data[:bodyLen])
+
+	idx := bodyLen
+	result[idx] = ','
+	result[idx+1] = '"'
+	idx += 2
+
+	copy(result[idx:], key)
+	idx += len(key)
+
+	result[idx] = '"'
+	result[idx+1] = ':'
+	result[idx+2] = '"'
+	idx += 3
+
+	copy(result[idx:], value)
+	idx += len(value)
+
+	result[idx] = '"'
+	result[idx+1] = '}'
+
+	return result
+}
+
 // InjectFieldBeforeClose inserts a field before the closing '}' of a JSON object.
-// Inserts ,"<key>":"<value>" right before the final '}'.
+// Inserts ,"<key>":"<value>" right before the final '}'. value must been escaped!!!
 // No parse, no alloc except the result buffer.
-func InjectFieldBeforeClose(data []byte, key, value string) []byte {
+func InjectFieldBeforeClose1(data []byte, key, value []byte) []byte {
 	if len(data) == 0 || data[len(data)-1] != '}' {
 		return data
 	}
 
 	// Escape value for JSON string
-	escaped := escapeJSONString(value)
+	// escaped := escapeJSONString(value)
 
 	// Single allocation: [data[:len-1] + ","key":"escaped"" + }
-	insertLen := 4 + len(key) + 3 + len(escaped)
+	insertLen := 4 + len(key) + 3 + len(value)
 	result := make([]byte, 0, len(data)+insertLen)
 	result = append(result, data[:len(data)-1]...)
 	result = append(result, ',', '"')
 	result = append(result, key...)
 	result = append(result, '"', ':', '"')
-	result = append(result, escaped...)
+	result = append(result, value...)
 	result = append(result, '"', '}')
 	return result
 }
