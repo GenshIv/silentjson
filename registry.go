@@ -416,23 +416,70 @@ func MarshalString(ptr unsafe.Pointer, buf []byte) []byte {
 		buf = newBuf
 		for i := specialPos; i < len(s); i++ {
 			c := s[i]
-			if (charTable[c] & (charString | charEscape)) != 0 {
-				buf = append(buf, '\\')
+			switch c {
+			case '"':
+				buf = append(buf, '\\', '"')
+			case '\\':
+				buf = append(buf, '\\', '\\')
+			case '\n':
+				buf = append(buf, '\\', 'n')
+			case '\r':
+				buf = append(buf, '\\', 'r')
+			case '\t':
+				buf = append(buf, '\\', 't')
+			case '\b':
+				buf = append(buf, '\\', 'b')
+			case '\f':
+				buf = append(buf, '\\', 'f')
+			default:
+				if c < 0x20 {
+					// Escape other control characters as \uXXXX
+					buf = append(buf, '\\', 'u', '0', '0')
+					buf = append(buf, hexDigitUpper(c>>4), hexDigitUpper(c&0x0F))
+				} else {
+					buf = append(buf, c)
+				}
 			}
-			buf = append(buf, c)
 		}
 		return append(buf, '"')
 	}
+}
+
+func hexDigitUpper(b byte) byte {
+	if b < 10 {
+		return '0' + b
+	}
+	return 'A' + (b - 10)
 }
 
 func appendJSONStringGo(buf []byte, s string) []byte {
 	buf = append(buf, '"')
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		if (charTable[c] & (charString | charEscape)) != 0 {
-			buf = append(buf, '\\')
+		switch c {
+		case '"':
+			buf = append(buf, '\\', '"')
+		case '\\':
+			buf = append(buf, '\\', '\\')
+		case '\n':
+			buf = append(buf, '\\', 'n')
+		case '\r':
+			buf = append(buf, '\\', 'r')
+		case '\t':
+			buf = append(buf, '\\', 't')
+		case '\b':
+			buf = append(buf, '\\', 'b')
+		case '\f':
+			buf = append(buf, '\\', 'f')
+		default:
+			if c < 0x20 {
+				// Escape other control characters as \uXXXX
+				buf = append(buf, '\\', 'u', '0', '0')
+				buf = append(buf, hexDigitUpper(c>>4), hexDigitUpper(c&0x0F))
+			} else {
+				buf = append(buf, c)
+			}
 		}
-		buf = append(buf, c)
 	}
 	buf = append(buf, '"')
 	return buf
