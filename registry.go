@@ -2,6 +2,7 @@ package silentjson
 
 import (
 	"errors"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -9,7 +10,6 @@ import (
 	"unsafe"
 
 	"github.com/GenshIv/intHache"
-	"github.com/cespare/ryu"
 )
 
 var (
@@ -392,7 +392,16 @@ func hashU64(x uint64) uint32 {
 
 func MarshalFloat(ptr unsafe.Pointer, buf []byte) []byte {
 	val := *(*float64)(ptr)
-	return ryu.AppendFloat64(buf, val)
+	// Match encoding/json output: plain decimal notation for everyday
+	// magnitudes (ryu always emits exponent form like 2.319e+03, which
+	// breaks naive consumers of the payload), exponent only outside
+	// [1e-6, 1e21).
+	abs := math.Abs(val)
+	format := byte('f')
+	if abs != 0 && (abs < 1e-6 || abs >= 1e21) {
+		format = 'e'
+	}
+	return strconv.AppendFloat(buf, val, format, -1, 64)
 }
 
 func MarshalBool(ptr unsafe.Pointer, buf []byte) []byte {

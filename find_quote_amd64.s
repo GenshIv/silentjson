@@ -87,9 +87,14 @@ scan_eof:
 
 
 // func appendStringASM(buf []byte, s string) (newBuf []byte, specialPos int)
-// AVX2: copies s into buf with surrounding quotes, scanning for '"' and '\\'.
+// AVX2: copies s into buf with surrounding quotes, scanning for '"', '\\'
+// and control characters (< 0x20, illegal unescaped inside JSON strings).
+// '"' and '\\' are escaped inline; control chars bail out to the Go slow
+// path in MarshalString, which knows the \n \r \t \b \f \u00XX mappings.
 // Returns (newBuf, -1)   if string is fully written.
 // Returns (buf, -2)      if not enough space in buf.
+// Returns (buf, i >= 0)  if s[i] is a control char needing the slow path
+//                        (opening quote + raw prefix written, no closing quote).
 TEXT ·appendStringAVX2(SB), NOSPLIT, $0-72
     MOVQ buf_base+0(FP), DI    // DI = buf.data
     MOVQ buf_len+8(FP), R11    // R11 = buf.len
@@ -110,7 +115,7 @@ TEXT ·appendStringAVX2(SB), NOSPLIT, $0-72
     INCQ DI
     INCQ R11
 
-    // Broadcast '"'  into Y1, '\\'  into Y2
+    // Broadcast '"'  into Y1, '\\'  into Y2, 0x1F into Y6
     MOVQ $0x2222222222222222, R8
     MOVQ R8, X1
     VPBROADCASTQ X1, Y1
@@ -118,6 +123,10 @@ TEXT ·appendStringAVX2(SB), NOSPLIT, $0-72
     MOVQ $0x5c5c5c5c5c5c5c5c, R8
     MOVQ R8, X2
     VPBROADCASTQ X2, Y2
+
+    MOVQ $0x1f1f1f1f1f1f1f1f, R8
+    MOVQ R8, X6
+    VPBROADCASTQ X6, Y6
 
     XORQ CX, CX                // CX = index into s
 
@@ -133,7 +142,10 @@ asw_avx2_loop:
     // Compare with '"'  and '\\'  
     VPCMPEQB Y1, Y0, Y3        // Y3: 0xFF where byte == '"'
     VPCMPEQB Y2, Y0, Y4        // Y4: 0xFF where byte == '\\'
-    VPOR Y3, Y4, Y5            // Y5: combined special-char mask
+    VPMINUB  Y6, Y0, Y7        // Y7 = min(byte, 0x1F)
+    VPCMPEQB Y7, Y0, Y8        // Y8: 0xFF where byte <= 0x1F (control char)
+    VPOR Y3, Y4, Y5            // Y5: quote/backslash mask
+    VPOR Y8, Y5, Y5            // Y5: combined special-char mask
 
     VPMOVMSKB Y5, R13          // R13 = 32-bit bitmask
     TESTL R13, R13
@@ -174,9 +186,18 @@ asw_escape_special:
     CMPQ AX, R14
     JG   asw_overflow
 
+    MOVB (SI)(CX*1), AL
+    CMPB AL, $0x22
+    JEQ  asw_escape_write      // '"' -- inline escape
+    CMPB AL, $0x5C
+    JEQ  asw_escape_write      // '\\' -- inline escape
+    // Control character: hand off to the Go slow path in MarshalString,
+    // which emits \n \r \t \b \f or \u00XX. Return specialPos = CX.
+    JMP  asw_return_special
+
+asw_escape_write:
     MOVB $0x5C, 0(DI)          // '\\'
     INCQ DI
-    MOVB (SI)(CX*1), AL
     MOVB AL, 0(DI)             // the escaped char
     INCQ DI
     INCQ CX
@@ -192,6 +213,8 @@ asw_scalar_loop:
     JEQ  asw_scalar_special
     CMPB AL, $0x5C
     JEQ  asw_scalar_special
+    CMPB AL, $0x1F
+    JBE  asw_return_special    // control char -- Go slow path escapes it
 
     MOVB AL, 0(DI)
     INCQ DI
@@ -217,6 +240,16 @@ asw_scalar_special:
     INCQ CX
     ADDQ $2, R11
     JMP  asw_scalar_loop
+
+asw_return_special:
+    // Return (buf, specialPos=CX): opening quote + raw prefix are in buf,
+    // no closing quote. MarshalString escapes from CX and closes the string.
+    MOVQ buf_base+0(FP), AX
+    MOVQ AX, ret_base+40(FP)
+    MOVQ R11, ret_len+48(FP)
+    MOVQ DX, ret_cap+56(FP)
+    MOVQ CX, ret1+64(FP)
+    RET
 
 asw_clean_done:
     // Write closing quote
