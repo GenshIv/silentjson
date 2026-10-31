@@ -6,19 +6,21 @@
 
 ## 🚀 Warum `silentjson`?
 
-- **Bis zu 30x schneller:** Bei großen JSON-Arrays nutzt `UnmarshalArrayParallel` alle CPU-Kerne und erreicht Geschwindigkeiten von über 12 GB/s.
+- **Schnelles Parallel-Parsing:** Bei großen JSON-Arrays nutzt `UnmarshalArrayParallel` alle CPU-Kerne: ~1,3 GB/s mit Struct-Binding (Ryzen 9 7950X3D).
 - **Keine Codegenerierung:** Im Gegensatz zu anderen Bibliotheken ist kein `go generate` erforderlich. Es funktioniert sofort.
 - **Zero-Copy-Architektur:** Strings werden direkt aus dem Eingabepuffer gemappt, was den Druck auf den Garbage Collector (GC) minimiert.
 
 ## 📊 Performance (AMD Ryzen 9 7950X3D)
 
-### Architekturvergleich (100k Objekte)
-| Modus | Durchsatz (MB/s) |
+### 100k Objekte, "Chaos"-Payload (neu gemessen Mai 2026)
+| Parser | Durchsatz (MB/s) |
 | :--- | :--- |
-| **SilentJSON (AVX2)** | **24.670 MB/s** ⭐ |
-| **SilentJSON (Skalar)** | **810 MB/s** |
-| **Sonic (JIT)** | 644 MB/s |
-| **Standard (Go)** | 110 MB/s |
+| **SilentJSON (Parallel)** | **1.258 MB/s** ⭐ |
+| Goccy | 680 MB/s |
+| **SilentJSON (Serial)** | **342 MB/s** |
+| Standard (Go) | 205 MB/s |
+
+> Die alten Multi-GB/s-Parallelwerte waren ungültig (Benchmarks ignorierten Fehler; der AVX2-Splitter verlor Datensätze bei Escape-Sequenzen). Vollständige Tabellen in [README.md](README.md).
 
 ## ⚙️ Hauptmerkmale
 - **SIMD-Beschleunigung:** Nutzt AVX2 auf `amd64` für ultraschnelle Verarbeitung.

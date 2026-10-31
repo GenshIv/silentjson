@@ -12,13 +12,15 @@
 
 ## 📊 Performances (AMD Ryzen 9 7950X3D)
 
-### Comparaison d'architecture (100k objets)
-| Mode | Débit (Mo/s) |
+### 100k objets, charge « chaos » (re-mesuré en mai 2026)
+| Parseur | Débit (Mo/s) |
 | :--- | :--- |
-| **SilentJSON (AVX2)** | **24 670 Mo/s** ⭐ |
-| **SilentJSON (Scalaire)** | **810 Mo/s** |
-| **Sonic (JIT)** | 644 Mo/s |
-| **Standard (Go)** | 110 Mo/s |
+| **SilentJSON (Parallèle)** | **1 258 Mo/s** ⭐ |
+| Goccy | 680 Mo/s |
+| **SilentJSON (Série)** | **342 Mo/s** |
+| Standard (Go) | 205 Mo/s |
+
+> Les anciens débits parallèles de plusieurs Go/s étaient invalides (benchmarks ignorant les erreurs ; le découpeur AVX2 perdait des enregistrements sur les échappements). Tableaux complets dans [README.md](README.md).
 
 ## ⚙️ Caractéristiques principales
 - **Accélération SIMD :** Utilise AVX2 sur `amd64` pour un traitement ultra-rapide.
