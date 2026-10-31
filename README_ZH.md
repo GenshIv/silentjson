@@ -15,9 +15,9 @@
 ### 10万个对象，"混沌"负载（2026 年 5 月重新测量）
 | 解析器 | 吞吐量 (MB/s) |
 | :--- | :--- |
-| **SilentJSON (Parallel)** | **2,884 MB/s** ⭐ |
+| **SilentJSON (Parallel)** | **2,909 MB/s** ⭐ |
 | Goccy | 671 MB/s |
-| **SilentJSON (Serial)** | **593 MB/s** |
+| **SilentJSON (Serial)** | **552 MB/s** |
 | 标准库 (Go) | 206 MB/s |
 
 > 旧的多次 GB/s 并行结果无效（基准测试忽略了错误，AVX2 扫描器在转义序列上丢记录）。完整表格见 [README.md](README.md)。

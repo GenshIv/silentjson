@@ -56,12 +56,12 @@ Every parser decodes the identical ~16 MB payload: 100,000 `Employee` records in
 
 | Library | Objects/sec | Throughput (MB/s) | Latency (ms/op) | Allocated | Allocs/op |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **SilentJSON** (Parallel) | **17.7M** 👑 | **2884** 👑 | **5.7** 👑 | **~290 KB** 👑 | **~1150** 👑 |
+| **SilentJSON** (Parallel) | **17.8M** 👑 | **2909** 👑 | **5.7** 👑 | **~290 KB** 👑 | **~1150** 👑 |
 | Goccy | 4.1M | 671 | 24.4 | 16.5 MB | 1 |
-| Jsoniter | 2.2M | 360 | 45.5 | 70.9 MB | 954k |
-| **SilentJSON** (Serial) | 2.1M | 593 | 25.3 | **~130 KB** 👑 | **~1030** 👑 |
+| Jsoniter | 3.2M | 524 | 38.2 | 70.9 MB | 954k |
+| **SilentJSON** (Serial) | 2.0M | 552 | 28.9 | **~130 KB** 👑 | **~1030** 👑 |
 | Easyjson (codegen) | 2.0M | 322 | 50.7 | 15.4 MB | 534k |
-| Standard (`encoding/json`) | 1.26M | 206 | 79.3 | 1.6 MB | 108k |
+| Standard (`encoding/json`) | 1.26M | 206 | 79.4 | 1.6 MB | 108k |
 | simdjson-go (AST + manual extraction) | 1.0M | 171 | 95.6 | 306 MB | 1.4M |
 | Sonic* | 1.0M | 163 | 100.6 | 67.8 MB | 108k |
 
@@ -85,7 +85,7 @@ xychart-beta
     title "Parsing Speed: 100k Chaos Objects (MB/s, Higher is Better)"
     x-axis ["SilentJSON Par", "Goccy", "Jsoniter", "Easyjson", "SilentJSON", "Standard", "simdjson", "Sonic*"]
     y-axis "MB/s" 0 --> 3200
-    bar [2884, 671, 360, 322, 593, 206, 171, 163]
+    bar [2909, 683, 524, 327, 552, 206, 174, 162]
 ```
 
 #### Payload flavors: what do escapes and UTF-8 actually cost?
@@ -102,18 +102,18 @@ Takeaways, measured: escapes cost throughput nothing on this parser (they only a
 
 #### Record shapes: many small vs few large vs very large
 
-`BenchmarkShapeComparison` decodes ~14-20 MB of JSON in four record shapes with every parser (small: 500k × 40 B; medium: 100k × 160 B; large: 1k × 14 KB; huge: 8 × 2 MB with a 1.2 MB string, 2048 tags and 4096 scores). Every decoder is verified against `encoding/json` per shape before it is measured (`TestShapeComparisonCorrectness`). With the AVX2 string scanner active:
+`BenchmarkShapeComparison` decodes ~14-20 MB of JSON in four record shapes with every parser (small: 500k × 40 B; medium: 100k × 160 B; large: 1k × 14 KB; huge: 8 × 2 MB with a 1.2 MB string, 2048 tags and 4096 scores). Every decoder is verified against `encoding/json` per shape before it is measured (`TestShapeComparisonCorrectness`). With the AVX2 string scanner active (every parser gets an identical loop: a destination preallocated before the timer, reused across iterations, and a per-iteration sink write):
 
 | Parser (MB/s) | Small | Medium | Large | Huge |
 | :--- | :--- | :--- | :--- | :--- |
-| **SilentJSON Serial** | 2140 | 627 | 3933 | **9180** 👑 |
-| **SilentJSON Parallel** | **3821** 👑 | 2941 | 3885 | 8956 |
-| Easyjson (codegen) | 394 | 338 | 1586 | 5884 |
-| Goccy | 939 | 621 | 1316 | 1415 |
-| Jsoniter | 556 | 454 | 1164 | 1636 |
-| simdjson-go (AST) | 169 | 170 | 1040 | 2270 |
-| Standard (`encoding/json`) | 198 | 192 | 750 | 1249 |
-| Sonic* | 157 | 156 | 462 | 653 |
+| **SilentJSON Serial** | 2169 | 623 | 3895 | **9058** 👑 |
+| **SilentJSON Parallel** | **3771** 👑 | 3322 | 3867 | 8995 |
+| Easyjson (codegen) | 384 | 339 | 1580 | 5974 |
+| Goccy | 955 | 639 | 1313 | 1461 |
+| Jsoniter | 560 | 442 | 1187 | 1617 |
+| simdjson-go (AST) | 173 | 170 | 1037 | 2257 |
+| Standard (`encoding/json`) | 211 | 208 | 788 | 1268 |
+| Sonic* | 165 | 163 | 476 | 658 |
 
 \* fallback mode on this machine. Parallel numbers on the 100k-record shapes carry ±7% run-to-run noise.
 
@@ -608,13 +608,14 @@ Current results on AMD Ryzen 9 7950X3D (medians of 3 runs, error-checked loops; 
 
 ```
 Parser comparison, 100k chaos objects (16 MB):
-SilentJSON Parallel:  2,884 MB/s
-Goccy:                  698 MB/s
-SilentJSON Serial:      593 MB/s
-Easyjson:               326 MB/s
-Standard JSON:          209 MB/s
+SilentJSON Parallel:  2,909 MB/s
+Goccy:                  683 MB/s
+Jsoniter:               524 MB/s
+SilentJSON Serial:      552 MB/s
+Easyjson:               327 MB/s
+Standard JSON:          206 MB/s
 
-Record shapes (serial): small 2140 / medium 627 / large 3933 / huge 9180 MB/s
+Record shapes (serial): small 2169 / medium 623 / large 3895 / huge 9058 MB/s
 
 Streaming, 3M records (500 MB):
 NextRawBlock:         4,012 MB/s

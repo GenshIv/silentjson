@@ -337,10 +337,10 @@ func BenchmarkParserComparison(b *testing.B) {
 	})
 
 	b.Run("Easyjson", func(b *testing.B) {
+		out := make(benchpayload.Employees, 0, len(parserCmpSource))
 		b.SetBytes(size)
 		b.ReportAllocs()
 		b.ResetTimer()
-		var out benchpayload.Employees
 		for i := 0; i < b.N; i++ {
 			out = out[:0]
 			if err := easyjson.Unmarshal(parserCmpJSON, &out); err != nil {
@@ -391,11 +391,12 @@ func BenchmarkParserComparison(b *testing.B) {
 	})
 
 	b.Run("Jsoniter", func(b *testing.B) {
+		out := make([]benchpayload.Employee, 0, len(parserCmpSource))
 		b.SetBytes(size)
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			var out []benchpayload.Employee
+			out = out[:0]
 			if err := jsoniter.ConfigFastest.Unmarshal(parserCmpJSON, &out); err != nil {
 				b.Fatal(err)
 			}

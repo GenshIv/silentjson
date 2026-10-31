@@ -287,14 +287,20 @@ func TestShapeComparisonCorrectness(t *testing.T) {
 
 // --- the shape × parser matrix ---
 
-func benchParser[T any](b *testing.B, raw []byte, unmarshal func([]byte, *T) error) {
+// benchParser mirrors the SilentJSON loops exactly so that no parser is
+// favored: the destination is preallocated before the timer and reused
+// across iterations (nobody re-allocates the result slice per op), and
+// every iteration writes a decoded value into a package sink so no
+// parser can be dead-code-eliminated.
+func benchParser[T any](b *testing.B, raw []byte, makeDst func() T, unmarshal func([]byte, *T) error, first func(*T) int) {
+	dst := makeDst()
 	b.ReportAllocs()
 	b.ResetTimer()
-	var out T
 	for i := 0; i < b.N; i++ {
-		if err := unmarshal(raw, &out); err != nil {
+		if err := unmarshal(raw, &dst); err != nil {
 			b.Fatal(err)
 		}
+		sinkInt = first(&dst)
 	}
 }
 
@@ -328,26 +334,30 @@ func BenchmarkShapeComparison(b *testing.B) {
 				sinkInt = out[0].ID
 			}
 		})
+		smallDst := func() []benchpayload.SmallRec { return make([]benchpayload.SmallRec, 0, len(shapeSmallSrc)) }
+		firstSmall := func(p *[]benchpayload.SmallRec) int { return (*p)[0].ID }
 		run("Standard", func(b *testing.B) {
-			benchParser(b, raw, func(r []byte, out *[]benchpayload.SmallRec) error { return json.Unmarshal(r, out) })
+			benchParser(b, raw, smallDst, func(r []byte, out *[]benchpayload.SmallRec) error { return json.Unmarshal(r, out) }, firstSmall)
 		})
 		run("Sonic", func(b *testing.B) {
-			benchParser(b, raw, func(r []byte, out *[]benchpayload.SmallRec) error { return sonic.Unmarshal(r, out) })
+			benchParser(b, raw, smallDst, func(r []byte, out *[]benchpayload.SmallRec) error { return sonic.Unmarshal(r, out) }, firstSmall)
 		})
 		run("Goccy", func(b *testing.B) {
-			benchParser(b, raw, func(r []byte, out *[]benchpayload.SmallRec) error { return goccyjson.Unmarshal(r, out) })
+			benchParser(b, raw, smallDst, func(r []byte, out *[]benchpayload.SmallRec) error { return goccyjson.Unmarshal(r, out) }, firstSmall)
 		})
 		run("Jsoniter", func(b *testing.B) {
-			benchParser(b, raw, func(r []byte, out *[]benchpayload.SmallRec) error { return jsoniter.ConfigFastest.Unmarshal(r, out) })
+			benchParser(b, raw, smallDst, func(r []byte, out *[]benchpayload.SmallRec) error { return jsoniter.ConfigFastest.Unmarshal(r, out) }, firstSmall)
 		})
 		run("Easyjson", func(b *testing.B) {
-			benchParser(b, raw, func(r []byte, out *benchpayload.SmallRecs) error { return easyjson.Unmarshal(r, out) })
+			benchParser(b, raw, func() benchpayload.SmallRecs { return make(benchpayload.SmallRecs, 0, len(shapeSmallSrc)) },
+				func(r []byte, out *benchpayload.SmallRecs) error { return easyjson.Unmarshal(r, out) },
+				func(p *benchpayload.SmallRecs) int { return (*p)[0].ID })
 		})
 		run("Simdjson", func(b *testing.B) {
 			if !simdjson.SupportedCPU() {
 				b.Skip("CPU not supported")
 			}
-			var out []benchpayload.SmallRec
+			out := make([]benchpayload.SmallRec, 0, len(shapeSmallSrc))
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				if err := simdjsonDecodeSmall(raw, &out); err != nil {
@@ -387,26 +397,30 @@ func BenchmarkShapeComparison(b *testing.B) {
 				sinkInt = out[0].ID
 			}
 		})
+		empDst := func() []benchpayload.Employee { return make([]benchpayload.Employee, 0, len(shapeMediumSrc)) }
+		firstEmp := func(p *[]benchpayload.Employee) int { return (*p)[0].ID }
 		run("Standard", func(b *testing.B) {
-			benchParser(b, raw, func(r []byte, out *[]benchpayload.Employee) error { return json.Unmarshal(r, out) })
+			benchParser(b, raw, empDst, func(r []byte, out *[]benchpayload.Employee) error { return json.Unmarshal(r, out) }, firstEmp)
 		})
 		run("Sonic", func(b *testing.B) {
-			benchParser(b, raw, func(r []byte, out *[]benchpayload.Employee) error { return sonic.Unmarshal(r, out) })
+			benchParser(b, raw, empDst, func(r []byte, out *[]benchpayload.Employee) error { return sonic.Unmarshal(r, out) }, firstEmp)
 		})
 		run("Goccy", func(b *testing.B) {
-			benchParser(b, raw, func(r []byte, out *[]benchpayload.Employee) error { return goccyjson.Unmarshal(r, out) })
+			benchParser(b, raw, empDst, func(r []byte, out *[]benchpayload.Employee) error { return goccyjson.Unmarshal(r, out) }, firstEmp)
 		})
 		run("Jsoniter", func(b *testing.B) {
-			benchParser(b, raw, func(r []byte, out *[]benchpayload.Employee) error { return jsoniter.ConfigFastest.Unmarshal(r, out) })
+			benchParser(b, raw, empDst, func(r []byte, out *[]benchpayload.Employee) error { return jsoniter.ConfigFastest.Unmarshal(r, out) }, firstEmp)
 		})
 		run("Easyjson", func(b *testing.B) {
-			benchParser(b, raw, func(r []byte, out *benchpayload.Employees) error { return easyjson.Unmarshal(r, out) })
+			benchParser(b, raw, func() benchpayload.Employees { return make(benchpayload.Employees, 0, len(shapeMediumSrc)) },
+				func(r []byte, out *benchpayload.Employees) error { return easyjson.Unmarshal(r, out) },
+				func(p *benchpayload.Employees) int { return (*p)[0].ID })
 		})
 		run("Simdjson", func(b *testing.B) {
 			if !simdjson.SupportedCPU() {
 				b.Skip("CPU not supported")
 			}
-			var out []benchpayload.Employee
+			out := make([]benchpayload.Employee, 0, len(shapeMediumSrc))
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				if err := simdjsonDecode(raw, &out); err != nil {
@@ -453,26 +467,30 @@ func BenchmarkShapeComparison(b *testing.B) {
 					sinkInt = out[0].ID
 				}
 			})
+			largeDst := func() []benchpayload.LargeRec { return make([]benchpayload.LargeRec, 0, len(shape.src)) }
+			firstLarge := func(p *[]benchpayload.LargeRec) int { return (*p)[0].ID }
 			run("Standard", func(b *testing.B) {
-				benchParser(b, raw, func(r []byte, out *[]benchpayload.LargeRec) error { return json.Unmarshal(r, out) })
+				benchParser(b, raw, largeDst, func(r []byte, out *[]benchpayload.LargeRec) error { return json.Unmarshal(r, out) }, firstLarge)
 			})
 			run("Sonic", func(b *testing.B) {
-				benchParser(b, raw, func(r []byte, out *[]benchpayload.LargeRec) error { return sonic.Unmarshal(r, out) })
+				benchParser(b, raw, largeDst, func(r []byte, out *[]benchpayload.LargeRec) error { return sonic.Unmarshal(r, out) }, firstLarge)
 			})
 			run("Goccy", func(b *testing.B) {
-				benchParser(b, raw, func(r []byte, out *[]benchpayload.LargeRec) error { return goccyjson.Unmarshal(r, out) })
+				benchParser(b, raw, largeDst, func(r []byte, out *[]benchpayload.LargeRec) error { return goccyjson.Unmarshal(r, out) }, firstLarge)
 			})
 			run("Jsoniter", func(b *testing.B) {
-				benchParser(b, raw, func(r []byte, out *[]benchpayload.LargeRec) error { return jsoniter.ConfigFastest.Unmarshal(r, out) })
+				benchParser(b, raw, largeDst, func(r []byte, out *[]benchpayload.LargeRec) error { return jsoniter.ConfigFastest.Unmarshal(r, out) }, firstLarge)
 			})
 			run("Easyjson", func(b *testing.B) {
-				benchParser(b, raw, func(r []byte, out *benchpayload.LargeRecs) error { return easyjson.Unmarshal(r, out) })
+				benchParser(b, raw, func() benchpayload.LargeRecs { return make(benchpayload.LargeRecs, 0, len(shape.src)) },
+					func(r []byte, out *benchpayload.LargeRecs) error { return easyjson.Unmarshal(r, out) },
+					func(p *benchpayload.LargeRecs) int { return (*p)[0].ID })
 			})
 			run("Simdjson", func(b *testing.B) {
 				if !simdjson.SupportedCPU() {
 					b.Skip("CPU not supported")
 				}
-				var out []benchpayload.LargeRec
+				out := make([]benchpayload.LargeRec, 0, len(shape.src))
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
 					if err := simdjsonDecodeLarge(raw, &out); err != nil {
