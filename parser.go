@@ -310,7 +310,6 @@ func parseRootSlice(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings b
 			return fmt.Errorf("unexpected char in root slice parsing")
 		}
 	}
-	return nil
 }
 
 // ParseObject parses a single JSON object and maps it directly into memory via unsafe.Pointer.

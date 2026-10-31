@@ -132,6 +132,9 @@ func initMarshalData() {
 // Compares: SilentJSON (sequential), Sonic, encoding/json (Standard), and simdjson-go.
 func BenchmarkNestedComparison(b *testing.B) {
 	b.Run("SilentJSON", func(b *testing.B) {
+		// Registry and destination setup stay outside the timed loop:
+		// BuildRegistry caches globally after the first call, dst is reused
+		// across iterations (Tags/Scores capacities are preserved by the parser).
 		reg := BuildRegistry(reflect.TypeOf(Employee{}))
 		dst := make([]Employee, recordCount)
 		for i := range dst {
@@ -139,15 +142,14 @@ func BenchmarkNestedComparison(b *testing.B) {
 			dst[i].Scores = make([]int, 0, 4)
 		}
 
-		buf := make([]byte, len(hugeJSONData))
-
 		b.SetBytes(int64(len(hugeJSONData)))
 		b.ReportAllocs()
 		b.ResetTimer()
 
+		// The parser guarantees read-only access to the input (TestFixNoInputMutation),
+		// so hugeJSONData is parsed directly — no defensive per-iteration copy.
 		for i := 0; i < b.N; i++ {
-			copy(buf, hugeJSONData)
-			_, err := UnmarshalSlice(buf, reg, dst)
+			_, err := UnmarshalSlice(hugeJSONData, reg, dst)
 			if err != nil {
 				b.Error(err)
 			}
@@ -354,10 +356,10 @@ func BenchmarkLargeScaleComparison(b *testing.B) {
 		b.SetBytes(int64(len(rawJSON)))
 		b.ReportAllocs()
 		b.ResetTimer()
-		buf := make([]byte, len(rawJSON))
+		// Input is read-only for the parser (TestFixNoInputMutation),
+		// rawJSON is parsed directly without a defensive copy.
 		for i := 0; i < b.N; i++ {
-			copy(buf, rawJSON)
-			_, _ = UnmarshalArrayParallel[Employee](buf, reg, dst)
+			_, _ = UnmarshalArrayParallel[Employee](rawJSON, reg, dst)
 		}
 	})
 

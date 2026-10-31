@@ -23,10 +23,10 @@ func BenchmarkSilentJSON_Architecture(b *testing.B) {
 		b.SetBytes(int64(len(rawJSON)))
 		b.ReportAllocs()
 		b.ResetTimer()
-		buf := make([]byte, len(rawJSON))
+		// The parser treats its input as read-only (TestFixNoInputMutation),
+		// so the shared rawJSON is parsed directly, no defensive copy.
 		for i := 0; i < b.N; i++ {
-			copy(buf, rawJSON)
-			_, _ = UnmarshalArrayParallel[Employee](buf, reg, dst)
+			_, _ = UnmarshalArrayParallel[Employee](rawJSON, reg, dst)
 		}
 	})
 
@@ -35,10 +35,8 @@ func BenchmarkSilentJSON_Architecture(b *testing.B) {
 		b.SetBytes(int64(len(rawJSON)))
 		b.ReportAllocs()
 		b.ResetTimer()
-		buf := make([]byte, len(rawJSON))
 		for i := 0; i < b.N; i++ {
-			copy(buf, rawJSON)
-			_, _ = UnmarshalArrayParallel[Employee](buf, reg, dst)
+			_, _ = UnmarshalArrayParallel[Employee](rawJSON, reg, dst)
 		}
 	})
 
