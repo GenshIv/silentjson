@@ -3,6 +3,7 @@ package silentjson
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"unsafe"
 )
 
@@ -170,6 +171,11 @@ func Marshal[T any](obj *T, reg *Registry, buf []byte) []byte {
 
 // MarshalObject performs recursive structure-to-JSON serialization.
 func MarshalObject(ptr unsafe.Pointer, reg *Registry, buf []byte) []byte {
+	if reg.buildErr != nil {
+		// P0-2 fix: fail fast instead of calling a nil Marshaler.
+		// Use reg.Err() to check the registry before calling Marshal.
+		panic("silentjson: cannot marshal " + reg.typeName + ": " + reg.buildErr.Error())
+	}
 
 	if ptr == nil {
 		return append(buf, "null"...)
@@ -214,7 +220,7 @@ func MarshalObject(ptr unsafe.Pointer, reg *Registry, buf []byte) []byte {
 	return buf
 }
 
-func parseRootSlice(raw []byte, reg *Registry, ptr unsafe.Pointer) error {
+func parseRootSlice(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bool) error {
 	// Здесь ptr трактуется как указатель на слайс: *[]T
 	// Нам потребуются метаданные из reg.SliceType и reg.ElemType.
 	if reg.SliceType == nil || reg.ElemType == nil {
@@ -225,8 +231,8 @@ func parseRootSlice(raw []byte, reg *Registry, ptr unsafe.Pointer) error {
 	header := (*reflect.SliceHeader)(ptr)
 	if header.Data == 0 || header.Cap == 0 {
 		newSlice := reflect.MakeSlice(reg.SliceType, 0, 16)
-		header.Data = newSlice.Pointer()
-		header.Cap = 16
+		// Typed Set keeps the backing array alive for the GC
+		reflect.NewAt(reg.SliceType, ptr).Elem().Set(newSlice)
 	}
 	header.Len = 0
 	elemSize := reg.ElemType.Size()
@@ -236,6 +242,13 @@ func parseRootSlice(raw []byte, reg *Registry, ptr unsafe.Pointer) error {
 		i++
 	}
 	if i < len(raw) && raw[i] == ']' {
+		i++
+		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+			i++
+		}
+		if i != len(raw) {
+			return fmt.Errorf("%w: trailing data after root array at %d", ErrTypeMismatch, i)
+		}
 		return nil
 	}
 
@@ -245,18 +258,18 @@ func parseRootSlice(raw []byte, reg *Registry, ptr unsafe.Pointer) error {
 			oldSlice := reflect.NewAt(reg.SliceType, ptr).Elem()
 			newSlice := reflect.MakeSlice(reg.SliceType, header.Len, newCap)
 			reflect.Copy(newSlice, oldSlice)
-			header.Data = newSlice.Pointer()
-			header.Cap = newCap
+			// Typed Set keeps the backing array alive for the GC
+			oldSlice.Set(newSlice)
 		}
 
 		var elemPtr unsafe.Pointer
 		if reg.ElemType.Kind() == reflect.Ptr {
 			// Для слайса указателей (например, []*Struct)
 			// Выделяем память под саму структуру
-			newObjPtr := reflect.New(reg.ElemType.Elem()).Pointer()
+			nv := reflect.New(reg.ElemType.Elem())
+			elemPtr = nv.UnsafePointer()
 			// Записываем этот указатель в массив слайса
-			*(*unsafe.Pointer)(unsafe.Pointer(header.Data + uintptr(header.Len)*elemSize)) = unsafe.Pointer(newObjPtr)
-			elemPtr = unsafe.Pointer(newObjPtr)
+			*(*unsafe.Pointer)(unsafe.Pointer(header.Data + uintptr(header.Len)*elemSize)) = elemPtr
 		} else {
 			elemPtr = unsafe.Pointer(header.Data + uintptr(header.Len)*elemSize)
 			// Очистка памяти элемента
@@ -266,7 +279,7 @@ func parseRootSlice(raw []byte, reg *Registry, ptr unsafe.Pointer) error {
 			}
 		}
 
-		consumed, err := parseObjectAt(raw[i:], reg.ElemSub, elemPtr)
+		consumed, err := parseObjectAt(raw[i:], reg.ElemSub, elemPtr, copyStrings)
 		if err != nil {
 			return err
 		}
@@ -285,7 +298,14 @@ func parseRootSlice(raw []byte, reg *Registry, ptr unsafe.Pointer) error {
 				i++
 			}
 		} else if raw[i] == ']' {
-			break
+			i++
+			for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+				i++
+			}
+			if i != len(raw) {
+				return fmt.Errorf("%w: trailing data after root array at %d", ErrTypeMismatch, i)
+			}
+			return nil
 		} else {
 			return fmt.Errorf("unexpected char in root slice parsing")
 		}
@@ -294,7 +314,15 @@ func parseRootSlice(raw []byte, reg *Registry, ptr unsafe.Pointer) error {
 }
 
 // ParseObject parses a single JSON object and maps it directly into memory via unsafe.Pointer.
+// Strings are zero-copy aliased to raw unless reg.CopyStrings is set.
 func ParseObject(raw []byte, reg *Registry, ptr unsafe.Pointer) error {
+	return parseObjectStrict(raw, reg, ptr, reg.CopyStrings)
+}
+
+func parseObjectStrict(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bool) error {
+	if reg.buildErr != nil {
+		return fmt.Errorf("silentjson: registry for %s has unsupported fields: %w", reg.typeName, reg.buildErr)
+	}
 
 	i := 0
 	for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
@@ -303,10 +331,16 @@ func ParseObject(raw []byte, reg *Registry, ptr unsafe.Pointer) error {
 
 	if i < len(raw) && raw[i] == '[' {
 		// Мы обнаружили массив на верхнем уровне!
-		return parseRootSlice(raw[i:], reg, ptr)
+		return parseRootSlice(raw[i:], reg, ptr, copyStrings)
 	}
 
-	n, err := parseObjectAt(raw, reg, ptr)
+	elemReg := reg
+	if reg.IsSlice && reg.ElemSub != nil {
+		// Element registry for UnmarshalSlice-style calls with a root slice registry
+		elemReg = reg.ElemSub
+	}
+
+	n, err := parseObjectAt(raw, elemReg, ptr, copyStrings)
 	if err != nil {
 		return err
 	}
@@ -319,7 +353,10 @@ func ParseObject(raw []byte, reg *Registry, ptr unsafe.Pointer) error {
 	return nil
 }
 
-func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
+func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bool) (int, error) {
+	if reg.buildErr != nil {
+		return 0, fmt.Errorf("silentjson: registry for %s has unsupported fields: %w", reg.typeName, reg.buildErr)
+	}
 	if len(raw) == 0 {
 		return 0, ErrUnexpectedEOF
 	}
@@ -333,6 +370,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 	}
 	i++
 
+	afterComma := false
 	for {
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
 			i++
@@ -341,24 +379,25 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 			return 0, ErrUnexpectedEOF
 		}
 		if (charTable[raw[i]] & charCloseBrace) != 0 {
+			if afterComma {
+				return 0, fmt.Errorf("%w: unexpected trailing comma in object at %d", ErrTypeMismatch, i)
+			}
 			return i + 1, nil
 		}
+		if afterComma && (charTable[raw[i]]&charString) == 0 {
+			return 0, fmt.Errorf("%w: expected key after comma at %d (%q)", ErrTypeMismatch, i, raw[i])
+		}
+		afterComma = false
 		if (charTable[raw[i]] & charString) == 0 {
 			return 0, fmt.Errorf("%w: expected key quote at %d (%q)", ErrTypeMismatch, i, raw[i])
 		}
 
 		i++
-		written, consumed := parseShortStringASM2(raw[i:])
-		if consumed < 0 {
-			return 0, ErrUnexpectedEOF
+		keySlice, keyBytes, consumed, err := readJSONString(raw[i:], copyStrings)
+		if err != nil {
+			return 0, err
 		}
-		decoded := raw[i : i+int(written)]
-		var keySlice string
-		if reg.CopyStrings {
-			keySlice = string(decoded)
-		} else {
-			keySlice = unsafe.String(unsafe.SliceData(decoded), len(decoded))
-		}
+		decoded := keyBytes
 		i += int(consumed)
 
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
@@ -456,6 +495,13 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 				idx = (idx + 1) & reg.HashMask
 			}
 		}
+		if !ok && len(reg.lowerMap) > 0 {
+			// encoding/json compat: case-insensitive key fallback (P2-2)
+			if ciIdx, ciOk := reg.lowerMap[strings.ToLower(keySlice)]; ciOk {
+				info = reg.Fields[ciIdx]
+				ok = true
+			}
+		}
 		if ok {
 			switch info.Type {
 			case TypeString:
@@ -463,36 +509,58 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 					return 0, fmt.Errorf("%w: expected string value", ErrTypeMismatch)
 				}
 				i++
-				written, consumed := parseShortStringASM2(raw[i:])
-				if consumed < 0 {
-					return 0, ErrUnexpectedEOF
-				}
-				decoded := raw[i : i+int(written)]
-				var strVal string
-				if reg.CopyStrings {
-					strVal = string(decoded)
-				} else {
-					strVal = unsafe.String(unsafe.SliceData(decoded), len(decoded))
+				strVal, _, consumed, err := readJSONString(raw[i:], copyStrings)
+				if err != nil {
+					return 0, err
 				}
 				*(*string)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = strVal
 				i += int(consumed)
 
-			case TypeInt:
+			case TypeInt, TypeUint:
+				if i+4 <= len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == nullMagic {
+					// null leaves the zero value, like encoding/json
+					i += 4
+					break
+				}
 				valStart := i
 				for i < len(raw) && (charTable[raw[i]]&maskValueEnd) == 0 {
 					i++
 				}
-				*(*int)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = fastParseInt(raw[valStart:i])
+				val, ok := parseJSONInt(raw[valStart:i])
+				if !ok {
+					return 0, fmt.Errorf("%w: invalid integer %q for field %q", ErrTypeMismatch, raw[valStart:i], info.Key)
+				}
+				if !intFitsWidth(val, info.Bits, info.Unsigned) {
+					return 0, fmt.Errorf("%w: number %d out of range for field %q", ErrTypeMismatch, val, info.Key)
+				}
+				storeIntWidth(unsafe.Pointer(uintptr(ptr)+info.Offset), val, info.Bits, info.Unsigned)
 
 			case TypeFloat:
+				if i+4 <= len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == nullMagic {
+					i += 4
+					break
+				}
 				valStart := i
 				for i < len(raw) && (charTable[raw[i]]&maskValueEnd) == 0 {
 					i++
 				}
-				*(*float64)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = fastParseFloat(raw[valStart:i])
+				fval, ok := parseJSONFloat(raw[valStart:i])
+				if !ok {
+					return 0, fmt.Errorf("%w: invalid number %q for field %q", ErrTypeMismatch, raw[valStart:i], info.Key)
+				}
+				dst := unsafe.Pointer(uintptr(ptr) + info.Offset)
+				// P0-1 fix: write the field at its real width
+				if info.Bits == 32 {
+					*(*float32)(dst) = float32(fval)
+				} else {
+					*(*float64)(dst) = fval
+				}
 
 			case TypeBool:
-				if i+3 < len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == trueMagic {
+				if i+4 <= len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == nullMagic {
+					*(*bool)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = false
+					i += 4
+				} else if i+3 < len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == trueMagic {
 					*(*bool)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = true
 					i += 4
 				} else if i+4 < len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == falsePrefixMagic && (charTable[raw[i+4]]&charLetterE) != 0 {
@@ -507,7 +575,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 					return 0, fmt.Errorf("%w: expected object value", ErrTypeMismatch)
 				}
 				subPtr := unsafe.Pointer(uintptr(ptr) + info.Offset)
-				consumed, err := parseObjectAt(raw[i:], info.Sub, subPtr)
+				consumed, err := parseObjectAt(raw[i:], info.Sub, subPtr, copyStrings)
 				if err != nil {
 					return 0, err
 				}
@@ -518,7 +586,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 					return 0, fmt.Errorf("%w: expected string slice value", ErrTypeMismatch)
 				}
 				existingSlice := *(*[]string)(unsafe.Pointer(uintptr(ptr) + info.Offset))
-				slice, consumed, err := parseStringSliceAt(raw[i:], 0, existingSlice, reg.CopyStrings)
+				slice, consumed, err := parseStringSliceAt(raw[i:], 0, existingSlice, copyStrings)
 				if err != nil {
 					return 0, err
 				}
@@ -538,21 +606,29 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 				i += consumed
 
 			case TypeIntPtr:
-				if i < len(raw) && i+3 < len(raw) && raw[i] == 'n' && raw[i+1] == 'u' && raw[i+2] == 'l' && raw[i+3] == 'l' {
-					*(**int64)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = nil
+				if i+4 <= len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == nullMagic {
+					*(*unsafe.Pointer)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = nil
 					i += 4
 				} else {
 					valStart := i
 					for i < len(raw) && (charTable[raw[i]]&maskValueEnd) == 0 {
 						i++
 					}
-					val := int64(fastParseInt(raw[valStart:i]))
-					ptrPtr := (**int64)(unsafe.Pointer(uintptr(ptr) + info.Offset))
-					//ptrPtr := (**int64)(ptr)
-					if *ptrPtr == nil {
-						*ptrPtr = new(int64)
+					val, ok := parseJSONInt(raw[valStart:i])
+					if !ok {
+						return 0, fmt.Errorf("%w: invalid integer %q for field %q", ErrTypeMismatch, raw[valStart:i], info.Key)
 					}
-					**ptrPtr = val
+					if !intFitsWidth(val, info.Bits, info.Unsigned) {
+						return 0, fmt.Errorf("%w: number %d out of range for field %q", ErrTypeMismatch, val, info.Key)
+					}
+					fieldPtr := unsafe.Pointer(uintptr(ptr) + info.Offset)
+					elemPtr := *(*unsafe.Pointer)(fieldPtr)
+					if elemPtr == nil {
+						nv := reflect.New(info.ElemType)
+						elemPtr = nv.UnsafePointer()
+						*(*unsafe.Pointer)(fieldPtr) = elemPtr
+					}
+					storeIntWidth(elemPtr, val, info.Bits, info.Unsigned)
 				}
 
 			case TypeStringPtr:
@@ -564,16 +640,9 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 						return 0, fmt.Errorf("%w: expected string value", ErrTypeMismatch)
 					}
 					i++
-					written, consumed := parseShortStringASM2(raw[i:])
-					if consumed < 0 {
-						return 0, ErrUnexpectedEOF
-					}
-					decoded := raw[i : i+int(written)]
-					var strVal string
-					if reg.CopyStrings {
-						strVal = string(decoded)
-					} else {
-						strVal = unsafe.String(unsafe.SliceData(decoded), len(decoded))
+					strVal, _, consumed, err := readJSONString(raw[i:], copyStrings)
+					if err != nil {
+						return 0, err
 					}
 					ptrPtr := (**string)(unsafe.Pointer(uintptr(ptr) + info.Offset))
 					if *ptrPtr == nil {
@@ -606,20 +675,31 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 				}
 
 			case TypeFloatPtr:
-				if i < len(raw) && i+3 < len(raw) && raw[i] == 'n' && raw[i+1] == 'u' && raw[i+2] == 'l' && raw[i+3] == 'l' {
-					*(**float64)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = nil
+				if i+4 <= len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == nullMagic {
+					*(*unsafe.Pointer)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = nil
 					i += 4
 				} else {
 					valStart := i
 					for i < len(raw) && (charTable[raw[i]]&maskValueEnd) == 0 {
 						i++
 					}
-					val := fastParseFloat(raw[valStart:i])
-					ptrPtr := (**float64)(unsafe.Pointer(uintptr(ptr) + info.Offset))
-					if *ptrPtr == nil {
-						*ptrPtr = new(float64)
+					fval, ok := parseJSONFloat(raw[valStart:i])
+					if !ok {
+						return 0, fmt.Errorf("%w: invalid number %q for field %q", ErrTypeMismatch, raw[valStart:i], info.Key)
 					}
-					**ptrPtr = val
+					fieldPtr := unsafe.Pointer(uintptr(ptr) + info.Offset)
+					elemPtr := *(*unsafe.Pointer)(fieldPtr)
+					if elemPtr == nil {
+						nv := reflect.New(info.ElemType)
+						elemPtr = nv.UnsafePointer()
+						*(*unsafe.Pointer)(fieldPtr) = elemPtr
+					}
+					// P0-1 fix: write at the pointer's real element width
+					if info.Bits == 32 {
+						*(*float32)(elemPtr) = float32(fval)
+					} else {
+						*(*float64)(elemPtr) = fval
+					}
 				}
 
 			case TypeStructSlice:
@@ -638,8 +718,8 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 				header := (*reflect.SliceHeader)(unsafe.Pointer(uintptr(ptr) + info.Offset))
 				if header.Data == 0 || header.Cap == 0 {
 					newSlice := reflect.MakeSlice(info.SliceType, 0, 16)
-					header.Data = newSlice.Pointer()
-					header.Cap = 16
+					// Typed Set keeps the backing array alive for the GC
+					reflect.NewAt(info.SliceType, unsafe.Pointer(header)).Elem().Set(newSlice)
 				}
 				header.Len = 0
 				elemSize := info.ElemType.Size()
@@ -653,15 +733,15 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 						oldSlice := reflect.NewAt(info.SliceType, unsafe.Pointer(header)).Elem()
 						newSlice := reflect.MakeSlice(info.SliceType, header.Len, newCap)
 						reflect.Copy(newSlice, oldSlice)
-						header.Data = newSlice.Pointer()
-						header.Cap = newCap
+						// Typed Set keeps the backing array alive for the GC
+						oldSlice.Set(newSlice)
 					}
 
 					var elemPtr unsafe.Pointer
 					if info.ElemType.Kind() == reflect.Ptr {
-						newObjPtr := reflect.New(info.ElemType.Elem()).Pointer()
-						*(*unsafe.Pointer)(unsafe.Pointer(header.Data + uintptr(header.Len)*elemSize)) = unsafe.Pointer(newObjPtr)
-						elemPtr = unsafe.Pointer(newObjPtr)
+						nv := reflect.New(info.ElemType.Elem())
+						elemPtr = nv.UnsafePointer()
+						*(*unsafe.Pointer)(unsafe.Pointer(header.Data + uintptr(header.Len)*elemSize)) = elemPtr
 					} else {
 						elemPtr = unsafe.Pointer(header.Data + uintptr(header.Len)*elemSize)
 						// Zero the memory quickly using Go's optimized memclr
@@ -671,7 +751,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 						}
 					}
 
-					consumed, err := parseObjectAt(raw[i:], info.Sub, elemPtr)
+					consumed, err := parseObjectAt(raw[i:], info.Sub, elemPtr, copyStrings)
 					if err != nil {
 						return 0, err
 					}
@@ -696,6 +776,43 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 						return 0, fmt.Errorf("unexpected char in struct slice")
 					}
 				}
+
+			case TypeStructPtr:
+				if i+4 <= len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == nullMagic {
+					*(*unsafe.Pointer)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = nil
+					i += 4
+				} else {
+					if (charTable[raw[i]] & charOpenBrace) == 0 {
+						return 0, fmt.Errorf("%w: expected object value", ErrTypeMismatch)
+					}
+					fieldPtr := unsafe.Pointer(uintptr(ptr) + info.Offset)
+					objPtr := *(*unsafe.Pointer)(fieldPtr)
+					if objPtr == nil {
+						nv := reflect.New(info.ElemType)
+						objPtr = nv.UnsafePointer()
+						*(*unsafe.Pointer)(fieldPtr) = objPtr
+					}
+					consumed, err := parseObjectAt(raw[i:], info.Sub, objPtr, copyStrings)
+					if err != nil {
+						return 0, err
+					}
+					i += consumed
+				}
+
+			case TypeRawMessage:
+				end := skipValue(raw, i)
+				if end > len(raw) {
+					end = len(raw)
+				}
+				if end <= i {
+					return 0, fmt.Errorf("%w: empty raw value", ErrTypeMismatch)
+				}
+				dst := (*RawMessage)(unsafe.Pointer(uintptr(ptr) + info.Offset))
+				*dst = append((*dst)[:0], raw[i:end]...)
+				i = end
+
+			default:
+				return 0, fmt.Errorf("%w: unsupported field kind for key %q", ErrTypeMismatch, keySlice)
 			}
 		} else {
 			i = skipValue(raw, i)
@@ -716,6 +833,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer) (int, error) {
 		switch raw[i] {
 		case ',':
 			i++
+			afterComma = true
 		case '}':
 			return i + 1, nil
 		default:
@@ -731,6 +849,7 @@ func parseStringSliceAt(raw []byte, start int, dst []string, copyStrings bool) (
 
 	i := start + 1
 	initialized := false
+	afterComma := false
 
 	for {
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
@@ -740,6 +859,9 @@ func parseStringSliceAt(raw []byte, start int, dst []string, copyStrings bool) (
 			return nil, 0, ErrUnexpectedEOF
 		}
 		if (charTable[raw[i]] & charCloseBracket) != 0 {
+			if afterComma {
+				return nil, 0, fmt.Errorf("%w: unexpected trailing comma in array at %d", ErrTypeMismatch, i)
+			}
 			if !initialized {
 				if dst == nil {
 					return nil, i - start + 1, nil
@@ -753,11 +875,6 @@ func parseStringSliceAt(raw []byte, start int, dst []string, copyStrings bool) (
 		}
 		i++
 
-		written, consumed := parseShortStringASM2(raw[i:])
-		if consumed < 0 {
-			return nil, 0, ErrUnexpectedEOF
-		}
-
 		if !initialized {
 			if dst == nil {
 				dst = make([]string, 0, 4)
@@ -767,12 +884,9 @@ func parseStringSliceAt(raw []byte, start int, dst []string, copyStrings bool) (
 			initialized = true
 		}
 
-		decoded := raw[i : i+int(written)]
-		var strVal string
-		if copyStrings {
-			strVal = string(decoded)
-		} else {
-			strVal = unsafe.String(unsafe.SliceData(decoded), len(decoded))
+		strVal, _, consumed, err := readJSONString(raw[i:], copyStrings)
+		if err != nil {
+			return nil, 0, err
 		}
 		dst = append(dst, strVal)
 		i += int(consumed)
@@ -785,6 +899,7 @@ func parseStringSliceAt(raw []byte, start int, dst []string, copyStrings bool) (
 		}
 		if (charTable[raw[i]] & charComma) != 0 {
 			i++
+			afterComma = true
 			continue
 		}
 		if (charTable[raw[i]] & charCloseBracket) != 0 {
@@ -801,6 +916,7 @@ func parseIntSliceAt(raw []byte, start int, dst []int) ([]int, int, error) {
 
 	i := start + 1
 	initialized := false
+	afterComma := false
 
 	for {
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
@@ -810,6 +926,9 @@ func parseIntSliceAt(raw []byte, start int, dst []int) ([]int, int, error) {
 			return nil, 0, ErrUnexpectedEOF
 		}
 		if (charTable[raw[i]] & charCloseBracket) != 0 {
+			if afterComma {
+				return nil, 0, fmt.Errorf("%w: unexpected trailing comma in array at %d", ErrTypeMismatch, i)
+			}
 			if !initialized {
 				if dst == nil {
 					return nil, i - start + 1, nil
@@ -818,13 +937,19 @@ func parseIntSliceAt(raw []byte, start int, dst []int) ([]int, int, error) {
 			}
 			return dst, i - start + 1, nil
 		}
-		if (charTable[raw[i]] & charDigit) == 0 {
+		if (charTable[raw[i]]&charDigit) == 0 && raw[i] != '-' {
 			return nil, 0, ErrTypeMismatch
 		}
 
 		startNum := i
+		if raw[i] == '-' {
+			i++
+		}
 		for i < len(raw) && (charTable[raw[i]]&charDigit) != 0 {
 			i++
+		}
+		if i == startNum || (raw[startNum] == '-' && i == startNum+1) {
+			return nil, 0, ErrTypeMismatch
 		}
 
 		if !initialized {
@@ -836,7 +961,11 @@ func parseIntSliceAt(raw []byte, start int, dst []int) ([]int, int, error) {
 			initialized = true
 		}
 
-		dst = append(dst, fastParseInt(raw[startNum:i]))
+		val, ok := parseJSONInt(raw[startNum:i])
+		if !ok {
+			return nil, 0, fmt.Errorf("%w: invalid integer %q", ErrTypeMismatch, raw[startNum:i])
+		}
+		dst = append(dst, int(val))
 
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
 			i++
@@ -846,6 +975,7 @@ func parseIntSliceAt(raw []byte, start int, dst []int) ([]int, int, error) {
 		}
 		if (charTable[raw[i]] & charComma) != 0 {
 			i++
+			afterComma = true
 			continue
 		}
 		if (charTable[raw[i]] & charCloseBracket) != 0 {
@@ -890,12 +1020,17 @@ func parseIntSlice(buf []byte, dst []int) []int {
 	dst = dst[:0]
 
 	for i := 0; i < len(buf); i++ {
-		if (charTable[buf[i]] & charDigit) != 0 {
+		if (charTable[buf[i]]&charDigit) != 0 || buf[i] == '-' {
 			start := i
+			if buf[i] == '-' {
+				i++
+			}
 			for i < len(buf) && (charTable[buf[i]]&charDigit) != 0 {
 				i++
 			}
-			dst = append(dst, fastParseInt(buf[start:i]))
+			if val, ok := parseJSONInt(buf[start:i]); ok {
+				dst = append(dst, int(val))
+			}
 		}
 	}
 	return dst

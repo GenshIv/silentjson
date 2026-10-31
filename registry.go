@@ -2,6 +2,7 @@ package silentjson
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"strconv"
@@ -16,7 +17,9 @@ var (
 	ErrUnexpectedEOF = errors.New("zerojson: unexpected end of JSON input")
 	ErrTypeMismatch  = errors.New("zerojson: json type mismatch")
 
-	globalRegistryCache sync.Map // reflect.Type -> *Registry
+	globalRegistryCache sync.Map // reflect.Type -> *Registry (only fully built registries)
+	globalRegistryMu    sync.Mutex
+	buildingRegistry    = make(map[reflect.Type]*Registry) // guarded by globalRegistryMu
 )
 
 type MarshalFunc func(ptr unsafe.Pointer, buf []byte) []byte
@@ -29,6 +32,8 @@ type FieldInfo struct {
 	Offset     uintptr
 	Hash       int64
 	Type       FieldType
+	Bits       uint8 // 8/16/32/64 for fixed-width int/uint/float fields
+	Unsigned   bool
 	Sub        *Registry
 	OmitEmpty  bool
 	Marshaler  MarshalFunc // <--- DIRECT CALL
@@ -54,22 +59,59 @@ type Registry struct {
 	SliceType   reflect.Type
 	ElemType    reflect.Type
 	ElemSub     *Registry
+	buildErr    error
+	typeName    string
+	lowerMap    map[string]int16 // lowercase json name -> field index (case-insensitive fallback)
+}
+
+// Err returns the error that occurred while building the registry, if any.
+// A registry with a build error rejects every Parse operation with this error
+// and makes Marshal panic with it, instead of silently corrupting memory.
+func (r *Registry) Err() error {
+	return r.buildErr
+}
+
+func (r *Registry) setBuildError(format string, args ...any) {
+	if r.buildErr == nil {
+		r.buildErr = fmt.Errorf(format, args...)
+	}
 }
 
 // BuildRegistry constructs a registry for a given struct type.
+// Safe for concurrent use: the returned registry is always fully built.
 func BuildRegistry(typ reflect.Type) *Registry {
 	if cached, ok := globalRegistryCache.Load(typ); ok {
 		return cached.(*Registry)
 	}
+	globalRegistryMu.Lock()
+	defer globalRegistryMu.Unlock()
+	if cached, ok := globalRegistryCache.Load(typ); ok {
+		return cached.(*Registry)
+	}
+	return buildRegistryLocked(typ)
+}
 
-	reg := &Registry{}
-	// Pre-store in cache to handle recursion
-	globalRegistryCache.Store(typ, reg)
-
+// buildRegistryLocked must be called with globalRegistryMu held.
+// buildingRegistry anchors recursive types without publishing partially
+// built registries to the global cache (P1-4/race fix).
+func buildRegistryLocked(typ reflect.Type) *Registry {
+	if b, ok := buildingRegistry[typ]; ok {
+		return b
+	}
+	reg := &Registry{
+		typeName: typ.String(),
+	}
 	reg.chunkPool.New = func() any {
 		return make([]Chunk, 131072)
 	}
+	buildingRegistry[typ] = reg
+	fillRegistry(typ, reg)
+	delete(buildingRegistry, typ)
+	globalRegistryCache.Store(typ, reg)
+	return reg
+}
 
+func fillRegistry(typ reflect.Type, reg *Registry) {
 	// Добавляем поддержку корневых слайсов
 	if typ.Kind() == reflect.Slice {
 		reg.IsSlice = true
@@ -77,11 +119,11 @@ func BuildRegistry(typ reflect.Type) *Registry {
 		reg.ElemType = typ.Elem()
 		// Если это слайс структур или указателей на структуры, строим дочерний реестр для полей структуры
 		if reg.ElemType.Kind() == reflect.Struct {
-			reg.ElemSub = BuildRegistry(reg.ElemType)
+			reg.ElemSub = buildRegistryLocked(reg.ElemType)
 		} else if reg.ElemType.Kind() == reflect.Ptr && reg.ElemType.Elem().Kind() == reflect.Struct {
-			reg.ElemSub = BuildRegistry(reg.ElemType.Elem())
+			reg.ElemSub = buildRegistryLocked(reg.ElemType.Elem())
 		}
-		return reg
+		return
 	}
 
 	reg.Map = make(map[int64]FieldInfo)
@@ -91,7 +133,7 @@ func BuildRegistry(typ reflect.Type) *Registry {
 		reg.Fields = make([]FieldInfo, 0, typ.NumField())
 	} else {
 		reg.Fields = make([]FieldInfo, 0)
-		return reg
+		return
 	}
 
 	for i := 0; i < typ.NumField(); i++ {
@@ -153,10 +195,43 @@ func BuildRegistry(typ reflect.Type) *Registry {
 			switch field.Type.Kind() {
 			case reflect.Int, reflect.Int64:
 				info.Type = TypeInt
+				info.Bits = 64
 				info.Marshaler = MarshalInt // Uses our new appendIntASM
-			case reflect.Float64, reflect.Float32:
+			case reflect.Int32:
+				info.Type = TypeInt
+				info.Bits = 32
+				info.Marshaler = MarshalInt32
+			case reflect.Int16:
+				info.Type = TypeInt
+				info.Bits = 16
+				info.Marshaler = MarshalInt16
+			case reflect.Int8:
+				info.Type = TypeInt
+				info.Bits = 8
+				info.Marshaler = MarshalInt8
+			case reflect.Uint32:
+				info.Type = TypeUint
+				info.Bits = 32
+				info.Unsigned = true
+				info.Marshaler = MarshalUint32
+			case reflect.Uint16:
+				info.Type = TypeUint
+				info.Bits = 16
+				info.Unsigned = true
+				info.Marshaler = MarshalUint16
+			case reflect.Uint8:
+				info.Type = TypeUint
+				info.Bits = 8
+				info.Unsigned = true
+				info.Marshaler = MarshalUint8
+			case reflect.Float64:
 				info.Type = TypeFloat
+				info.Bits = 64
 				info.Marshaler = MarshalFloat // Implement via appendFloatASM or fmt.AppendFloat
+			case reflect.Float32:
+				info.Type = TypeFloat
+				info.Bits = 32
+				info.Marshaler = MarshalFloat32
 			case reflect.String:
 				info.Type = TypeString
 				info.Marshaler = MarshalString
@@ -165,7 +240,7 @@ func BuildRegistry(typ reflect.Type) *Registry {
 				info.Marshaler = MarshalBool
 			case reflect.Struct:
 				info.Type = TypeStruct
-				info.Sub = BuildRegistry(field.Type)
+				info.Sub = buildRegistryLocked(field.Type)
 				// Special marshaler for nested structures
 				info.Marshaler = func(ptr unsafe.Pointer, buf []byte) []byte {
 					return MarshalObject(ptr, info.Sub, buf)
@@ -182,7 +257,7 @@ func BuildRegistry(typ reflect.Type) *Registry {
 					info.Marshaler = MarshalIntSlice
 				} else if field.Type.Elem().Kind() == reflect.Struct {
 					info.Type = TypeStructSlice
-					info.Sub = BuildRegistry(field.Type.Elem())
+					info.Sub = buildRegistryLocked(field.Type.Elem())
 					info.SliceType = field.Type
 					info.ElemType = field.Type.Elem()
 
@@ -216,7 +291,7 @@ func BuildRegistry(typ reflect.Type) *Registry {
 					}
 				} else if field.Type.Elem().Kind() == reflect.Ptr && field.Type.Elem().Elem().Kind() == reflect.Struct {
 					info.Type = TypeStructSlice
-					info.Sub = BuildRegistry(field.Type.Elem().Elem())
+					info.Sub = buildRegistryLocked(field.Type.Elem().Elem())
 					info.SliceType = field.Type
 					info.ElemType = field.Type.Elem()
 
@@ -254,12 +329,24 @@ func BuildRegistry(typ reflect.Type) *Registry {
 					}
 				}
 			case reflect.Ptr:
-				// Support *int, *int64, *string, *bool, *float64
-				elemKind := field.Type.Elem().Kind()
+				// Support *int/int8..64, *uint8..32, *string, *bool, *float32/64, *struct
+				elem := field.Type.Elem()
+				info.ElemType = elem
+				elemKind := elem.Kind()
 				switch elemKind {
-				case reflect.Int, reflect.Int64:
+				case reflect.Int, reflect.Int64, reflect.Int32, reflect.Int16, reflect.Int8,
+					reflect.Uint32, reflect.Uint16, reflect.Uint8:
 					info.Type = TypeIntPtr
-					info.Marshaler = MarshalIntPtr
+					info.Bits = kindBits(elemKind)
+					info.Unsigned = kindIsUnsigned(elemKind)
+					bits, unsigned := info.Bits, info.Unsigned
+					info.Marshaler = func(ptr unsafe.Pointer, buf []byte) []byte {
+						valPtr := *(*unsafe.Pointer)(ptr)
+						if valPtr == nil {
+							return append(buf, "null"...)
+						}
+						return appendInt64To(buf, loadIntWidth(valPtr, bits, unsigned))
+					}
 				case reflect.String:
 					info.Type = TypeStringPtr
 					info.Marshaler = MarshalStringPtr
@@ -268,10 +355,21 @@ func BuildRegistry(typ reflect.Type) *Registry {
 					info.Marshaler = MarshalBoolPtr
 				case reflect.Float64, reflect.Float32:
 					info.Type = TypeFloatPtr
-					info.Marshaler = MarshalFloatPtr
+					info.Bits = kindBits(elemKind)
+					bits := info.Bits
+					info.Marshaler = func(ptr unsafe.Pointer, buf []byte) []byte {
+						valPtr := *(*unsafe.Pointer)(ptr)
+						if valPtr == nil {
+							return append(buf, "null"...)
+						}
+						if bits == 32 {
+							return appendFloatTo(buf, float64(*(*float32)(valPtr)), 32)
+						}
+						return appendFloatTo(buf, *(*float64)(valPtr), 64)
+					}
 				case reflect.Struct:
 					info.Type = TypeStructPtr
-					info.Sub = BuildRegistry(field.Type.Elem())
+					info.Sub = buildRegistryLocked(field.Type.Elem())
 					// Special marshaler for nested structures
 					info.Marshaler = func(ptr unsafe.Pointer, buf []byte) []byte {
 						valPtr := *(*unsafe.Pointer)(ptr)
@@ -284,9 +382,20 @@ func BuildRegistry(typ reflect.Type) *Registry {
 
 			}
 		}
+		if info.Sub != nil && info.Sub.buildErr != nil {
+			reg.setBuildError("silentjson: type %s, field %q: %v", typ.String(), field.Name, info.Sub.buildErr)
+		}
+		if info.Marshaler == nil {
+			// P0-2 fix: reject unsupported field types loudly instead of
+			// defaulting to TypeInt with a nil Marshaler (nil deref / corruption).
+			reg.setBuildError("silentjson: type %s: unsupported field type %s for field %q",
+				typ.String(), field.Type.String(), field.Name)
+			continue
+		}
 		// If OmitEmpty is present, wrap marshaler in a check
 		if info.OmitEmpty {
 			orig := info.Marshaler
+			bits, unsigned := info.Bits, info.Unsigned
 			info.Marshaler = func(ptr unsafe.Pointer, buf []byte) []byte {
 				// Check if value is empty
 				switch field.Type.Kind() {
@@ -307,12 +416,18 @@ func BuildRegistry(typ reflect.Type) *Registry {
 					if *(*string)(ptr) == "" {
 						return buf
 					}
-				case reflect.Int, reflect.Int64:
-					if *(*int64)(ptr) == 0 {
+				case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+					reflect.Uint8, reflect.Uint16, reflect.Uint32:
+					if loadIntWidth(ptr, bits, unsigned) == 0 {
 						return buf
 					}
 				case reflect.Float64, reflect.Float32:
-					if *(*float64)(ptr) == 0 {
+					// P0-1 fix: read the field at its real width
+					if bits == 32 {
+						if *(*float32)(ptr) == 0 {
+							return buf
+						}
+					} else if *(*float64)(ptr) == 0 {
 						return buf
 					}
 				case reflect.Bool:
@@ -328,6 +443,15 @@ func BuildRegistry(typ reflect.Type) *Registry {
 		info.Hash = hashe
 		reg.Map[hashe] = info
 		reg.NameMap[key] = info
+		// Case-insensitive fallback (encoding/json compat): first field wins
+		if reg.lowerMap == nil {
+			reg.lowerMap = make(map[string]int16)
+		}
+		if lk := strings.ToLower(key); len(lk) > 0 {
+			if _, dup := reg.lowerMap[lk]; !dup {
+				reg.lowerMap[lk] = int16(len(reg.Fields))
+			}
+		}
 		reg.Fields = append(reg.Fields, info)
 	}
 
@@ -363,8 +487,6 @@ func BuildRegistry(typ reflect.Type) *Registry {
 			}
 		}
 	}
-
-	return reg
 }
 
 func hashString(s string) uint32 {
@@ -390,8 +512,7 @@ func hashU64(x uint64) uint32 {
 	return uint32(x ^ (x >> 31))
 }
 
-func MarshalFloat(ptr unsafe.Pointer, buf []byte) []byte {
-	val := *(*float64)(ptr)
+func appendFloatTo(buf []byte, val float64, bitSize int) []byte {
 	// Match encoding/json output: plain decimal notation for everyday
 	// magnitudes (ryu always emits exponent form like 2.319e+03, which
 	// breaks naive consumers of the payload), exponent only outside
@@ -401,7 +522,16 @@ func MarshalFloat(ptr unsafe.Pointer, buf []byte) []byte {
 	if abs != 0 && (abs < 1e-6 || abs >= 1e21) {
 		format = 'e'
 	}
-	return strconv.AppendFloat(buf, val, format, -1, 64)
+	return strconv.AppendFloat(buf, val, format, -1, bitSize)
+}
+
+func MarshalFloat(ptr unsafe.Pointer, buf []byte) []byte {
+	return appendFloatTo(buf, *(*float64)(ptr), 64)
+}
+
+// MarshalFloat32 marshals a float32 field reading exactly its 4 bytes (P0-1 fix).
+func MarshalFloat32(ptr unsafe.Pointer, buf []byte) []byte {
+	return appendFloatTo(buf, float64(*(*float32)(ptr)), 32)
 }
 
 func MarshalBool(ptr unsafe.Pointer, buf []byte) []byte {
@@ -412,7 +542,6 @@ func MarshalBool(ptr unsafe.Pointer, buf []byte) []byte {
 }
 
 func MarshalString(ptr unsafe.Pointer, buf []byte) []byte {
-	defer recover()
 	s := *(*string)(ptr)
 
 	newBuf, specialPos := appendStringASM(buf, s)
@@ -529,8 +658,7 @@ func MarshalStringSlice(ptr unsafe.Pointer, buf []byte) []byte {
 	return append(buf, ']')
 }
 
-func MarshalInt(ptr unsafe.Pointer, buf []byte) []byte {
-	val := *(*int64)(ptr)
+func appendInt64To(buf []byte, val int64) []byte {
 	newBuf := appendIntASM(buf, val)
 	if len(newBuf) == len(buf) {
 		return strconv.AppendInt(buf, val, 10)
@@ -538,14 +666,32 @@ func MarshalInt(ptr unsafe.Pointer, buf []byte) []byte {
 	return newBuf
 }
 
-// Pointer type marshalers
+func MarshalInt(ptr unsafe.Pointer, buf []byte) []byte {
+	return appendInt64To(buf, *(*int64)(ptr))
+}
 
-func MarshalIntPtr(ptr unsafe.Pointer, buf []byte) []byte {
-	valPtr := (**int64)(ptr)
-	if *valPtr == nil {
-		return append(buf, "null"...)
-	}
-	return MarshalInt(unsafe.Pointer(*valPtr), buf)
+func MarshalInt32(ptr unsafe.Pointer, buf []byte) []byte {
+	return appendInt64To(buf, int64(*(*int32)(ptr)))
+}
+
+func MarshalInt16(ptr unsafe.Pointer, buf []byte) []byte {
+	return appendInt64To(buf, int64(*(*int16)(ptr)))
+}
+
+func MarshalInt8(ptr unsafe.Pointer, buf []byte) []byte {
+	return appendInt64To(buf, int64(*(*int8)(ptr)))
+}
+
+func MarshalUint32(ptr unsafe.Pointer, buf []byte) []byte {
+	return appendInt64To(buf, int64(*(*uint32)(ptr)))
+}
+
+func MarshalUint16(ptr unsafe.Pointer, buf []byte) []byte {
+	return appendInt64To(buf, int64(*(*uint16)(ptr)))
+}
+
+func MarshalUint8(ptr unsafe.Pointer, buf []byte) []byte {
+	return appendInt64To(buf, int64(*(*uint8)(ptr)))
 }
 
 func MarshalStringPtr(ptr unsafe.Pointer, buf []byte) []byte {
@@ -562,14 +708,6 @@ func MarshalBoolPtr(ptr unsafe.Pointer, buf []byte) []byte {
 		return append(buf, "null"...)
 	}
 	return MarshalBool(unsafe.Pointer(*valPtr), buf)
-}
-
-func MarshalFloatPtr(ptr unsafe.Pointer, buf []byte) []byte {
-	valPtr := (**float64)(ptr)
-	if *valPtr == nil {
-		return append(buf, "null"...)
-	}
-	return MarshalFloat(unsafe.Pointer(*valPtr), buf)
 }
 
 // MarshalRawMessage writes a RawMessage as raw JSON without any escaping.

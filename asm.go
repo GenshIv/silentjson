@@ -35,6 +35,3 @@ func skipValueAVX2(raw []byte, start int) int
 
 //go:noescape
 func skipSpaceAVX2(data []byte, start int) int
-
-//go:noescape
-func findQuoteOrEscapeAVX2(b []byte) (idx int, isEscape bool)

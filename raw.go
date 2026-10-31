@@ -1,149 +1,292 @@
 package silentjson
 
-import (
-	"strconv"
-	"unsafe"
-)
-
 // RawMessage is a raw encoded JSON value, similar to json.RawMessage.
 // It is serialized as-is by silentjson.Marshal without any escaping or modification.
 type RawMessage []byte
 
 // GetStringValue returns the string value for a given key in a JSON object.
-// Format expected: "key":"value" or "key": "value"
-// Returns (value, ok). O(n) scan, no alloc except the returned string.
+// Top-level keys are searched first (like encoding/json); if the key is not
+// found at the top level, nested objects and arrays are searched depth-first.
+// The input is never modified; keys are matched after unescaping, so string
+// VALUES can never produce false matches. O(n) scan, no alloc except the
+// returned string.
 func GetStringValue(data []byte, key string) (string, bool) {
-	if len(data) == 0 {
+	val, ok := findValueTop(data, key)
+	if !ok {
+		val, ok = findValueDeep(data, key, 0)
+	}
+	if !ok || len(val) == 0 || val[0] != '"' {
 		return "", false
 	}
-
-	// Search for "key"
-	pattern := []byte(`"` + key + `":`)
-	idx := findBytes(data, pattern)
-	if idx < 0 {
+	s, _, _, err := readJSONString(val[1:], false)
+	if err != nil {
 		return "", false
 	}
-
-	// Skip past the colon
-	valStart := idx + len(pattern)
-
-	// Skip whitespace
-	for valStart < len(data) && (charTable[data[valStart]]&charSpace) != 0 {
-		valStart++
-	}
-
-	if valStart >= len(data) || data[valStart] != '"' {
-		return "", false
-	}
-
-	// Parse JSON string
-	written, consumed := parseShortStringASM2(data[valStart:])
-	if consumed < 0 {
-		return "", false
-	}
-
-	decoded := data[valStart : valStart+int(written)]
-	return unsafe.String(unsafe.SliceData(decoded), len(decoded)), true
+	return s, true
 }
 
 // GetInt64Value returns the int64 value for a given key in a JSON object.
-// Format expected: "key":123 or "key": 123
-// Returns (value, ok). O(n) scan, no alloc.
+// Top-level keys are searched first; nested objects and arrays are searched
+// depth-first as a fallback. Only strict JSON integers match ("1e2" or "3.9"
+// return ok=false). O(n) scan, no alloc.
 func GetInt64Value(data []byte, key string) (int64, bool) {
-	if len(data) == 0 {
+	val, ok := findValueTop(data, key)
+	if !ok {
+		val, ok = findValueDeep(data, key, 0)
+	}
+	if !ok {
 		return 0, false
 	}
+	return parseJSONInt(val)
+}
 
-	// Search for "key"
-	pattern := []byte(`"` + key + `":`)
-	idx := findBytes(data, pattern)
-	if idx < 0 {
-		return 0, false
+const rawSearchDepthLimit = 32
+
+// findValueTop returns the raw value bytes of key at the TOP level of the
+// JSON object in data. It never descends into nested structures.
+func findValueTop(data []byte, key string) ([]byte, bool) {
+	i := 0
+	for i < len(data) && (charTable[data[i]]&charSpace) != 0 {
+		i++
 	}
-
-	// Skip past the colon
-	valStart := idx + len(pattern)
-
-	// Skip whitespace
-	for valStart < len(data) && (charTable[data[valStart]]&charSpace) != 0 {
-		valStart++
+	if i >= len(data) || data[i] != '{' {
+		return nil, false
 	}
-
-	if valStart >= len(data) {
-		return 0, false
+	i++
+	for {
+		for i < len(data) && (charTable[data[i]]&charSpace) != 0 {
+			i++
+		}
+		if i >= len(data) {
+			return nil, false
+		}
+		if data[i] == '}' {
+			return nil, false
+		}
+		if data[i] != '"' {
+			return nil, false
+		}
+		i++
+		k, _, consumed, err := readJSONString(data[i:], false)
+		if err != nil {
+			return nil, false
+		}
+		i += int(consumed)
+		for i < len(data) && (charTable[data[i]]&charSpace) != 0 {
+			i++
+		}
+		if i >= len(data) || data[i] != ':' {
+			return nil, false
+		}
+		i++
+		for i < len(data) && (charTable[data[i]]&charSpace) != 0 {
+			i++
+		}
+		if i >= len(data) {
+			return nil, false
+		}
+		end := skipValue(data, i)
+		if end > len(data) {
+			end = len(data)
+		}
+		if k == key {
+			return data[i:end], true
+		}
+		i = end
+		for i < len(data) && (charTable[data[i]]&charSpace) != 0 {
+			i++
+		}
+		if i >= len(data) {
+			return nil, false
+		}
+		if data[i] == ',' {
+			i++
+			continue
+		}
+		return nil, false
 	}
+}
 
-	// Read number
-	valEnd := valStart
-	for valEnd < len(data) && (charTable[data[valEnd]]&maskValueEnd) == 0 {
-		valEnd++
+// findValueDeep searches nested objects and arrays of data for key,
+// depth-first. Only called when the top level does not have the key.
+func findValueDeep(data []byte, key string, depth int) ([]byte, bool) {
+	if depth > rawSearchDepthLimit {
+		return nil, false
 	}
-
-	numStr := data[valStart:valEnd]
-	if len(numStr) == 0 {
-		return 0, false
+	i := 0
+	for i < len(data) && (charTable[data[i]]&charSpace) != 0 {
+		i++
 	}
-
-	val, err := strconv.ParseInt(unsafe.String(unsafe.SliceData(numStr), len(numStr)), 10, 64)
-	if err != nil {
-		return 0, false
+	if i >= len(data) {
+		return nil, false
 	}
-
-	return val, true
+	switch data[i] {
+	case '{':
+		i++
+		for {
+			for i < len(data) && (charTable[data[i]]&charSpace) != 0 {
+				i++
+			}
+			if i >= len(data) || data[i] == '}' || data[i] != '"' {
+				return nil, false
+			}
+			i++
+			k, _, consumed, err := readJSONString(data[i:], false)
+			if err != nil {
+				return nil, false
+			}
+			i += int(consumed)
+			for i < len(data) && (charTable[data[i]]&charSpace) != 0 {
+				i++
+			}
+			if i >= len(data) || data[i] != ':' {
+				return nil, false
+			}
+			i++
+			for i < len(data) && (charTable[data[i]]&charSpace) != 0 {
+				i++
+			}
+			if i >= len(data) {
+				return nil, false
+			}
+			end := skipValue(data, i)
+			if end > len(data) {
+				end = len(data)
+			}
+			if k != key && (data[i] == '{' || data[i] == '[') {
+				if v, ok := findValueDeep(data[i:end], key, depth+1); ok {
+					return v, true
+				}
+			}
+			if k == key {
+				return data[i:end], true
+			}
+			i = end
+			for i < len(data) && (charTable[data[i]]&charSpace) != 0 {
+				i++
+			}
+			if i >= len(data) {
+				return nil, false
+			}
+			if data[i] == ',' {
+				i++
+				continue
+			}
+			return nil, false
+		}
+	case '[':
+		i++
+		for {
+			for i < len(data) && (charTable[data[i]]&charSpace) != 0 {
+				i++
+			}
+			if i >= len(data) || data[i] == ']' {
+				return nil, false
+			}
+			end := skipValue(data, i)
+			if end > len(data) {
+				end = len(data)
+			}
+			if data[i] == '{' || data[i] == '[' {
+				if v, ok := findValueDeep(data[i:end], key, depth+1); ok {
+					return v, true
+				}
+			}
+			i = end
+			for i < len(data) && (charTable[data[i]]&charSpace) != 0 {
+				i++
+			}
+			if i >= len(data) {
+				return nil, false
+			}
+			if data[i] == ',' {
+				i++
+				continue
+			}
+			return nil, false
+		}
+	}
+	return nil, false
 }
 
 // InjectFieldBeforeClose инжектит поле перед закрывающей фигурной скобкой.
-// Если передан готовый буфер `dst`, аллокаций вообще не будет.
+// Вставляет [,"]<key>":"<value>" перед последней '}'. value должен быть
+// уже экранирован. Вход обязан быть JSON-объектом: иначе data возвращается
+// без изменений (никаких паник на пустом/битом входе). Для пустого объекта
+// "{}" запятая не добавляется. Аллокация — только итоговый буфер.
 func InjectFieldBeforeClose(data []byte, key, value []byte) []byte {
+	if len(data) == 0 || data[len(data)-1] != '}' {
+		return data
+	}
+	start := 0
+	for start < len(data) && (charTable[data[start]]&charSpace) != 0 {
+		start++
+	}
+	if start >= len(data) || data[start] != '{' {
+		return data
+	}
 
-	// Считаем точную длину: data[:-1] + ',' + '"' + key + '"' + ':' + '"' + value + '"' + '}'
-	bodyLen := len(data) - 1
-	insertLen := 1 + 1 + len(key) + 3 + len(value) + 2 // , " key " : " value " }
-	totalLen := bodyLen + insertLen
+	body := data[:len(data)-1]
+	j := len(body) - 1
+	for j >= 0 && (charTable[body[j]]&charSpace) != 0 {
+		j--
+	}
+	needComma := j >= 0 && body[j] != '{'
 
-	// Иначе аллоцируем ровно один раз под итоговый размер
-	result := make([]byte, totalLen)
-	copy(result, data[:bodyLen])
-
-	idx := bodyLen
-	result[idx] = ','
-	result[idx+1] = '"'
-	idx += 2
-
-	copy(result[idx:], key)
-	idx += len(key)
-
-	result[idx] = '"'
-	result[idx+1] = ':'
-	result[idx+2] = '"'
-	idx += 3
-
-	copy(result[idx:], value)
-	idx += len(value)
-
-	result[idx] = '"'
-	result[idx+1] = '}'
-
+	result := make([]byte, 0, len(body)+len(key)+len(value)+8)
+	result = append(result, body...)
+	if needComma {
+		result = append(result, ',')
+	}
+	result = append(result, '"')
+	result = appendJSONKey(result, key)
+	result = append(result, '"', ':', '"')
+	result = append(result, value...)
+	result = append(result, '"', '}')
 	return result
 }
 
+// appendJSONKey appends the key bytes, escaping quotes/backslashes/control
+// characters only when needed (no string conversion in the fast path).
+func appendJSONKey(buf []byte, key []byte) []byte {
+	for _, c := range key {
+		if c == '"' || c == '\\' || c < 0x20 {
+			return appendJSONStringGo(buf, string(key))
+		}
+	}
+	return append(buf, key...)
+}
+
 // InjectFieldBeforeClose inserts a field before the closing '}' of a JSON object.
-// Inserts ,"<key>":"<value>" right before the final '}'. value must been escaped!!!
-// No parse, no alloc except the result buffer.
+// Inserts [,"]<key>":"<value>" right before the final '}'. value must be
+// already escaped. The input must be a JSON object; otherwise data is
+// returned unchanged. No parse, no alloc except the result buffer.
 func InjectFieldBeforeClose1(data []byte, key, value []byte) []byte {
 	if len(data) == 0 || data[len(data)-1] != '}' {
 		return data
 	}
+	start := 0
+	for start < len(data) && (charTable[data[start]]&charSpace) != 0 {
+		start++
+	}
+	if start >= len(data) || data[start] != '{' {
+		return data
+	}
 
-	// Escape value for JSON string
-	// escaped := escapeJSONString(value)
+	body := data[:len(data)-1]
+	j := len(body) - 1
+	for j >= 0 && (charTable[body[j]]&charSpace) != 0 {
+		j--
+	}
+	needComma := j >= 0 && body[j] != '{'
 
-	// Single allocation: [data[:len-1] + ","key":"escaped"" + }
-	insertLen := 4 + len(key) + 3 + len(value)
-	result := make([]byte, 0, len(data)+insertLen)
-	result = append(result, data[:len(data)-1]...)
-	result = append(result, ',', '"')
-	result = append(result, key...)
+	result := make([]byte, 0, len(body)+len(key)+len(value)+8)
+	result = append(result, body...)
+	if needComma {
+		result = append(result, ',')
+	}
+	result = append(result, '"')
+	result = appendJSONKey(result, key)
 	result = append(result, '"', ':', '"')
 	result = append(result, value...)
 	result = append(result, '"', '}')

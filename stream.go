@@ -23,17 +23,22 @@ type StreamDecoder[T any] struct {
 	hasStarted bool
 	hasEnded   bool
 	obj        T // Reusable internal object for zero-allocation Next()
+	// copyStrings is always true for streams: the internal buffer is
+	// overwritten by the io.Reader, so zero-copy aliases would dangle.
+	// P1-4 fix: it is per-decoder state, NOT a mutation of the shared registry.
+	copyStrings bool
 }
 
 // NewStreamDecoder creates a new streaming decoder.
-// Note: It sets reg.CopyStrings to true to prevent zero-copy string leaks
-// when the internal buffer is overwritten by the io.Reader.
+// It does NOT modify the passed registry (the registry may be shared with
+// direct ParseObject callers); copy-on-read string semantics are applied
+// per-decoder instead.
 func NewStreamDecoder[T any](r io.Reader, reg *Registry) *StreamDecoder[T] {
-	reg.CopyStrings = true
 	return &StreamDecoder[T]{
-		r:   r,
-		reg: reg,
-		buf: make([]byte, 256*1024), // 256 KB sliding buffer
+		r:           r,
+		reg:         reg,
+		copyStrings: true,
+		buf:         make([]byte, 256*1024), // 256 KB sliding buffer
 	}
 }
 
@@ -156,7 +161,7 @@ func (d *StreamDecoder[T]) Decode(obj *T) error {
 	if err != nil {
 		return err
 	}
-	return ParseObject(chunk, d.reg, unsafe.Pointer(obj))
+	return parseObjectStrict(chunk, d.reg, unsafe.Pointer(obj), d.copyStrings)
 }
 
 // Next processes the remainder of the JSON array, unmarshaling each object into an internal reusable instance
@@ -171,7 +176,7 @@ func (d *StreamDecoder[T]) Next(cb func(obj *T) bool) error {
 			}
 			return err
 		}
-		if err := ParseObject(chunk, d.reg, unsafe.Pointer(&d.obj)); err != nil {
+		if err := parseObjectStrict(chunk, d.reg, unsafe.Pointer(&d.obj), d.copyStrings); err != nil {
 			return err
 		}
 		if !cb(&d.obj) {
@@ -228,7 +233,7 @@ func (d *StreamDecoder[T]) NextChan(bufferSize int) <-chan StreamResult[*T] {
 
 			// Zero-allocation ring buffer reuse
 			obj := &ring[i%ringSize]
-			if err := ParseObject(chunk, d.reg, unsafe.Pointer(obj)); err != nil {
+			if err := parseObjectStrict(chunk, d.reg, unsafe.Pointer(obj), d.copyStrings); err != nil {
 				ch <- StreamResult[*T]{Err: err}
 				return
 			}
@@ -302,7 +307,7 @@ func (d *StreamDecoder[T]) NextChanParallel(workers int, bufferSize int) <-chan 
 				for i := 0; i < c; i++ {
 					obj := &ring[(task.baseIdx+i)%ringSize]
 					chunkRaw := task.raw[chunks[i].Start:chunks[i].End]
-					if parseErr := ParseObject(chunkRaw, d.reg, unsafe.Pointer(obj)); parseErr != nil {
+					if parseErr := parseObjectStrict(chunkRaw, d.reg, unsafe.Pointer(obj), d.copyStrings); parseErr != nil {
 						err = parseErr
 						break
 					}
