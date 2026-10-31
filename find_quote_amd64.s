@@ -1199,7 +1199,7 @@ avx_loop:
     MOVQ BX, R15
     SUBQ CX, R15
     CMPQ R15, $32
-    JL   scalar_tail
+    JL   foee_enter_tail
 
     VMOVDQU (SI)(CX*1), Y0
     
@@ -1326,6 +1326,17 @@ next_bit:
 avx_advance:
     ADDQ $32, CX
     JMP  avx_loop
+
+foee_enter_tail:
+    // Consume a pending escape carry once before the scalar tail loop:
+    // the first tail byte was escaped by a backslash at the end of the
+    // last SIMD block, so it is a literal and must not run the state
+    // machine (an escaped quote would otherwise toggle the in-string
+    // state and desynchronize the scan).
+    CMPQ 0(SP), $0
+    JEQ  scalar_tail
+    MOVQ $0, 0(SP)
+    INCQ CX
 
 scalar_tail:
     CMPQ CX, BX
@@ -1476,7 +1487,7 @@ fae_avx_loop:
     MOVQ BX, R15
     SUBQ CX, R15
     CMPQ R15, $32
-    JL   fae_scalar_tail
+    JL   fae_enter_tail
 
     VMOVDQU (SI)(CX*1), Y0
     
@@ -1499,11 +1510,16 @@ fae_avx_loop:
     VPCMPEQB Y8, Y0, Y5
     VPMOVMSKB Y5, R9    // R9 = bs_mask32
 
-    // Process escape carry from previous chunk
+    // Process escape carry from previous chunk: the byte at bit 0 of this
+    // block is the escaped (literal) character. Its bits must be cleared
+    // from every mask - struct (R15), quote (R14) AND backslash (R9):
+    // an escaped backslash left in R9 would run the state machine as a
+    // new escape introducer and skip one byte too many.
     CMPQ 0(SP), $0
     JEQ  fae_no_carry
     BTRL $0, R15
     BTRL $0, R14
+    BTRL $0, R9
     MOVQ $0, 0(SP)
 fae_no_carry:
 
@@ -1714,6 +1730,17 @@ fae_next_bit:
 fae_avx_advance:
     ADDQ $32, CX
     JMP  fae_avx_loop
+
+fae_enter_tail:
+    // Consume a pending escape carry exactly once, before the scalar tail
+    // loop starts: the first tail byte was escaped by a backslash at the
+    // end of the last SIMD block, so it is a literal and must not run the
+    // state machine (otherwise e.g. an escaped quote would toggle the
+    // in-string state and desynchronize everything after it).
+    CMPQ 0(SP), $0
+    JEQ  fae_scalar_tail
+    MOVQ $0, 0(SP)
+    INCQ CX
 
 fae_scalar_tail:
     CMPQ CX, BX

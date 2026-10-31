@@ -6,7 +6,7 @@
 
 ## 🚀 为什么选择 `silentjson`?
 
-- **快速并行解析：** 大型 JSON 数组 `UnmarshalArrayParallel` 利用所有 CPU 核心：结构绑定约 1.3 GB/s（Ryzen 9 7950X3D）。
+- **快速并行解析：** 大型 JSON 数组 `UnmarshalArrayParallel` 利用所有 CPU 核心：结构绑定约 3.0 GB/s（Ryzen 9 7950X3D）。
 - **无需代码生成：** 与其他高性能库不同，不需要 `go generate`。即插即用，无开发摩擦。
 - **零拷贝 (Zero-Copy) 架构：** 字符串直接从输入缓冲区映射，极大降低了垃圾回收 (GC) 压力。
 
@@ -15,10 +15,10 @@
 ### 10万个对象，"混沌"负载（2026 年 5 月重新测量）
 | 解析器 | 吞吐量 (MB/s) |
 | :--- | :--- |
-| **SilentJSON (Parallel)** | **1,258 MB/s** ⭐ |
-| Goccy | 680 MB/s |
-| **SilentJSON (Serial)** | **342 MB/s** |
-| 标准库 (Go) | 205 MB/s |
+| **SilentJSON (Parallel)** | **2,963 MB/s** ⭐ |
+| Goccy | 671 MB/s |
+| **SilentJSON (Serial)** | **532 MB/s** |
+| 标准库 (Go) | 206 MB/s |
 
 > 旧的多次 GB/s 并行结果无效（基准测试忽略了错误，AVX2 扫描器在转义序列上丢记录）。完整表格见 [README.md](README.md)。
 

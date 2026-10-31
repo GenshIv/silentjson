@@ -50,22 +50,24 @@ func findObjectBoundariesASM(data []byte, chunks []Chunk) (ret0 int, ret1 int) {
 	return findObjectBoundariesScalar(data, chunks)
 }
 
-// The two *EarlyExit splitters below deliberately bypass their AVX2
-// implementations. The assembly versions mishandle escape sequences:
-// a '\\' immediately followed by '\"' (e.g. a Windows path or any
-// json.Marshal-ed string containing backslash+quote) desynchronizes the
-// string scanner, and whole runs of records are merged into a single
-// chunk or silently dropped (repro: json.Marshal of a slice whose
-// strings contain `\"` — see TestSplitterMarshalRoundTrip). Until the
-// assembly escape handling is fixed, correctness wins over scan speed:
-// the fixed scalar splitters are always used. The scalar versions had
-// an off-by-one (chunks started at the separating comma) that is also
-// fixed and covered by the same tests.
+// The *EarlyExit splitters have assembly (AVX2) implementations with a
+// corrected escape-carry: a backslash ending a 32-byte SIMD block sets a
+// carry that now correctly skips the escaped byte at the start of the
+// next block (and of the scalar tail) in ALL masks. The original version
+// missed the backslash mask and the scalar tail entirely, which flipped
+// the in-string parity and silently merged/dropped whole runs of records
+// (see TestSplitterEscapeCarry* and TestSplitterMarshalRoundTrip).
 func findObjectBoundariesEarlyExitASM(data []byte, chunks []Chunk) (int, int) {
+	if hasAVX2 {
+		return findObjectBoundariesEarlyExitAVX2(data, chunks)
+	}
 	return findObjectBoundariesEarlyExitScalar(data, chunks)
 }
 
 func findArrayElementsEarlyExitASM(data []byte, chunks []Chunk) (int, int) {
+	if hasAVX2 {
+		return findArrayElementsEarlyExitAVX2(data, chunks)
+	}
 	return findArrayElementsEarlyExitScalar(data, chunks)
 }
 

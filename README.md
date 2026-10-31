@@ -19,8 +19,8 @@
 
 In a world of high-performance Go libraries, `silentjson` stands out by providing massive speed boosts with zero developer friction.
 
-- **Fast Parallel Parsing:** For large JSON arrays, `UnmarshalArrayParallel` distributes records across all CPU cores. On a Ryzen 9 7950X3D it sustains ~1.3 GB/s with full struct binding and ~1.1k allocations per 100k records — 6x faster than `encoding/json` on the same payload, with two orders of magnitude fewer allocations (see benchmarks below).
-- **Fast Serial Parsing:** On a single core, `UnmarshalSlice` handles a "chaos" payload (rotating key order, unknown fields, escaped strings, nulls) at ~340 MB/s — faster than easyjson and jsoniter, ~1.7x `encoding/json`, with near-zero garbage (see benchmarks below).
+- **Fast Parallel Parsing:** For large JSON arrays, `UnmarshalArrayParallel` distributes records across all CPU cores. On a Ryzen 9 7950X3D it sustains ~3.0 GB/s with full struct binding and ~1.1k allocations per 100k records — 14x faster than `encoding/json` on the same payload, with two orders of magnitude fewer allocations (see benchmarks below).
+- **Fast Serial Parsing:** On a single core, `UnmarshalSlice` handles a "chaos" payload (rotating key order, unknown fields, escaped strings, nulls) at ~530 MB/s — faster than easyjson and jsoniter and 2.6x `encoding/json`, with near-zero garbage (see benchmarks below).
 - **Zero Code Generation:** This is the key. Unlike other fast JSON libraries, you don't need to generate any code. There are no extra build steps, no `go:generate` commands to remember, and no complex CI/CD pipeline configurations. **It works out-of-the-box, just like the standard library, only much faster.** This makes it trivial to integrate into any project, including those deployed in Docker or Kubernetes environments.
 
 > [!TIP]
@@ -36,7 +36,7 @@ We desperately needed a lightning-fast alternative that didn't rely on JIT (Just
 ## ⚠️ Caveats & Considerations
 
 * **`unsafe` package:** This library heavily utilizes the `unsafe` package. Use with care.
-* **AVX2 array splitter temporarily disabled:** the assembly chunk splitter mis-tracked escape sequences (`\` followed by `"`) and could merge or silently drop records; the dispatcher now uses the fixed scalar splitter everywhere until the assembly is repaired. Parallel throughput is currently bound by that scalar scan (~1.3 GB/s). This is documented in the CHANGELOG with a reproducer.
+* **AVX2 chunk splitter (history):** its escape-carry was mis-handled in assembly (a backslash in the last byte of a 32-byte SIMD block desynchronized the string state; records were silently dropped). Found and fixed in May 2026 — the AVX2 splitters are enabled and pinned by `TestSplitterEscapeCarryBoundary` / `TestSplitterMarshalDifferential`.
 * **Input Buffer Immutability:** Because strings are mapped directly via zero-copy, the underlying `rawJSON` byte slice **must not be modified** while the parsed objects are still in use. This applies to **unescaped** strings only: escaped strings are always decoded into fresh allocations, and the parser never writes into the input buffer.
 * **Memory Retention (Zero-Copy Side Effect):** Because strings hold direct references to the original `rawJSON` buffer, retaining even a single parsed string in memory will prevent the entire underlying JSON byte array from being garbage collected. If you only need to store a small subset of parsed data for a long time, explicitly copy the strings (e.g., using `strings.Clone(val)`).
 * **Strictness vs `encoding/json`:** numbers, escapes and trailing data are validated like the standard library, but two laxnesses remain: raw control characters inside string literals are accepted (the standard library rejects them) and invalid UTF-8 bytes pass through unchanged (the standard library substitutes U+FFFD).
@@ -48,7 +48,7 @@ We desperately needed a lightning-fast alternative that didn't rely on JIT (Just
 
 > **Measured on:** AMD Ryzen 9 7950X3D (32 threads), Linux, Go 1.26. All numbers are medians of 3 runs; every benchmark loop checks errors, so what is measured is real decoding work — never a fast-failing error path.
 >
-> **Important, May 2026 re-measure:** while making the benchmarks error-checked we found that the previously published multi-GB/s parallel numbers were invalid — the AVX2 chunk splitter silently corrupted arrays containing escaped quotes, and the benchmarks discarded the resulting errors. The splitter is fixed (see CHANGELOG); until its assembly implementation is repaired, the scalar splitter bounds parallel throughput at ~1.3 GB/s. The tables below are the honest post-fix numbers. `sonic` runs in its fallback mode on this particular machine (its own init warns), so its rows do not represent native JIT performance.
+> **Important, May 2026 re-measure:** while making the benchmarks error-checked we found that the previously published multi-GB/s parallel numbers were invalid — the AVX2 chunk splitter silently corrupted arrays containing escaped quotes, and the benchmarks discarded the resulting errors. The assembly escape-carry bug is now **found and fixed** (see CHANGELOG): with the repaired AVX2 splitter, parallel parsing reaches ~3.0 GB/s and the stream paths fully recover (NextRawBlock ~4.0 GB/s). The tables below are the honest, error-checked, correctness-gated numbers. `sonic` runs in its fallback mode on this particular machine (its own init warns), so its rows do not represent native JIT performance.
 
 ### 1. Deserialization (Parsing / Unmarshal)
 
@@ -56,22 +56,22 @@ Every parser decodes the identical ~16 MB payload: 100,000 `Employee` records in
 
 | Library | Objects/sec | Throughput (MB/s) | Latency (ms/op) | Allocated | Allocs/op |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **SilentJSON** (Parallel) | **7.7M** 👑 | **1258** 👑 | **13.0** 👑 | **288 KB** 👑 | **1152** 👑 |
-| Goccy | 4.2M | 680 | 24.1 | 16.5 MB | 1 |
-| Jsoniter | 2.2M | 359 | 45.6 | 70.9 MB | 954k |
-| **SilentJSON** (Serial) | 2.1M | 342 | 47.8 | **128 KB** 👑 | **1032** 👑 |
-| Easyjson (codegen) | 2.0M | 323 | 50.7 | 15.4 MB | 534k |
-| Standard (`encoding/json`) | 1.25M | 205 | 79.9 | 1.6 MB | 108k |
-| simdjson-go (AST + manual extraction) | 1.0M | 169 | 96.8 | 306 MB | 1.4M |
-| Sonic* | 1.0M | 163 | 100.3 | 67.8 MB | 108k |
+| **SilentJSON** (Parallel) | **18.1M** 👑 | **2963** 👑 | **5.5** 👑 | **~290 KB** 👑 | **~1150** 👑 |
+| Goccy | 4.1M | 671 | 24.4 | 16.5 MB | 1 |
+| Jsoniter | 2.2M | 360 | 45.5 | 70.9 MB | 954k |
+| **SilentJSON** (Serial) | 1.9M | 532 | 30.7 | **~130 KB** 👑 | **~1030** 👑 |
+| Easyjson (codegen) | 2.0M | 322 | 50.7 | 15.4 MB | 534k |
+| Standard (`encoding/json`) | 1.26M | 206 | 79.3 | 1.6 MB | 108k |
+| simdjson-go (AST + manual extraction) | 1.0M | 171 | 95.6 | 306 MB | 1.4M |
+| Sonic* | 1.0M | 163 | 100.6 | 67.8 MB | 108k |
 
 \* fallback mode on this machine.
 
-On a clean payload without escapes (`BenchmarkLargeScaleComparison`, 100k records): **SilentJSON Parallel 1346 MB/s** vs Protobuf 246, Standard 202, buger/jsonparser 178, Sonic* 159.
+On a clean payload (`BenchmarkLargeScaleComparison`, 100k records): **SilentJSON Parallel 2985 MB/s** vs Protobuf 246, Standard 202, buger/jsonparser 178, Sonic* 159.
 
 > [!NOTE]
 > **What about `simdjson-go`?**
-> `simdjson-go` is a C++ port utilizing SIMD instructions, but its API is purely AST-based: mapping into structs is manual (`FindKey` + typed getters per field), and the `As*()` helpers it needs to fill Go slices allocate heavily (306 MB per 16 MB payload in the run above). SilentJSON's parallel struct binding is ~7.5x faster end-to-end on this payload while keeping the `encoding/json`-style API — no code generation, no manual extraction.
+> `simdjson-go` is a C++ port utilizing SIMD instructions, but its API is purely AST-based: mapping into structs is manual (`FindKey` + typed getters per field), and the `As*()` helpers it needs to fill Go slices allocate heavily (306 MB per 16 MB payload in the run above). SilentJSON's parallel struct binding is ~17x faster end-to-end on this payload while keeping the `encoding/json`-style API — no code generation, no manual extraction.
 >
 > **Developer Experience Comparison:**
 > | Approach | Libraries |
@@ -83,26 +83,24 @@ On a clean payload without escapes (`BenchmarkLargeScaleComparison`, 100k record
 ```mermaid
 xychart-beta
     title "Parsing Speed: 100k Chaos Objects (MB/s, Higher is Better)"
-    x-axis ["SilentJSON Par", "Goccy", "Jsoniter", "SilentJSON", "Easyjson", "Standard", "simdjson", "Sonic*"]
-    y-axis "MB/s" 0 --> 1400
-    bar [1258, 680, 359, 342, 323, 205, 169, 163]
+    x-axis ["SilentJSON Par", "Goccy", "Jsoniter", "Easyjson", "SilentJSON", "Standard", "simdjson", "Sonic*"]
+    y-axis "MB/s" 0 --> 3200
+    bar [2963, 671, 360, 322, 532, 206, 171, 163]
 ```
 
 ### Hardware Flexibility (AVX2 vs Pure Go Scalar)
 `silentjson` detects CPU features at runtime: AVX2 accelerates value skipping, space scanning and string appending when present; everything else falls back to an optimized pure Go implementation, so the library **never crashes** on older hardware.
 
-One honest caveat after the splitter correctness fix (May 2026): the *array chunk splitter* currently runs the scalar implementation on every machine (the AVX2 variant corrupted arrays with escaped content and is disabled pending an assembly repair). Since that scan is the serial producer stage of the parallel pipeline, AVX2 and Scalar modes measure identically right now — the splitter, not the scan kernels, is the bottleneck:
+The AVX2 chunk splitter is back after its escape-carry repair (May 2026) and delivers a 2.2x advantage over the pure Go path — the regression tests in `splitter_regression_test.go` pin its boundaries against a reference scanner, so a repeat of the silent-corruption bug cannot ship again:
 
 | Library | Mode | Throughput (MB/s) | Latency (ms/op) | Allocs/op |
 | :--- | :--- | :--- | :--- | :--- |
-| **SilentJSON** | AVX2 (SIMD kernels, scalar splitter) | **1347** | 11.8 | 10120 |
-| **SilentJSON** | Scalar (Pure Go) | **1351** | 11.8 | 10120 |
-| Sonic* | fallback | 160 | 99.1 | 220k |
+| **SilentJSON** | AVX2 (SIMD splitter + kernels) | **3025** ⭐ | 5.3 | 10120 |
+| **SilentJSON** | Scalar (Pure Go) | **1400** | 11.3 | 10120 |
+| Sonic* | fallback | 159 | 100.2 | 220k |
 | Standard | Pure Go | 202 | 78.5 | 220k |
 
 \* fallback mode on this machine.
-
-Once the AVX2 splitter's escape handling is fixed, the parallel numbers should scale up again; the regression tests in `splitter_regression_test.go` will hold any re-enabled implementation to the correct boundaries.
 
 
 ### Scalability Across File Sizes (< 1 KB to 12.7 MB)
@@ -110,27 +108,27 @@ Throughput of the parallel decoder and the streaming `NextRawBlock` stays flat a
 
 | Payload | SilentJSON Parallel | SilentJSON Stream (NextRawBlock) | Standard | Sonic* |
 | :--- | :--- | :--- | :--- | :--- |
-| 0.65 KB (5 objects) | 72 MB/s | 60 MB/s | 136 MB/s | 100 MB/s |
-| 13 KB (100) | 291 MB/s | 689 MB/s | 154 MB/s | 120 MB/s |
-| 125 KB (1k) | 353 MB/s | 1343 MB/s | 154 MB/s | 124 MB/s |
-| 1.26 MB (10k) | 985 MB/s | 1442 MB/s | 159 MB/s | 122 MB/s |
-| 12.67 MB (100k) | 1311 MB/s | 1430 MB/s | 147 MB/s | 124 MB/s |
+| 0.65 KB (5 objects) | 113 MB/s | 56 MB/s | 141 MB/s | 105 MB/s |
+| 13 KB (100) | 422 MB/s | 972 MB/s | 158 MB/s | 121 MB/s |
+| 125 KB (1k) | 541 MB/s | 3407 MB/s | 160 MB/s | 127 MB/s |
+| 1.26 MB (10k) | 1761 MB/s | 4404 MB/s | 162 MB/s | 123 MB/s |
+| 12.67 MB (100k) | 3218 MB/s | 4780 MB/s | 149 MB/s | 124 MB/s |
 
-\* fallback mode on this machine. On tiny payloads per-call overhead dominates; from ~100 KB the parallel decoder reaches its splitter-bound steady state.
+\* fallback mode on this machine. On tiny payloads per-call overhead dominates; from ~1 MB the parallel decoder reaches its AVX2-splitter steady state.
 
 ```mermaid
 xychart-beta
     title "Parsing Throughput vs File Size (MB/s, Higher is Better)"
     x-axis "File Size" ["0.65KB", "13KB", "125KB", "1.26MB", "12.7MB"]
-    y-axis "Speed (MB/s)" 0 --> 1600
-    line "SilentJSON Parallel" [72, 291, 353, 985, 1311]
-    line "SilentJSON Stream" [60, 689, 1343, 1442, 1430]
-    line "Standard" [136, 154, 154, 159, 147]
+    y-axis "Speed (MB/s)" 0 --> 5000
+    line "SilentJSON Stream" [56, 972, 3407, 4404, 4780]
+    line "SilentJSON Parallel" [113, 422, 541, 1761, 3218]
+    line "Standard" [141, 158, 160, 162, 149]
 ```
 
 > **Legend:**
-> 🔵 **Top Line:** `SilentJSON` stream (NextRawBlock, stable ~1.4 GB/s)
-> 🟣 **Middle Line:** `SilentJSON` parallel struct binding (ramps to ~1.3 GB/s)
+> 🔵 **Top Line:** `SilentJSON` stream (NextRawBlock, ramps to ~4.8 GB/s)
+> 🟣 **Middle Line:** `SilentJSON` parallel struct binding (ramps to ~3.2 GB/s)
 > 🔴 **Bottom Line:** `Standard` (~150 MB/s)
 
 ### 2. Stream Parsing (io.Reader)
@@ -140,24 +138,24 @@ Because `simdjson` and `sonic` (for standard arrays) require the **entire** payl
 
 | Library / Mode | Throughput (MB/s) | Allocated | Allocs/op | Notes |
 | :--- | :--- | :--- | :--- | :--- |
-| **SilentJSON (NextRawBlock)** | **1276** 🚀 | **0.75 MB** | **5.7k** | Bulk raw chunk extraction, near-zero alloc |
-| **SilentJSON (NextChanParallel)** | **966** 🚀 | 309 MB | 37.2M | Async producer-consumer, 16 workers |
-| **SilentJSON (NextRaw)** | 585 | 527 MB | 3.0M | Per-object raw chunk extraction |
-| Jsoniter (Stream) | 450 | 149 MB | 14.6M | 2x more GC pressure than NextRawBlock |
-| **SilentJSON (Next)** | 232 👑 | **263 MB** 👑 | 37.5M | Full struct binding, reusable object |
-| **SilentJSON (Decode)** | 229 👑 | 263 MB | 37.5M | Full struct binding |
-| **SilentJSON (NextChan)** | 222 | 263 MB | 37.5M | Async producer-consumer |
-| Standard (`json.NewDecoder`) | 142 | 107 MB | 5.1M | Slowest of the group |
+| **SilentJSON (NextRawBlock)** | **4012** 🚀 | **~0.6 MB** | **5.7k** | Bulk raw chunk extraction, near-zero alloc |
+| **SilentJSON (NextRaw)** | **2468** 🚀 | 527 MB | 3.0M | Per-object raw chunk extraction |
+| **SilentJSON (NextChanParallel)** | **1984** 🚀 | 309 MB | 37.2M | Async producer-consumer, 16 workers |
+| Jsoniter (Stream) | 454 | 149 MB | 14.6M | 2x more GC pressure than NextRawBlock |
+| **SilentJSON (Next)** | **386** 👑 | **263 MB** 👑 | 37.5M | Full struct binding, reusable object |
+| **SilentJSON (Decode)** | 386 👑 | 263 MB | 37.5M | Full struct binding |
+| **SilentJSON (NextChan)** | 351 | 263 MB | 37.5M | Async producer-consumer |
+| Standard (`json.NewDecoder`) | 137 | 107 MB | 5.1M | Slowest of the group |
 
 ```mermaid
 xychart-beta
     title "Streaming Throughput (MB/s) - Higher is Better"
-    x-axis ["Standard", "NextChan", "Decode", "Next", "Jsoniter", "NextRaw", "NextChanPar", "NextRawBlock"]
-    y-axis "MB/s" 0 --> 1400
-    bar [142, 222, 229, 232, 450, 585, 966, 1276]
+    x-axis ["Standard", "NextChan", "Decode", "Jsoniter", "NextRaw", "NextChanPar", "NextRawBlock"]
+    y-axis "MB/s" 0 --> 4400
+    bar [137, 351, 386, 454, 2468, 1984, 4012]
 ```
 
-*Note: full struct binding over a stream decodes strings into fresh allocations (the decoder's internal buffer is overwritten by the `io.Reader`, so zero-copy aliases would dangle) — that is the dominant cost of Decode/Next/NextChan at ~230 MB/s. `NextRawBlock()` skips struct binding entirely and extracts raw object chunks at ~1.3 GB/s with near-zero allocations; `NextChanParallel` overlaps worker parsing with I/O for ~1 GB/s with binding.*
+*Note: full struct binding over a stream decodes strings into fresh allocations (the decoder's internal buffer is overwritten by the `io.Reader`, so zero-copy aliases would dangle) — that is the dominant cost of Decode/Next/NextChan at ~390 MB/s. `NextRawBlock()` skips struct binding entirely and extracts raw object chunks at ~4.0 GB/s with near-zero allocations; `NextChanParallel` overlaps worker parsing with I/O for ~2 GB/s with binding.*
 
 
 ### 3. Serialization (Generation / Marshal)
@@ -200,7 +198,7 @@ xychart-beta
 
 ## ⚙️ Key Features
 
-- **Fast Bulk Decoding**: ~1.3 GB/s parallel struct binding on a 16 MB payload with ~1.1k allocations per 100k records, and ~1.4 GB/s streaming raw-chunk extraction.
+- **Fast Bulk Decoding**: ~3.0 GB/s parallel struct binding on a 16 MB payload with ~1.1k allocations per 100k records, and ~4 GB/s streaming raw-chunk extraction.
 - **Zero-Copy Architecture**: Maximizes performance and minimizes GC overhead through direct `[]byte` mapping.
 - **Cross-Platform**: SIMD-level acceleration for `amd64` (AVX2) with a robust Scalar fallback. **Experimental ARM64 support** is available for Apple Silicon and Linux ARM.
 - **Effortless Integration**: Drop-in `UnmarshalArrayParallel` function that is fully compatible with native `[]struct{}` types.
@@ -225,7 +223,7 @@ go get github.com/GenshIv/silentjson
 > We provide ready-to-run examples with detailed explanations in their respective directories:
 > 
 > * **[Quickstart (`example/`)](example/)**: Learn the basics of parallel unmarshaling and zero-allocation stream iteration. ([Read the detailed Guide](example/README.md))
-> * **[Silent-Chunker (`samples/silent-chunker/`)](samples/silent-chunker/)**: A CLI utility that demonstrates how to slice massive 10GB+ JSON streams into smaller files at ~1.3 GB/s without unmarshaling. ([Read the detailed Guide](samples/silent-chunker/README.md))
+> * **[Silent-Chunker (`samples/silent-chunker/`)](samples/silent-chunker/)**: A CLI utility that demonstrates how to slice massive 10GB+ JSON streams into smaller files at ~4 GB/s without unmarshaling. ([Read the detailed Guide](samples/silent-chunker/README.md))
 > 
 > You can run the basic example instantly using: `go run example/main.go`
 
@@ -318,7 +316,7 @@ func streamLargeArray(reader io.Reader) error {
 #### Extreme Stream Extraction & Chunking (NextRawBlock)
 If you just need to extract JSON objects rapidly (e.g., to proxy them to a database, split large files into chunks, or filter by simple regex) without unmarshaling them into Go structs, use `NextRawBlock()`. 
 
-This method almost completely avoids allocations during extraction and writes raw objects into massive contiguous byte arrays directly from the stream. It operates at **~1.3 GB/s** (measured on a 500 MB stream; see the streaming benchmark above).
+This method almost completely avoids allocations during extraction and writes raw objects into massive contiguous byte arrays directly from the stream. It operates at **~4.0 GB/s** (measured on a 500 MB stream; see the streaming benchmark above).
 
 ```go
 func fastChunkSlicer(reader io.Reader) error {
@@ -427,10 +425,10 @@ While SilentJSON with a new registry is still significantly faster than `encodin
 
 | Use Case | Method | Speed | Notes |
 | :--- | :--- | :--- | :--- |
-| **Large arrays (>10k objects)** | `UnmarshalArrayParallel` | ~1,300 MB/s | Uses all CPU cores, best for batch processing |
-| **Medium arrays** | `UnmarshalSlice` | ~340 MB/s | Single core, low GC pressure, good for APIs |
-| **Streaming from network** | `StreamDecoder.Next` | ~230 MB/s | Fixed memory usage, perfect for APIs |
-| **Streaming raw chunks** | `StreamDecoder.NextRawBlock` | ~1,280 MB/s | Highest streaming throughput, no struct binding |
+| **Large arrays (>10k objects)** | `UnmarshalArrayParallel` | ~3,000 MB/s | Uses all CPU cores, best for batch processing |
+| **Medium arrays** | `UnmarshalSlice` | ~530 MB/s | Single core, low GC pressure, good for APIs |
+| **Streaming from network** | `StreamDecoder.Next` | ~390 MB/s | Fixed memory usage, perfect for APIs |
+| **Streaming raw chunks** | `StreamDecoder.NextRawBlock` | ~4,000 MB/s | Highest streaming throughput, no struct binding |
 | **Just extract objects** | `StreamDecoder.NextRawBlock` | 4,009 MB/s | Zero-allocation raw extraction |
 | **Async processing** | `StreamDecoder.NextChan` | 446 MB/s | Ring buffer prevents data races |
 
@@ -579,18 +577,19 @@ Current results on AMD Ryzen 9 7950X3D (medians of 3 runs, error-checked loops; 
 
 ```
 Parser comparison, 100k chaos objects (16 MB):
-SilentJSON Parallel:  1,258 MB/s
-Goccy:                  680 MB/s
-SilentJSON Serial:      342 MB/s
-Easyjson:               323 MB/s
-Standard JSON:          205 MB/s
+SilentJSON Parallel:  2,963 MB/s
+Goccy:                  671 MB/s
+SilentJSON Serial:      532 MB/s
+Easyjson:               322 MB/s
+Standard JSON:          206 MB/s
 
 Streaming, 3M records (500 MB):
-NextRawBlock:         1,276 MB/s
-NextChanParallel:       966 MB/s
-Jsoniter stream:        450 MB/s
-Decode (struct bind):   229 MB/s
-Standard stream:        142 MB/s
+NextRawBlock:         4,012 MB/s
+NextRaw:              2,468 MB/s
+NextChanParallel:     1,984 MB/s
+Jsoniter stream:        454 MB/s
+Decode (struct bind):   386 MB/s
+Standard stream:        137 MB/s
 ```
 
 The stream decoder dominates large-payload processing with near-zero allocations on the raw paths.

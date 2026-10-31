@@ -106,12 +106,26 @@ func findQuoteScalar(data []byte) int {
 	return bytes.IndexByte(data, '"')
 }
 
+// findQuoteOrEscapeScalar finds the first '"' or '\\'. Two IndexByte scans
+// are used instead of bytes.IndexAny: IndexByte is SIMD-accelerated by the
+// runtime with no setup cost, while IndexAny builds an ASCII set on every
+// call, which showed up as a top CPU consumer in parse profiles after the
+// assembly short-string scanner was replaced by readJSONString.
 func findQuoteOrEscapeScalar(b []byte) (int, bool) {
-	idx := bytes.IndexAny(b, "\"\\")
-	if idx == -1 {
+	q := bytes.IndexByte(b, '"')
+	e := bytes.IndexByte(b, '\\')
+	switch {
+	case q == -1 && e == -1:
 		return -1, false
+	case q == -1:
+		return e, true
+	case e == -1:
+		return q, false
+	case e < q:
+		return e, true
+	default:
+		return q, false
 	}
-	return idx, b[idx] == '\\'
 }
 
 func skipSpaceScalar(data []byte, start int) int {

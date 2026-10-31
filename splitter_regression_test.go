@@ -1,27 +1,33 @@
 package silentjson
 
 // Regression tests for the chunk-boundary splitters (findArrayElements /
-// findObjectBoundaries). These guards exist because two real bugs were
+// findObjectBoundaries). These guards exist because three real bugs were
 // found in the wild:
 //
 //  1. The scalar splitters started every chunk after the first at the
 //     separating comma (off-by-one), so ParseObject saw ",{...}" and
 //     failed with "expected object start".
-//  2. The AVX2 assembly splitters mis-tracked escape sequences: a '\\'
-//     immediately followed by '\"' desynchronized the string scanner and
-//     whole runs of records were merged into one chunk or dropped
-//     entirely. UnmarshalSlice on json.Marshal output containing such
-//     strings returned ~3% fewer records (pre-strictness: silently).
+//  2. The scalar splitters ignored the documented "stop when the chunk
+//     buffer is full" contract, returning a total count beyond
+//     len(chunks); callers (NextRawBlock) then read stale zero chunks.
+//  3. The AVX2 assembly splitters mishandled the escape carry: a
+//     backslash in the LAST byte of a 32-byte SIMD block sets a carry,
+//     but the consumed escaped byte was only removed from the struct and
+//     quote masks (not the backslash mask), and the scalar tail (<32
+//     remaining bytes) ignored the carry entirely. The in-string parity
+//     flipped and whole runs of records were merged into one chunk or
+//     silently dropped — json.Marshal output of 100k records lost ~3000.
 //
-// The AVX2 splitters are disabled in dispatch_amd64.go until the assembly
-// is fixed; these tests run against whatever implementation is active, so
-// re-enabling a broken one fails here immediately.
+// The escape-carry is now handled correctly in assembly; these tests pin
+// both implementations (they run whatever the dispatcher selects, plus
+// the AVX2 variant directly on amd64).
 
 import (
 	"bytes"
 	"encoding/json"
 	"io"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -177,4 +183,121 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// --- escape-carry regression tests (AVX2 assembly bug #3 above) ---
+// The bug was positional: it only fired when a backslash landed on the
+// LAST byte of a 32-byte SIMD block, which is why small hand-written
+// cases passed while json.Marshal output of large slices lost records.
+
+// splitterUnderTest returns the array splitter the dispatcher selects,
+// and on amd64 additionally the raw AVX2 implementation.
+func splitterUnderTest() map[string]func([]byte, []Chunk) (int, int) {
+	fns := map[string]func([]byte, []Chunk) (int, int){
+		"dispatch": findArrayElementsEarlyExitASM,
+	}
+	if hasAVX2 {
+		fns["avx2"] = findArrayElementsEarlyExitAVX2
+	}
+	return fns
+}
+
+// runSplitter runs fn over the array body (callers pass it including the
+// closing bracket) and returns the chunk count.
+func runSplitter(fn func([]byte, []Chunk) (int, int), in string) int {
+	inner := append([]byte(in[1:len(in)-1]), ']')
+	buf := make([]Chunk, 64)
+	count, _ := fn(inner, buf)
+	return count
+}
+
+// TestSplitterEscapeCarryBoundary sweeps an escape sequence across every
+// byte offset of the first two 32-byte SIMD blocks, including the case
+// where the backslash is the block's last byte and the escaped character
+// lands in the next block or in the scalar tail.
+func TestSplitterEscapeCarryBoundary(t *testing.T) {
+	type tc struct {
+		name string
+		// esc replaces the raw bytes just after the padding
+		esc    string
+		tailFn func(pad int) string // filler after the escape, sized so block1 is full
+	}
+	forty := strings.Repeat("b", 40)
+	for _, c := range []tc{
+		{"escaped-quote", `\"`, nil},
+		{"escaped-backslash", `\\`, nil},
+		{"bs-bs-quote", `\\\"`, nil},
+	} {
+		for name, fn := range splitterUnderTest() {
+			for pad := 0; pad <= 96; pad++ {
+				in := `["` + strings.Repeat("a", pad) + c.esc + forty + `","x"]`
+				if got := runSplitter(fn, in); got != 2 {
+					t.Errorf("%s/%s: pad=%d (escape starts at byte %d, mod32=%d): got %d chunks, want 2",
+						name, c.name, pad, pad+2, (pad+2)%32, got)
+				}
+			}
+		}
+	}
+}
+
+// TestSplitterMarshalDifferential verifies the AVX2 splitter against a
+// byte-wise reference scan on the exact payload class that broke it:
+// json.Marshal output of a large slice whose strings contain backslash
+// and quote characters.
+func TestSplitterMarshalDifferential(t *testing.T) {
+	raw, err := json.Marshal(benchEmpSlice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := refSplitterBoundaries(raw[1 : len(raw)-1])
+	for name, fn := range splitterUnderTest() {
+		buf := make([]Chunk, len(benchEmpSlice)+16)
+		count, _ := fn(raw[1:], buf) // body includes the closing bracket
+		if count != len(want) {
+			t.Errorf("%s: count=%d, want %d (records lost?)", name, count, len(want))
+			continue
+		}
+		for i := 0; i < count; i++ {
+			if buf[i].Start != want[i][0] || buf[i].End != want[i][1] {
+				t.Fatalf("%s: chunk %d = [%d,%d], want [%d,%d]", name, i, buf[i].Start, buf[i].End, want[i][0], want[i][1])
+			}
+		}
+	}
+}
+
+// refSplitterBoundaries is a slow, obviously-correct reference: byte scan
+// with full escape pairing, returning element [start,end) ranges of an
+// array body (without the enclosing brackets).
+func refSplitterBoundaries(inner []byte) [][2]int {
+	var out [][2]int
+	depth, inStr, esc := 0, false, false
+	start := -1
+	for j := 0; j < len(inner); j++ {
+		c := inner[j]
+		if inStr {
+			if esc {
+				esc = false
+			} else if c == '\\' {
+				esc = true
+			} else if c == '"' {
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case '{', '[':
+			if depth == 0 {
+				start = j
+			}
+			depth++
+		case '}', ']':
+			depth--
+			if depth == 0 && start >= 0 {
+				out = append(out, [2]int{start, j + 1})
+			}
+		}
+	}
+	return out
 }
