@@ -56,10 +56,10 @@ Every parser decodes the identical ~16 MB payload: 100,000 `Employee` records in
 
 | Library | Objects/sec | Throughput (MB/s) | Latency (ms/op) | Allocated | Allocs/op |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **SilentJSON** (Parallel) | **17.8M** 👑 | **2909** 👑 | **5.7** 👑 | **~290 KB** 👑 | **~1150** 👑 |
+| **SilentJSON** (Parallel) | **17.8M** 👑 | **2909** 👑 | **5.7** 👑 | **~290 KB** 👑 | ~1150 (fewest: goccy, 1, at 16.5 MB) |
 | Goccy | 4.1M | 671 | 24.4 | 16.5 MB | 1 |
 | Jsoniter | 3.2M | 524 | 38.2 | 70.9 MB | 954k |
-| **SilentJSON** (Serial) | 2.0M | 552 | 28.9 | **~130 KB** 👑 | **~1030** 👑 |
+| **SilentJSON** (Serial) | 2.0M | 552 | 28.9 | **~130 KB** 👑 | ~1030 |
 | Easyjson (codegen) | 2.0M | 322 | 50.7 | 15.4 MB | 534k |
 | Standard (`encoding/json`) | 1.26M | 206 | 79.4 | 1.6 MB | 108k |
 | simdjson-go (AST + manual extraction) | 1.0M | 171 | 95.6 | 306 MB | 1.4M |
@@ -169,26 +169,34 @@ When you are downloading gigabytes of JSON arrays over the network and want to p
 
 Because `simdjson` and `sonic` (for standard arrays) require the **entire** payload in memory, they cannot perform streaming array processing. `SilentJSON` includes a specialized `StreamDecoder` that uses an optimized boundary scanner to process infinite streams. Measured on a 500 MB stream of 3M chaos-mode records (`BenchmarkStreamComparison`):
 
+Two different jobs are measured here, so the table is split: **raw chunk extraction** (no struct binding — you get the object bytes) and **full struct binding** (decoded Go values). Measured on a 500 MB stream of 3M chaos-mode records (`BenchmarkStreamComparison`).
+
+Raw chunk extraction (no struct binding):
+
+| Mode | Throughput (MB/s) | Allocated | Allocs/op |
+| :--- | :--- | :--- | :--- |
+| **SilentJSON (NextRawBlock)** | **4012** 🚀 | **~0.6 MB** | **5.7k** |
+| SilentJSON (NextRaw) | 2468 | 527 MB | 3.0M |
+
+Full struct binding:
+
 | Library / Mode | Throughput (MB/s) | Allocated | Allocs/op | Notes |
 | :--- | :--- | :--- | :--- | :--- |
-| **SilentJSON (NextRawBlock)** | **4012** 🚀 | **~0.6 MB** | **5.7k** | Bulk raw chunk extraction, near-zero alloc |
-| **SilentJSON (NextRaw)** | **2468** 🚀 | 527 MB | 3.0M | Per-object raw chunk extraction |
-| **SilentJSON (NextChanParallel)** | **1984** 🚀 | 309 MB | 37.2M | Async producer-consumer, 16 workers |
-| Jsoniter (Stream) | 454 | 149 MB | 14.6M | 2x more GC pressure than NextRawBlock |
-| **SilentJSON (Next)** | **386** 👑 | **263 MB** 👑 | 37.5M | Full struct binding, reusable object |
-| **SilentJSON (Decode)** | 386 👑 | 263 MB | 37.5M | Full struct binding |
-| **SilentJSON (NextChan)** | 351 | 263 MB | 37.5M | Async producer-consumer |
-| Standard (`json.NewDecoder`) | 137 | 107 MB | 5.1M | Slowest of the group |
+| **SilentJSON (NextChanParallel)** | **1984** | 309 MB | 37.2M | 16 worker goroutines overlap parsing with I/O |
+| Jsoniter (Stream) | **454** 👑 | 149 MB | 14.6M | Best single-thread struct-binding throughput |
+| SilentJSON (Next / Decode) | 386 | 263 MB | 37.5M | Reusable object; identical cost for both APIs |
+| SilentJSON (NextChan) | 351 | 263 MB | 37.5M | Async producer-consumer, 1 worker |
+| Standard (`json.NewDecoder`) | 137 | **107 MB** 👑 | **5.1M** 👑 | Slowest throughput, leanest memory |
 
 ```mermaid
 xychart-beta
     title "Streaming Throughput (MB/s) - Higher is Better"
-    x-axis ["Standard", "NextChan", "Decode", "Jsoniter", "NextRaw", "NextChanPar", "NextRawBlock"]
+    x-axis ["Standard", "NextChan", "Decode", "Jsoniter", "NextChanPar", "NextRaw", "NextRawBlock"]
     y-axis "MB/s" 0 --> 4400
-    bar [137, 351, 386, 454, 2468, 1984, 4012]
+    bar [137, 351, 386, 454, 1984, 2468, 4012]
 ```
 
-*Note: full struct binding over a stream decodes strings into fresh allocations (the decoder's internal buffer is overwritten by the `io.Reader`, so zero-copy aliases would dangle) — that is the dominant cost of Decode/Next/NextChan at ~390 MB/s. `NextRawBlock()` skips struct binding entirely and extracts raw object chunks at ~4.0 GB/s with near-zero allocations; `NextChanParallel` overlaps worker parsing with I/O for ~2 GB/s with binding.*
+*Honest reading of the struct-binding group: **jsoniter leads single-thread struct binding (454 vs 386 MB/s)**, and the standard library is the leanest on memory (107 MB, 5.1M allocs) while being the slowest. The measured reason for the jsoniter gap: silentjson's stream decoder materializes every key and every string value (≈12.5 allocations per record) because its sliding buffer is reused across reads, while jsoniter matches field names in place and allocates only values (≈4.9 per record). Matching keys without materializing them is the known optimization lead for closing that gap. `NextRawBlock()` remains in a class of its own (~4.0 GB/s, near-zero allocations) when struct binding is not needed, and `NextChanParallel` trades memory for 2 GB/s with binding.*
 
 
 ### 3. Serialization (Generation / Marshal)
