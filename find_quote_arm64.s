@@ -130,8 +130,8 @@ skip_eof:
     MOVD R1, ret+32(FP)
     RET
 
-// func findObjectBoundariesASM(data []byte, chunks []Chunk) (int, int)
-TEXT ·findObjectBoundariesASM(SB), NOSPLIT, $0-64
+// func findObjectBoundariesNEON(data []byte, chunks []Chunk) (int, int)
+TEXT ·findObjectBoundariesNEON(SB), NOSPLIT, $0-64
     MOVD data_base+0(FP), R0
     MOVD data_len+8(FP), R1
     MOVD chunks_base+24(FP), R2
@@ -243,8 +243,8 @@ fob_end:
     RET
 
 
-// func findObjectBoundariesEarlyExitASM(data []byte, chunks []Chunk) (int, int)
-TEXT ·findObjectBoundariesEarlyExitASM(SB), NOSPLIT, $0-64
+// func findObjectBoundariesEarlyExitNEON(data []byte, chunks []Chunk) (int, int)
+TEXT ·findObjectBoundariesEarlyExitNEON(SB), NOSPLIT, $0-64
     MOVD data_base+0(FP), R0
     MOVD data_len+8(FP), R1
     MOVD chunks_base+24(FP), R2
@@ -356,8 +356,8 @@ fobe_end:
     RET
 
 
-// func findArrayElementsEarlyExitASM(data []byte, chunks []Chunk) (int, int)
-TEXT ·findArrayElementsEarlyExitASM(SB), NOSPLIT, $0-64
+// func findArrayElementsEarlyExitNEON(data []byte, chunks []Chunk) (int, int)
+TEXT ·findArrayElementsEarlyExitNEON(SB), NOSPLIT, $0-64
     MOVD data_base+0(FP), R0
     MOVD data_len+8(FP), R1
     MOVD chunks_base+24(FP), R2

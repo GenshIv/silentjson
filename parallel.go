@@ -23,6 +23,46 @@ func allocBytes(n int) []byte {
 	return make([]byte, n)
 }
 
+// emptyArrayRemnant reports whether the remaining scan window is only
+// whitespace, a closing bracket and more whitespace — i.e. a legitimately
+// EMPTY array. A zero chunk count with any other remnant means the
+// scanner desynchronized on malformed input (e.g. an unterminated
+// string) and must be rejected like encoding/json rejects it, not
+// silently reported as "zero records".
+// arrayTailClosed reports whether inner[pos:] is only whitespace, the
+// closing bracket and more whitespace: the array is properly terminated
+// with nothing trailing. The slice APIs require this — encoding/json
+// rejects a truncated array and so must they.
+func arrayTailClosed(inner []byte, pos int) bool {
+	i := pos
+	for i < len(inner) && (charTable[inner[i]]&charSpace) != 0 {
+		i++
+	}
+	if i >= len(inner) || inner[i] != ']' {
+		return false
+	}
+	i++
+	for i < len(inner) && (charTable[inner[i]]&charSpace) != 0 {
+		i++
+	}
+	return i == len(inner)
+}
+
+func emptyArrayRemnant(inner []byte) bool {
+	i := 0
+	for i < len(inner) && (charTable[inner[i]]&charSpace) != 0 {
+		i++
+	}
+	if i >= len(inner) || inner[i] != ']' {
+		return false
+	}
+	i++
+	for i < len(inner) && (charTable[inner[i]]&charSpace) != 0 {
+		i++
+	}
+	return i == len(inner)
+}
+
 func findObjectBoundaries(data []byte, buf []Chunk) ([]Chunk, int) {
 	count, maxSize := findObjectBoundariesASM(data, buf)
 	if count > len(buf) {
@@ -51,12 +91,11 @@ func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 	startIdx++
 	rawInner := raw[startIdx:]
 
-	count, _ := findArrayElementsEarlyExitASM(rawInner, buf[:len(buf)])
+	count, depth := findArrayElementsEarlyExitASM(rawInner, buf[:len(buf)])
 	if count < 0 || count > len(buf) {
 		reg.chunkPool.Put(buf[:cap(buf)])
 		return nil, fmt.Errorf("asm returned invalid count: %d", count)
 	}
-
 	validCount := 0
 	for i := 0; i < count; i++ {
 		if buf[i].Start != buf[i].End {
@@ -65,6 +104,14 @@ func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 		}
 	}
 	count = validCount
+	if count == 0 && !emptyArrayRemnant(rawInner) {
+		// Zero real elements are only legitimate for an actually empty
+		// array; anything else means the scanner desynchronized on
+		// malformed input (the splitter emits phantom empty chunks on
+		// stray commas, so this check must run after the filter).
+		reg.chunkPool.Put(buf[:cap(buf)])
+		return nil, fmt.Errorf("%w: malformed array element (unbalanced braces or unterminated string, scanner depth %d)", ErrTypeMismatch, depth)
+	}
 
 	if len(dst) < count {
 		reg.chunkPool.Put(buf[:cap(buf)])
@@ -97,6 +144,9 @@ func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 	reg.chunkPool.Put(buf[:cap(buf)])
 	if err != nil {
 		return nil, err
+	}
+	if !arrayTailClosed(rawInner, buf[count-1].End) {
+		return nil, fmt.Errorf("%w: unterminated array (missing closing bracket or trailing data)", ErrTypeMismatch)
 	}
 	return target, nil
 }
@@ -160,6 +210,12 @@ func UnmarshalArrayParallel[T any](raw []byte, reg *Registry, dst []T) ([]T, err
 			}
 			if maxDepth != 0 && count < batchSize {
 				fatalErr = errors.New("malformed json: unbalanced braces or brackets")
+				break
+			}
+			if validCount == 0 && !emptyArrayRemnant(rawInner[offset:]) {
+				// same contract as the serial path: zero real elements is
+				// only legitimate for an actually empty array remnant
+				fatalErr = fmt.Errorf("%w: malformed array element (unbalanced braces or unterminated string, scanner depth %d)", ErrTypeMismatch, maxDepth)
 				break
 			}
 			if itemsFound+validCount > len(dst) {
@@ -234,6 +290,10 @@ func UnmarshalArrayParallel[T any](raw []byte, reg *Registry, dst []T) ([]T, err
 		}
 		if count == 0 {
 			reg.chunkPool.Put(batch[:cap(batch)])
+			if !emptyArrayRemnant(rawInner[offset:]) {
+				fatalErr = fmt.Errorf("%w: malformed array element (unbalanced braces or unterminated string, scanner depth %d)", ErrTypeMismatch, maxDepth)
+				goto CLEANUP
+			}
 			break
 		}
 		stepAdvance := batch[count-1].End
@@ -279,6 +339,10 @@ func UnmarshalArrayParallel[T any](raw []byte, reg *Registry, dst []T) ([]T, err
 CLEANUP:
 	close(taskCh)
 	wg.Wait()
+
+	if fatalErr == nil && !arrayTailClosed(rawInner, offset) {
+		fatalErr = fmt.Errorf("%w: unterminated array (missing closing bracket or trailing data)", ErrTypeMismatch)
+	}
 
 	// Check if any error was reported while waiting
 	select {

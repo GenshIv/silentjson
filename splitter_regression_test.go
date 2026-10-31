@@ -191,13 +191,15 @@ func min(a, b int) int {
 // cases passed while json.Marshal output of large slices lost records.
 
 // splitterUnderTest returns the array splitter the dispatcher selects,
-// and on amd64 additionally the raw AVX2 implementation.
+// plus the platform's raw assembly implementation when one is available
+// (amd64: AVX2, always tested; arm64: the disabled NEON variant, tested
+// only in explicit audit mode).
 func splitterUnderTest() map[string]func([]byte, []Chunk) (int, int) {
 	fns := map[string]func([]byte, []Chunk) (int, int){
 		"dispatch": findArrayElementsEarlyExitASM,
 	}
-	if hasAVX2 {
-		fns["avx2"] = findArrayElementsEarlyExitAVX2
+	if fn, ok := archArraySplitter(); ok {
+		fns["asm"] = fn
 	}
 	return fns
 }

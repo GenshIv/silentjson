@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/GenshIv/silentjson/v2/pb"
@@ -42,11 +43,22 @@ const (
 type EmpSlice []Employee
 
 var (
-	hugeJSONData  []byte
 	benchEmpSlice []Employee
+
+	hugeJSONOnce sync.Once
+	hugeJSONData []byte
 )
 
-func init() {
+// hugeJSON returns the ~500 MB nested benchmark payload, building it on
+// first use. It used to be built in init(), which made every test run
+// and every forked fuzz worker allocate half a gigabyte before running
+// anything — enough to take the whole machine down during fuzzing.
+func hugeJSON() []byte {
+	hugeJSONOnce.Do(func() { buildHugeJSON() })
+	return hugeJSONData
+}
+
+func buildHugeJSON() {
 	var buf bytes.Buffer
 	buf.WriteString("[\n")
 
@@ -99,6 +111,9 @@ func init() {
 	buf.WriteString("]\n")
 
 	hugeJSONData = buf.Bytes()
+}
+
+func init() {
 	initMarshalData()
 }
 
@@ -142,14 +157,14 @@ func BenchmarkNestedComparison(b *testing.B) {
 			dst[i].Scores = make([]int, 0, 4)
 		}
 
-		b.SetBytes(int64(len(hugeJSONData)))
+		b.SetBytes(int64(len(hugeJSON())))
 		b.ReportAllocs()
 		b.ResetTimer()
 
 		// The parser guarantees read-only access to the input (TestFixNoInputMutation),
 		// so hugeJSONData is parsed directly — no defensive per-iteration copy.
 		for i := 0; i < b.N; i++ {
-			_, err := UnmarshalSlice(hugeJSONData, reg, dst)
+			_, err := UnmarshalSlice(hugeJSON(), reg, dst)
 			if err != nil {
 				b.Error(err)
 			}
@@ -158,12 +173,12 @@ func BenchmarkNestedComparison(b *testing.B) {
 
 	b.Run("Sonic", func(b *testing.B) {
 		dst := make([]Employee, recordCount)
-		b.SetBytes(int64(len(hugeJSONData)))
+		b.SetBytes(int64(len(hugeJSON())))
 		b.ReportAllocs()
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			err := sonic.Unmarshal(hugeJSONData, &dst)
+			err := sonic.Unmarshal(hugeJSON(), &dst)
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -171,11 +186,11 @@ func BenchmarkNestedComparison(b *testing.B) {
 	})
 
 	b.Run("Standard", func(b *testing.B) {
-		b.SetBytes(int64(len(hugeJSONData)))
+		b.SetBytes(int64(len(hugeJSON())))
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			reader := bytes.NewReader(hugeJSONData)
+			reader := bytes.NewReader(hugeJSON())
 			dec := json.NewDecoder(reader)
 			_, _ = dec.Token()
 			var emp Employee
@@ -188,7 +203,7 @@ func BenchmarkNestedComparison(b *testing.B) {
 	})
 	b.Run("Goccy", func(b *testing.B) {
 		dst := make([]Employee, recordCount)
-		b.SetBytes(int64(len(hugeJSONData)))
+		b.SetBytes(int64(len(hugeJSON())))
 		b.ReportAllocs()
 		b.ResetTimer()
 
@@ -201,7 +216,7 @@ func BenchmarkNestedComparison(b *testing.B) {
 	})
 
 	b.Run("Jsoniter", func(b *testing.B) {
-		b.SetBytes(int64(len(hugeJSONData)))
+		b.SetBytes(int64(len(hugeJSON())))
 		b.ReportAllocs()
 		b.ResetTimer()
 
@@ -215,7 +230,7 @@ func BenchmarkNestedComparison(b *testing.B) {
 	})
 
 	b.Run("Buger_Jsonparser", func(b *testing.B) {
-		b.SetBytes(int64(len(hugeJSONData)))
+		b.SetBytes(int64(len(hugeJSON())))
 		b.ReportAllocs()
 		b.ResetTimer()
 
@@ -446,12 +461,12 @@ func sliceIntToInt64(s []int) []int64 {
 func BenchmarkStreamComparison(b *testing.B) {
 	b.Run("SilentJSON_Stream", func(b *testing.B) {
 		reg := BuildRegistry(reflect.TypeOf(Employee{}))
-		b.SetBytes(int64(len(hugeJSONData)))
+		b.SetBytes(int64(len(hugeJSON())))
 		b.ReportAllocs()
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			r := bytes.NewReader(hugeJSONData)
+			r := bytes.NewReader(hugeJSON())
 			dec := NewStreamDecoder[Employee](r, reg)
 			var emp Employee
 			for {
@@ -468,12 +483,12 @@ func BenchmarkStreamComparison(b *testing.B) {
 
 	b.Run("SilentJSON_Stream_Next", func(b *testing.B) {
 		reg := BuildRegistry(reflect.TypeOf(Employee{}))
-		b.SetBytes(int64(len(hugeJSONData)))
+		b.SetBytes(int64(len(hugeJSON())))
 		b.ReportAllocs()
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			r := bytes.NewReader(hugeJSONData)
+			r := bytes.NewReader(hugeJSON())
 			dec := NewStreamDecoder[Employee](r, reg)
 			err := dec.Next(func(emp *Employee) bool {
 				return true
@@ -486,12 +501,12 @@ func BenchmarkStreamComparison(b *testing.B) {
 
 	b.Run("SilentJSON_Stream_NextRaw", func(b *testing.B) {
 		reg := BuildRegistry(reflect.TypeOf(Employee{}))
-		b.SetBytes(int64(len(hugeJSONData)))
+		b.SetBytes(int64(len(hugeJSON())))
 		b.ReportAllocs()
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			r := bytes.NewReader(hugeJSONData)
+			r := bytes.NewReader(hugeJSON())
 			dec := NewStreamDecoder[Employee](r, reg)
 			for {
 				_, err := dec.NextRaw()
@@ -507,12 +522,12 @@ func BenchmarkStreamComparison(b *testing.B) {
 
 	b.Run("SilentJSON_Stream_NextRawBlock", func(b *testing.B) {
 		reg := BuildRegistry(reflect.TypeOf(Employee{}))
-		b.SetBytes(int64(len(hugeJSONData)))
+		b.SetBytes(int64(len(hugeJSON())))
 		b.ReportAllocs()
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			r := bytes.NewReader(hugeJSONData)
+			r := bytes.NewReader(hugeJSON())
 			dec := NewStreamDecoder[Employee](r, reg)
 			for {
 				_, count, err := dec.NextRawBlock(1000, 0)
@@ -531,12 +546,12 @@ func BenchmarkStreamComparison(b *testing.B) {
 
 	b.Run("SilentJSON_Stream_NextChan", func(b *testing.B) {
 		reg := BuildRegistry(reflect.TypeOf(Employee{}))
-		b.SetBytes(int64(len(hugeJSONData)))
+		b.SetBytes(int64(len(hugeJSON())))
 		b.ReportAllocs()
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			r := bytes.NewReader(hugeJSONData)
+			r := bytes.NewReader(hugeJSON())
 			dec := NewStreamDecoder[Employee](r, reg)
 			ch := dec.NextChan(100) // Buffer of 100 for maximum throughput
 
@@ -551,12 +566,12 @@ func BenchmarkStreamComparison(b *testing.B) {
 
 	b.Run("SilentJSON_Stream_NextChanParallel", func(b *testing.B) {
 		reg := BuildRegistry(reflect.TypeOf(Employee{}))
-		b.SetBytes(int64(len(hugeJSONData)))
+		b.SetBytes(int64(len(hugeJSON())))
 		b.ReportAllocs()
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			r := bytes.NewReader(hugeJSONData)
+			r := bytes.NewReader(hugeJSON())
 			dec := NewStreamDecoder[Employee](r, reg)
 			ch := dec.NextChanParallel(16, 100)
 
@@ -570,12 +585,12 @@ func BenchmarkStreamComparison(b *testing.B) {
 	})
 
 	b.Run("Standard_Stream", func(b *testing.B) {
-		b.SetBytes(int64(len(hugeJSONData)))
+		b.SetBytes(int64(len(hugeJSON())))
 		b.ReportAllocs()
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			r := bytes.NewReader(hugeJSONData)
+			r := bytes.NewReader(hugeJSON())
 			dec := json.NewDecoder(r)
 			_, err := dec.Token()
 			if err != nil {
@@ -593,12 +608,12 @@ func BenchmarkStreamComparison(b *testing.B) {
 	})
 
 	b.Run("Jsoniter_Stream", func(b *testing.B) {
-		b.SetBytes(int64(len(hugeJSONData)))
+		b.SetBytes(int64(len(hugeJSON())))
 		b.ReportAllocs()
 		b.ResetTimer()
 
 		for i := 0; i < b.N; i++ {
-			r := bytes.NewReader(hugeJSONData)
+			r := bytes.NewReader(hugeJSON())
 			iter := jsoniter.Parse(jsoniter.ConfigFastest, r, 256*1024)
 			var emp Employee
 			for iter.ReadArray() {

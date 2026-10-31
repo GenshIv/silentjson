@@ -122,11 +122,32 @@ func findQuoteOrEscapeASM(b []byte) (int, bool) {
 	return idx, b[idx] == '\\'
 }
 
-//go:noescape
-func findObjectBoundariesASM(data []byte, chunks []Chunk) (int, int)
+// The NEON chunk splitters below are DISABLED pending an audit for the
+// same escape-carry defect that was found (and fixed) in the AVX2
+// versions: a backslash landing on the last byte of a SIMD block
+// desynchronized the string scanner and silently merged or dropped
+// records. The Go wrappers with the *ASM names route to the scalar
+// splitters, which are correct on every architecture. To re-enable,
+// make the wrappers call the NEON symbols and pass the splitter sweep
+// tests on arm64 hardware (SILENTJSON_AUDIT_NEON=1 go test -run TestSplitter).
 
 //go:noescape
-func findObjectBoundariesEarlyExitASM(data []byte, chunks []Chunk) (int, int)
+func findObjectBoundariesNEON(data []byte, chunks []Chunk) (int, int)
 
 //go:noescape
-func findArrayElementsEarlyExitASM(data []byte, chunks []Chunk) (int, int)
+func findObjectBoundariesEarlyExitNEON(data []byte, chunks []Chunk) (int, int)
+
+//go:noescape
+func findArrayElementsEarlyExitNEON(data []byte, chunks []Chunk) (int, int)
+
+func findObjectBoundariesASM(data []byte, chunks []Chunk) (int, int) {
+	return findObjectBoundariesScalar(data, chunks)
+}
+
+func findObjectBoundariesEarlyExitASM(data []byte, chunks []Chunk) (int, int) {
+	return findObjectBoundariesEarlyExitScalar(data, chunks)
+}
+
+func findArrayElementsEarlyExitASM(data []byte, chunks []Chunk) (int, int) {
+	return findArrayElementsEarlyExitScalar(data, chunks)
+}

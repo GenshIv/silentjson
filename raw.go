@@ -2,7 +2,25 @@ package silentjson
 
 // RawMessage is a raw encoded JSON value, similar to json.RawMessage.
 // It is serialized as-is by silentjson.Marshal without any escaping or modification.
+//
+// UnmarshalJSON/MarshalJSON make it behave under encoding/json exactly
+// like json.RawMessage does (raw copy in, raw copy out), so structs
+// containing RawMessage round-trip through either library.
 type RawMessage []byte
+
+// UnmarshalJSON implements json.Unmarshaler: the value is stored verbatim.
+func (r *RawMessage) UnmarshalJSON(data []byte) error {
+	*r = append((*r)[:0], data...)
+	return nil
+}
+
+// MarshalJSON implements json.Marshaler: the value is emitted verbatim.
+func (r RawMessage) MarshalJSON() ([]byte, error) {
+	if r == nil {
+		return []byte("null"), nil
+	}
+	return r, nil
+}
 
 // GetStringValue returns the string value for a given key in a JSON object.
 // Top-level keys are searched first (like encoding/json); if the key is not

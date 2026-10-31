@@ -334,6 +334,18 @@ func parseObjectStrict(raw []byte, reg *Registry, ptr unsafe.Pointer, copyString
 		i++
 	}
 
+	if i+4 <= len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == nullMagic {
+		// Root null is a no-op on the destination, like encoding/json.
+		i += 4
+		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+			i++
+		}
+		if i != len(raw) {
+			return fmt.Errorf("%w: trailing data after root null at %d", ErrTypeMismatch, i)
+		}
+		return nil
+	}
+
 	if i < len(raw) && raw[i] == '[' {
 		// Мы обнаружили массив на верхнем уровне!
 		return parseRootSlice(raw[i:], reg, ptr, copyStrings)
@@ -356,6 +368,156 @@ func parseObjectStrict(raw []byte, reg *Registry, ptr unsafe.Pointer, copyString
 		return fmt.Errorf("%w: trailing data after object at %d", ErrTypeMismatch, n)
 	}
 	return nil
+}
+
+// jsonValueStart reports whether c can begin a JSON value.
+
+// consumeLiteral validates that raw[i:] starts with the exact JSON
+// literal (true/false/null) and returns the position right after it.
+func consumeLiteral(raw []byte, i int) (int, error) {
+	var want string
+	switch raw[i] {
+	case 't':
+		want = "true"
+	case 'f':
+		want = "false"
+	case 'n':
+		want = "null"
+	default:
+		return 0, fmt.Errorf("%w: invalid literal start %q at %d", ErrTypeMismatch, raw[i], i)
+	}
+	if i+len(want) > len(raw) || string(raw[i:i+len(want)]) != want {
+		return 0, fmt.Errorf("%w: invalid literal at %d", ErrTypeMismatch, i)
+	}
+	return i + len(want), nil
+}
+
+// skipValueStrict skips exactly one JSON value, validating its grammar
+// the way encoding/json does: exact literals, strict numbers, escaped
+// strings with paired escapes, balanced composites with well-formed
+// elements. Used for unknown fields (and RawMessage) where the value is
+// not decoded into a field and would otherwise be swallowed unchecked.
+// Raw control characters inside strings remain accepted — that is the
+// documented laxness of this parser and applies to known fields alike.
+func skipValueStrict(raw []byte, i int) (int, error) {
+	if i >= len(raw) {
+		return 0, ErrUnexpectedEOF
+	}
+	switch raw[i] {
+	case '"':
+		// readJSONString expects input starting right AFTER the opening
+		// quote; the consumed count includes the closing quote.
+		_, _, consumed, err := readJSONString(raw[i+1:], false)
+		if err != nil {
+			return 0, err
+		}
+		return i + 1 + int(consumed), nil
+	case '{':
+		i++
+		i = skipSpaceRaw(raw, i)
+		if i >= len(raw) {
+			return 0, ErrUnexpectedEOF
+		}
+		if raw[i] == '}' {
+			return i + 1, nil
+		}
+		for {
+			if raw[i] != '"' {
+				return 0, fmt.Errorf("%w: expected object key at %d", ErrTypeMismatch, i)
+			}
+			_, _, consumed, err := readJSONString(raw[i+1:], false)
+			if err != nil {
+				return 0, err
+			}
+			i += 1 + int(consumed)
+			i = skipSpaceRaw(raw, i)
+			if i >= len(raw) || raw[i] != ':' {
+				return 0, fmt.Errorf("%w: expected ':' at %d", ErrTypeMismatch, i)
+			}
+			i++
+			i = skipSpaceRaw(raw, i)
+			i, err = skipValueStrict(raw, i)
+			if err != nil {
+				return 0, err
+			}
+			i = skipSpaceRaw(raw, i)
+			if i >= len(raw) {
+				return 0, ErrUnexpectedEOF
+			}
+			if raw[i] == ',' {
+				i++
+				i = skipSpaceRaw(raw, i)
+				if i >= len(raw) {
+					return 0, ErrUnexpectedEOF
+				}
+				continue
+			}
+			if raw[i] == '}' {
+				return i + 1, nil
+			}
+			return 0, fmt.Errorf("%w: expected ',' or '}' at %d", ErrTypeMismatch, i)
+		}
+	case '[':
+		i++
+		i = skipSpaceRaw(raw, i)
+		if i >= len(raw) {
+			return 0, ErrUnexpectedEOF
+		}
+		if raw[i] == ']' {
+			return i + 1, nil
+		}
+		for {
+			// plain '=' with a pre-declared err: ':=' would shadow the
+			// loop's i and spin forever on multi-element arrays
+			var err error
+			i, err = skipValueStrict(raw, i)
+			if err != nil {
+				return 0, err
+			}
+			i = skipSpaceRaw(raw, i)
+			if i >= len(raw) {
+				return 0, ErrUnexpectedEOF
+			}
+			if raw[i] == ',' {
+				i++
+				i = skipSpaceRaw(raw, i)
+				if i >= len(raw) {
+					return 0, ErrUnexpectedEOF
+				}
+				continue
+			}
+			if raw[i] == ']' {
+				return i + 1, nil
+			}
+			return 0, fmt.Errorf("%w: expected ',' or ']' at %d", ErrTypeMismatch, i)
+		}
+	case 't', 'f', 'n':
+		return consumeLiteral(raw, i)
+	default:
+		start := i
+		for i < len(raw) && (charTable[raw[i]]&maskValueEnd) == 0 {
+			i++
+		}
+		if !validJSONNumber(raw[start:i]) {
+			return 0, fmt.Errorf("%w: invalid number %q at %d", ErrTypeMismatch, raw[start:i], start)
+		}
+		return i, nil
+	}
+}
+
+func skipSpaceRaw(raw []byte, i int) int {
+	for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+		i++
+	}
+	return i
+}
+
+func jsonValueStart(c byte) bool {
+	switch c {
+	case '"', '-', '{', '[', 't', 'f', 'n':
+		return true
+	}
+	return c >= '0' && c <= '9'
 }
 
 func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bool) (int, error) {
@@ -510,6 +672,11 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 		if ok {
 			switch info.Type {
 			case TypeString:
+				if i+4 <= len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == nullMagic {
+					// null leaves the zero value, like encoding/json
+					i += 4
+					break
+				}
 				if (charTable[raw[i]] & charString) == 0 {
 					return 0, fmt.Errorf("%w: expected string value", ErrTypeMismatch)
 				}
@@ -576,6 +743,11 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 				}
 
 			case TypeStruct:
+				if i+4 <= len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == nullMagic {
+					// null leaves the zero value, like encoding/json
+					i += 4
+					break
+				}
 				if (charTable[raw[i]] & charOpenBrace) == 0 {
 					return 0, fmt.Errorf("%w: expected object value", ErrTypeMismatch)
 				}
@@ -587,6 +759,12 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 				i += consumed
 
 			case TypeStringSlice:
+				if i+4 <= len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == nullMagic {
+					// null leaves the field as-is (nil on a fresh object),
+					// like encoding/json
+					i += 4
+					break
+				}
 				if (charTable[raw[i]] & charOpenBracket) == 0 {
 					return 0, fmt.Errorf("%w: expected string slice value", ErrTypeMismatch)
 				}
@@ -599,6 +777,12 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 				i += consumed
 
 			case TypeIntSlice:
+				if i+4 <= len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == nullMagic {
+					// null leaves the field as-is (nil on a fresh object),
+					// like encoding/json
+					i += 4
+					break
+				}
 				if (charTable[raw[i]] & charOpenBracket) == 0 {
 					return 0, fmt.Errorf("%w: expected int slice value", ErrTypeMismatch)
 				}
@@ -809,7 +993,10 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 				}
 
 			case TypeRawMessage:
-				end := skipValue(raw, i)
+				end, err := skipValueStrict(raw, i)
+				if err != nil {
+					return 0, err
+				}
 				if end > len(raw) {
 					end = len(raw)
 				}
@@ -824,17 +1011,18 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 				return 0, fmt.Errorf("%w: unsupported field kind for key %q", ErrTypeMismatch, keySlice)
 			}
 		} else {
-			i = skipValue(raw, i)
+			if !jsonValueStart(raw[i]) {
+				return 0, fmt.Errorf("%w: expected value at %d (%q)", ErrTypeMismatch, i, raw[i])
+			}
+			end, err := skipValueStrict(raw, i)
+			if err != nil {
+				return 0, err
+			}
+			i = end
 		}
 
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
 			i++
-		}
-		if i < len(raw) && (charTable[raw[i]]&(charComma|charCloseBrace)) == 0 {
-			i = skipValue(raw, i)
-			for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
-				i++
-			}
 		}
 		if i >= len(raw) {
 			return 0, ErrUnexpectedEOF

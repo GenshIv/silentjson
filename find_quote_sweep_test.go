@@ -1,3 +1,5 @@
+//go:build amd64
+
 package silentjson
 
 // Exhaustive equivalence test for the AVX2 string scanner against the
