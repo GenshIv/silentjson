@@ -60,6 +60,7 @@ BenchmarkPayloadFlavors runs the same 100k-record payload as clean ASCII, with e
 - `InjectFieldBeforeClose`/`InjectFieldBeforeClose1`: no panic on empty input, non-object input is returned unchanged, `{}` no longer produces `{,"k":"v"}` (leading comma omitted), keys are JSON-escaped when needed.
 
 ### Added
+- **Serialization is ~11.5% faster than the pre-audit tree** (measured sequentially on both trees: 1159 → 1292 MB/s on the 100k-object generation benchmark, still zero-alloc). The gain comes from the audit patch itself: the `defer recover()` in `MarshalString` ran on every string-field marshal call and was removed — panics now propagate instead of being swallowed into truncated JSON. The AVX2 string scanner is not involved here (marshaling scans strings inside `appendStringAVX2`).
 - `Registry.Err() error` — preflight check for registries containing unsupported field types.
 - `fixes_test.go` — regression tests covering every fix above.
 - CI: `go test -race ./...` job in `.github/workflows/test.yml`.
