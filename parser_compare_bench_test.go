@@ -96,12 +96,6 @@ func init() {
 	parserCmpJSON = buf.Bytes()
 }
 
-// sinks keep the decode loops alive across compiler optimizations
-var (
-	sinkEmployees []benchpayload.Employee
-	sinkInt       int
-)
-
 // TestParserComparisonCorrectness verifies that every parser benchmarked
 // below decodes the shared payload into the same values as encoding/json.
 // In particular it validates the hand-written simdjson extraction loop —
@@ -315,11 +309,9 @@ func BenchmarkParserComparison(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			out, err := UnmarshalSlice(parserCmpJSON, reg, dst)
-			if err != nil {
+			if _, err := UnmarshalSlice(parserCmpJSON, reg, dst); err != nil {
 				b.Fatal(err)
 			}
-			sinkInt = out[0].ID
 		}
 	})
 
@@ -328,11 +320,9 @@ func BenchmarkParserComparison(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			out, err := UnmarshalArrayParallel[benchpayload.Employee](parserCmpJSON, reg, dst)
-			if err != nil {
+			if _, err := UnmarshalArrayParallel[benchpayload.Employee](parserCmpJSON, reg, dst); err != nil {
 				b.Fatal(err)
 			}
-			sinkInt = out[0].ID
 		}
 	})
 
@@ -346,7 +336,6 @@ func BenchmarkParserComparison(b *testing.B) {
 			if err := easyjson.Unmarshal(parserCmpJSON, &out); err != nil {
 				b.Fatal(err)
 			}
-			sinkInt = out[0].ID
 		}
 	})
 
@@ -362,7 +351,6 @@ func BenchmarkParserComparison(b *testing.B) {
 			if err := simdjsonDecode(parserCmpJSON, &out); err != nil {
 				b.Fatal(err)
 			}
-			sinkInt = out[0].ID
 		}
 	})
 
@@ -374,7 +362,6 @@ func BenchmarkParserComparison(b *testing.B) {
 			if err := sonic.Unmarshal(parserCmpJSON, &dst); err != nil {
 				b.Fatal(err)
 			}
-			sinkInt = dst[0].ID
 		}
 	})
 
@@ -386,7 +373,6 @@ func BenchmarkParserComparison(b *testing.B) {
 			if err := goccyjson.Unmarshal(parserCmpJSON, &dst); err != nil {
 				b.Fatal(err)
 			}
-			sinkInt = dst[0].ID
 		}
 	})
 
@@ -400,7 +386,6 @@ func BenchmarkParserComparison(b *testing.B) {
 			if err := jsoniter.ConfigFastest.Unmarshal(parserCmpJSON, &out); err != nil {
 				b.Fatal(err)
 			}
-			sinkInt = out[0].ID
 		}
 	})
 
@@ -412,7 +397,6 @@ func BenchmarkParserComparison(b *testing.B) {
 			if err := json.Unmarshal(parserCmpJSON, &dst); err != nil {
 				b.Fatal(err)
 			}
-			sinkInt = dst[0].ID
 		}
 	})
 }

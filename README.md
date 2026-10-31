@@ -102,7 +102,7 @@ Takeaways, measured: escapes cost throughput nothing on this parser (they only a
 
 #### Record shapes: many small vs few large vs very large
 
-`BenchmarkShapeComparison` decodes ~14-20 MB of JSON in four record shapes with every parser (small: 500k × 40 B; medium: 100k × 160 B; large: 1k × 14 KB; huge: 8 × 2 MB with a 1.2 MB string, 2048 tags and 4096 scores). Every decoder is verified against `encoding/json` per shape before it is measured (`TestShapeComparisonCorrectness`). With the AVX2 string scanner active (every parser gets an identical loop: a destination preallocated before the timer, reused across iterations, and a per-iteration sink write):
+`BenchmarkShapeComparison` decodes ~14-20 MB of JSON in four record shapes with every parser (small: 500k × 40 B; medium: 100k × 160 B; large: 1k × 14 KB; huge: 8 × 2 MB with a 1.2 MB string, 2048 tags and 4096 scores). Every decoder is verified against `encoding/json` per shape before it is measured (`TestShapeComparisonCorrectness`). With the AVX2 string scanner active (every parser gets an identical loop: a destination preallocated before the timer and reused across iterations; no sink is needed — the calls are opaque and their errors are checked, so nothing can be optimized away):
 
 | Parser (MB/s) | Small | Medium | Large | Huge |
 | :--- | :--- | :--- | :--- | :--- |

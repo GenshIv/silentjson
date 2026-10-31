@@ -112,11 +112,9 @@ func BenchmarkPayloadFlavors(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				out, err := UnmarshalSlice(raw, reg, dst)
-				if err != nil {
+				if _, err := UnmarshalSlice(raw, reg, dst); err != nil {
 					b.Fatal(err)
 				}
-				sinkInt = out[0].ID
 			}
 		})
 
@@ -126,11 +124,9 @@ func BenchmarkPayloadFlavors(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				out, err := UnmarshalArrayParallel[benchpayload.Employee](raw, reg, dst)
-				if err != nil {
+				if _, err := UnmarshalArrayParallel[benchpayload.Employee](raw, reg, dst); err != nil {
 					b.Fatal(err)
 				}
-				sinkInt = out[0].ID
 			}
 		})
 
@@ -143,7 +139,6 @@ func BenchmarkPayloadFlavors(b *testing.B) {
 				if err := json.Unmarshal(raw, &dst); err != nil {
 					b.Fatal(err)
 				}
-				sinkInt = dst[0].ID
 			}
 		})
 	}
