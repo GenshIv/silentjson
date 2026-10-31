@@ -262,11 +262,7 @@ func fillRegistry(typ reflect.Type, reg *Registry) {
 					info.ElemType = field.Type.Elem()
 
 					info.Marshaler = func(fieldPtr unsafe.Pointer, buf []byte) []byte {
-						hdr := (*struct {
-							Data uintptr
-							Len  int
-							Cap  int
-						})(fieldPtr)
+						hdr := (*reflect.SliceHeader)(fieldPtr)
 
 						if hdr.Data == 0 {
 							return append(buf, "null"...)
@@ -278,12 +274,16 @@ func fillRegistry(typ reflect.Type, reg *Registry) {
 
 						buf = append(buf, '[')
 						elemSize := info.ElemType.Size()
+						// Array start converted first; element pointers are
+						// then derived from a real unsafe.Pointer so the
+						// arithmetic is checkptr-safe.
+						base := unsafe.Pointer(hdr.Data)
 
 						for i := 0; i < hdr.Len; i++ {
 							if i > 0 {
 								buf = append(buf, ',')
 							}
-							elemPtr := unsafe.Pointer(hdr.Data + uintptr(i)*elemSize)
+							elemPtr := unsafe.Pointer(uintptr(base) + uintptr(i)*elemSize)
 							buf = MarshalObject(elemPtr, info.Sub, buf)
 						}
 						buf = append(buf, ']')
@@ -296,11 +296,7 @@ func fillRegistry(typ reflect.Type, reg *Registry) {
 					info.ElemType = field.Type.Elem()
 
 					info.Marshaler = func(fieldPtr unsafe.Pointer, buf []byte) []byte {
-						hdr := (*struct {
-							Data uintptr
-							Len  int
-							Cap  int
-						})(fieldPtr)
+						hdr := (*reflect.SliceHeader)(fieldPtr)
 
 						if hdr.Data == 0 {
 							return append(buf, "null"...)
@@ -312,12 +308,15 @@ func fillRegistry(typ reflect.Type, reg *Registry) {
 
 						buf = append(buf, '[')
 						elemSize := info.ElemType.Size()
+						// See the struct-slice marshaler above: convert the
+						// array start before doing pointer arithmetic.
+						base := unsafe.Pointer(hdr.Data)
 
 						for i := 0; i < hdr.Len; i++ {
 							if i > 0 {
 								buf = append(buf, ',')
 							}
-							elemPtr := *(*unsafe.Pointer)(unsafe.Pointer(hdr.Data + uintptr(i)*elemSize))
+							elemPtr := *(*unsafe.Pointer)(unsafe.Pointer(uintptr(base) + uintptr(i)*elemSize))
 							if elemPtr == nil {
 								buf = append(buf, "null"...)
 							} else {
@@ -400,11 +399,7 @@ func fillRegistry(typ reflect.Type, reg *Registry) {
 				// Check if value is empty
 				switch field.Type.Kind() {
 				case reflect.Slice:
-					hdr := (*struct {
-						Data uintptr
-						Len  int
-						Cap  int
-					})(ptr)
+					hdr := (*reflect.SliceHeader)(ptr)
 					if hdr.Data == 0 || hdr.Len == 0 {
 						return buf
 					}

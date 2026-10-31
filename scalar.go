@@ -178,7 +178,7 @@ func findObjectBoundariesEarlyExitScalar(data []byte, chunks []Chunk) (int, int)
 					i++
 				}
 				i-- // Compensate for loop increment
-				start = i
+				start = i + 1
 			}
 		}
 	}
@@ -226,17 +226,23 @@ func findArrayElementsEarlyExitScalar(data []byte, chunks []Chunk) (int, int) {
 				if c == ']' {
 					if count < len(chunks) {
 						chunks[count] = Chunk{Start: start, End: i}
+						count++
 					}
-					count++
 					return count, 0
 				}
 				return count, depth
 			}
 		case ',':
 			if depth == 0 {
-				if count < len(chunks) {
-					chunks[count] = Chunk{Start: start, End: i}
+				if count >= len(chunks) {
+					// Early exit, mirroring the AVX2 contract: stop as soon
+					// as the chunk buffer is full. Callers resume scanning
+					// from chunks[count-1].End (the position of this comma);
+					// the empty Start==End chunk produced on resume is
+					// filtered out by the callers.
+					return count, depth
 				}
+				chunks[count] = Chunk{Start: start, End: i}
 				count++
 				// Inline space skipping to avoid function call in hot loop
 				i++
@@ -244,7 +250,7 @@ func findArrayElementsEarlyExitScalar(data []byte, chunks []Chunk) (int, int) {
 					i++
 				}
 				i-- // Compensate for loop increment
-				start = i
+				start = i + 1
 			}
 		}
 	}

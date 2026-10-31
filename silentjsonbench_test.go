@@ -180,7 +180,9 @@ func BenchmarkNestedComparison(b *testing.B) {
 			_, _ = dec.Token()
 			var emp Employee
 			for dec.More() {
-				_ = dec.Decode(&emp)
+				if err := dec.Decode(&emp); err != nil {
+					b.Fatal(err)
+				}
 			}
 		}
 	})
@@ -359,7 +361,9 @@ func BenchmarkLargeScaleComparison(b *testing.B) {
 		// Input is read-only for the parser (TestFixNoInputMutation),
 		// rawJSON is parsed directly without a defensive copy.
 		for i := 0; i < b.N; i++ {
-			_, _ = UnmarshalArrayParallel[Employee](rawJSON, reg, dst)
+			if _, err := UnmarshalArrayParallel[Employee](rawJSON, reg, dst); err != nil {
+				b.Fatal(err)
+			}
 		}
 	})
 
@@ -368,7 +372,9 @@ func BenchmarkLargeScaleComparison(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			_ = sonic.Unmarshal(rawJSON, &dst)
+			if err := sonic.Unmarshal(rawJSON, &dst); err != nil {
+				b.Fatal(err)
+			}
 		}
 	})
 
@@ -377,7 +383,9 @@ func BenchmarkLargeScaleComparison(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			_ = json.Unmarshal(rawJSON, &dst)
+			if err := json.Unmarshal(rawJSON, &dst); err != nil {
+				b.Fatal(err)
+			}
 		}
 	})
 

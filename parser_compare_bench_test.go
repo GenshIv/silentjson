@@ -150,6 +150,14 @@ func TestParserComparisonCorrectness(t *testing.T) {
 	}
 	check("silentjson", out)
 
+	// Same payload through the parallel decoder.
+	gotPar := make([]benchpayload.Employee, len(parserCmpSource))
+	outPar, err := UnmarshalArrayParallel[benchpayload.Employee](parserCmpJSON, reg, gotPar)
+	if err != nil {
+		t.Fatalf("silentjson parallel decode: %v", err)
+	}
+	check("silentjson-parallel", outPar)
+
 	// easyjson
 	var ez benchpayload.Employees
 	if err := easyjson.Unmarshal(parserCmpJSON, &ez); err != nil {

@@ -262,6 +262,12 @@ func parseRootSlice(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings b
 			oldSlice.Set(newSlice)
 		}
 
+		// Convert the backing-array start (an object start, so the
+		// conversion is checkptr-safe) BEFORE doing pointer arithmetic:
+		// deriving an element address from a raw uintptr fails checkptr
+		// because the runtime cannot prove the result stays inside the
+		// allocation.
+		base := unsafe.Pointer(header.Data)
 		var elemPtr unsafe.Pointer
 		if reg.ElemType.Kind() == reflect.Ptr {
 			// Для слайса указателей (например, []*Struct)
@@ -269,9 +275,9 @@ func parseRootSlice(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings b
 			nv := reflect.New(reg.ElemType.Elem())
 			elemPtr = nv.UnsafePointer()
 			// Записываем этот указатель в массив слайса
-			*(*unsafe.Pointer)(unsafe.Pointer(header.Data + uintptr(header.Len)*elemSize)) = elemPtr
+			*(*unsafe.Pointer)(unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)) = elemPtr
 		} else {
-			elemPtr = unsafe.Pointer(header.Data + uintptr(header.Len)*elemSize)
+			elemPtr = unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)
 			// Очистка памяти элемента
 			b := unsafe.Slice((*byte)(elemPtr), elemSize)
 			for j := range b {
@@ -736,13 +742,17 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 						oldSlice.Set(newSlice)
 					}
 
+					// Convert the array start first: arithmetic from a raw
+					// uintptr fails checkptr (see the comment in
+					// parseRootSlice).
+					base := unsafe.Pointer(header.Data)
 					var elemPtr unsafe.Pointer
 					if info.ElemType.Kind() == reflect.Ptr {
 						nv := reflect.New(info.ElemType.Elem())
 						elemPtr = nv.UnsafePointer()
-						*(*unsafe.Pointer)(unsafe.Pointer(header.Data + uintptr(header.Len)*elemSize)) = elemPtr
+						*(*unsafe.Pointer)(unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)) = elemPtr
 					} else {
-						elemPtr = unsafe.Pointer(header.Data + uintptr(header.Len)*elemSize)
+						elemPtr = unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)
 						// Zero the memory quickly using Go's optimized memclr
 						b := unsafe.Slice((*byte)(elemPtr), elemSize)
 						for j := range b {

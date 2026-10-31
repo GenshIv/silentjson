@@ -26,7 +26,12 @@ func BenchmarkSilentJSON_Architecture(b *testing.B) {
 		// The parser treats its input as read-only (TestFixNoInputMutation),
 		// so the shared rawJSON is parsed directly, no defensive copy.
 		for i := 0; i < b.N; i++ {
-			_, _ = UnmarshalArrayParallel[Employee](rawJSON, reg, dst)
+			// Errors are checked: a benchmark must measure real work, not a
+			// fast-failing error path (this exact pattern once hid a splitter
+			// bug behind 80 GB/s numbers).
+			if _, err := UnmarshalArrayParallel[Employee](rawJSON, reg, dst); err != nil {
+				b.Fatal(err)
+			}
 		}
 	})
 
@@ -36,7 +41,12 @@ func BenchmarkSilentJSON_Architecture(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			_, _ = UnmarshalArrayParallel[Employee](rawJSON, reg, dst)
+			// Errors are checked: a benchmark must measure real work, not a
+			// fast-failing error path (this exact pattern once hid a splitter
+			// bug behind 80 GB/s numbers).
+			if _, err := UnmarshalArrayParallel[Employee](rawJSON, reg, dst); err != nil {
+				b.Fatal(err)
+			}
 		}
 	})
 
@@ -45,7 +55,9 @@ func BenchmarkSilentJSON_Architecture(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			_ = sonic.Unmarshal(rawJSON, &dst)
+			if err := sonic.Unmarshal(rawJSON, &dst); err != nil {
+				b.Fatal(err)
+			}
 		}
 	})
 }
