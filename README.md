@@ -88,6 +88,18 @@ xychart-beta
     bar [2963, 671, 360, 322, 532, 206, 171, 163]
 ```
 
+#### Payload flavors: what do escapes and UTF-8 actually cost?
+
+The same 100k-record array rendered three ways (`BenchmarkPayloadFlavors`) separates the payload properties. The parser does UTF-16/UTF-8 work only on the `\uXXXX` branch of an escaped string; multibyte-but-unescaped text takes the zero-copy path with no unicode validation:
+
+| Flavor (100k records) | SilentJSON Serial | SilentJSON Parallel | Standard |
+| :--- | :--- | :--- | :--- |
+| clean (plain ASCII) | 537 MB/s | 3335 MB/s | 194 MB/s |
+| escaped (10% of strings contain `\"`/`\\`) | 541 MB/s | 3266 MB/s | 200 MB/s |
+| utf8 (multibyte runes: `Варшава_中央_łąka`) | 560 MB/s | 3437 MB/s | 204 MB/s |
+
+Takeaways, measured: escapes cost throughput nothing on this parser (they only add allocations for the decoded strings — ~1.2 MB per 16 MB payload), multibyte UTF-8 is free (the scanner looks for `"` and `\` bytes only), and the pre-audit tree could not even complete the escaped row — it failed with a chunk-boundary error (see the splitter fix in the CHANGELOG).
+
 ### Hardware Flexibility (AVX2 vs Pure Go Scalar)
 `silentjson` detects CPU features at runtime: AVX2 accelerates value skipping, space scanning and string appending when present; everything else falls back to an optimized pure Go implementation, so the library **never crashes** on older hardware.
 

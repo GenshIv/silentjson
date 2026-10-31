@@ -15,14 +15,23 @@
 - **checkptr/vet**: element pointers were derived by arithmetic from raw `uintptr` header fields — crashed under `-race` (checkptr) and is the pattern vet flags. The backing-array start is now converted to `unsafe.Pointer` before element arithmetic; hand-rolled anonymous header structs in registry.go replaced with `reflect.SliceHeader`. `go vet` is clean outside the `.s` files; full suite passes with `-race`.
 
 ### Performance regression analysis (measured, not guessed)
-The visible slowdown versus the pre-audit tree had three distinct layers, now separated:
-1. **Broken AVX2 splitter measured as fast** — pre-audit multi-GB/s parallel numbers were produced by a fast-failing or silently-lossy error path (benchmarks discarded errors). Not a real regression: those numbers never represented correct parsing.
-2. **Scalar splitter as temporary bottleneck** — while the AVX2 splitter was disabled for the fix, parallel throughput was bound by the scalar producer (~1.35 GB/s). Repaired now (3.0 GB/s).
-3. **Correctness cost of the audit patch, kept deliberately** — escaped strings decode into fresh allocations instead of mutating the input buffer, and streams copy strings per-decoder. On a chaos payload this roughly halves the old (unsound) stream Decode throughput; in exchange the parser never modifies its input, one buffer can be parsed concurrently, and RAW zones stay byte-exact. `bytes.IndexByte` now backs the string scanner, recovering part of this cost.
+BenchmarkPayloadFlavors runs the same 100k-record payload as clean ASCII, with escapes (10% of strings), and with multibyte UTF-8 — on both the pre-audit tree (1a869d8) and the current one — so every claim below is a measurement:
+
+| Serial UnmarshalSlice, MB/s | pre-audit (1a869d8) | current |
+| :--- | :--- | :--- |
+| clean (plain ASCII) | 622 | 537 (-14%) |
+| escaped (10% of strings) | **fails** (chunk-boundary error) | 541 |
+| utf8 (multibyte runes) | 650 | 560 (-14%) |
+
+1. **Not unicode.** Multibyte UTF-8 costs nothing on either tree (the scanner looks for `"` and `\` bytes; UTF-16/UTF-8 work happens only on the `\uXXXX` branch of escaped strings). The utf8 flavor is the *fastest* row on both trees.
+2. **Not escapes either — for throughput.** Escapes add allocations for decoded strings (~1.2 MB per 16 MB payload) but no measurable time; the pre-audit tree could not complete the escaped row at all (it failed on corrupted chunk boundaries).
+3. **The real, uniform cost: ~14% on the serial parse path**, identical on clean and utf8 payloads — the strict number grammar (leading zeros, range checks, rejected garbage), width-aware field access and the readJSONString scanner replacing the old assembly short-string parser. This is the audit's correctness bill, not an escape/unicode penalty.
+4. **Pre-audit multi-GB/s parallel numbers were never real** — they measured a fast-failing or silently-lossy error path (benchmarks discarded errors). With the repaired AVX2 splitter, correct parallel parsing runs at ~3.0 GB/s and the raw stream paths fully recover (NextRawBlock ~4.0 GB/s).
+5. **Stream Decode (386 MB/s vs the old unsound 562)** — the remaining gap is the per-decoder string copying (the internal buffer is overwritten by the io.Reader, so zero-copy aliases would dangle), plus the same ~14% strict-parse cost.
 
 ### Changed (benchmarks)
 - Benchmark hygiene: payload generation, registries, destination buffers and reusable parser state are strictly outside the timed region; defensive per-iteration `copy(buf, raw)` removed (the parser guarantees read-only input); every benchmark loop now checks errors (`b.Fatal`) — a benchmark must measure real work, not a fast error path.
-- New `BenchmarkParserComparison`: identical ~16 MB chaos payload (rotating key order, unknown fields, escaped strings, nulls) decoded by silentjson (serial + parallel), easyjson, simdjson-go, sonic, goccy, jsoniter and encoding/json, with `TestParserComparisonCorrectness` verifying every decoder against encoding/json field-by-field (it caught three API-misuse bugs in the simdjson extraction during development).
+- New `BenchmarkPayloadFlavors` (clean / escaped / utf8 variants of one payload, with a round-trip correctness test) and `BenchmarkParserComparison`: identical ~16 MB chaos payload (rotating key order, unknown fields, escaped strings, nulls) decoded by silentjson (serial + parallel), easyjson, simdjson-go, sonic, goccy, jsoniter and encoding/json, with `TestParserComparisonCorrectness` verifying every decoder against encoding/json field-by-field (it caught three API-misuse bugs in the simdjson extraction during development).
 - New `benchpayload` package: comparison types with easyjson codegen (`-no_std_marshalers`, so other parsers keep their own code paths). Regenerate with `go run github.com/mailru/easyjson/easyjson@latest -no_std_marshalers benchpayload/payload.go`.
 - New deps: `github.com/minio/simdjson-go v0.4.5`, `github.com/mailru/easyjson v0.9.2`.
 - CI: go-version aligned with go.mod, `-race` job added.
