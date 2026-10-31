@@ -141,12 +141,28 @@ func (d *StreamDecoder[T]) nextChunk() ([]byte, error) {
 
 		// If we reached here, the element is incomplete in the current buffer.
 		if d.isEOF {
-			// If EOF and we have some data, return it as the last element (though it's malformed JSON)
-			if d.tail > d.head {
-				chunk := d.buf[d.head:d.tail]
-				d.head = d.tail
-				return chunk, nil
+			// EOF with leftover data: the splitter could not find one
+			// complete element (no trailing comma or bracket), so the
+			// remainder may be either a VALID last element cut off from
+			// its terminator, or a stream truncated in the middle of a
+			// value. Validate the fragment grammatically: hand it out
+			// only if it is exactly one complete JSON value; report a
+			// clean truncation error otherwise (the old behavior handed
+			// malformed fragments out as records).
+			j := d.head
+			for j < d.tail && (charTable[d.buf[j]]&charSpace) != 0 {
+				j++
 			}
+			if j < d.tail {
+				frag := d.buf[j:d.tail]
+				end, err := skipValueStrict(frag, 0)
+				if err == nil && end == len(frag) {
+					d.head = d.tail
+					return frag, nil
+				}
+				return nil, fmt.Errorf("%w: stream truncated inside a value", ErrUnexpectedEOF)
+			}
+			d.head = d.tail
 			return nil, ErrUnexpectedEOF
 		}
 		if err := d.fill(); err != nil {
