@@ -204,10 +204,10 @@ We benchmarked generating a JSON array of 100,000 complex objects (`BenchmarkLar
 
 | Library | Throughput (MB/s) | Latency (ms/op) | Allocated | Allocs/op |
 | :--- | :--- | :--- | :--- | :--- |
-| **SilentJSON** | **1207** 👑 | **13.2** 👑 | **0 (Zero-Alloc)** 👑 | **0** 👑 |
-| Protobuf | 462 | 14.7 | 6.8 MB | 1 |
-| Standard (`encoding/json`) | 431 | 37.8 | 15.9 MB | 3 |
-| Sonic* | 415 | 38.4 | 15.9 MB | 5 |
+| **SilentJSON** | **1292** 👑 | **12.3** 👑 | **0 (Zero-Alloc)** 👑 | **0** 👑 |
+| Protobuf | 434 | 15.6 | 6.8 MB | 1 |
+| Standard (`encoding/json`) | 419 | 37.9 | 15.9 MB | 3 |
+| Sonic* | 420 | 37.8 | 15.9 MB | 5 |
 
 \* fallback mode on this machine.
 
@@ -215,8 +215,8 @@ We benchmarked generating a JSON array of 100,000 complex objects (`BenchmarkLar
 xychart-beta
     title "Serialization Throughput: 100k Objects (MB/s, Higher is Better)"
     x-axis ["SilentJSON", "Protobuf", "Standard", "Sonic*"]
-    y-axis "MB/s" 0 --> 1300
-    bar [1207, 462, 431, 415]
+    y-axis "MB/s" 0 --> 1400
+    bar [1292, 434, 419, 420]
 ```
 
 ### Benchmark Methodology & Fairness
