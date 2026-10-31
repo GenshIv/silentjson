@@ -119,6 +119,8 @@ Takeaways, measured: escapes cost throughput nothing on this parser (they only a
 
 Shape effects worth knowing: on many small records SilentJSON's registry-based decoder is untouchable (5x the nearest reflection parser); on very large records the string scanner dominates and the AVX2 implementation decides the ranking — it lifted huge-record parsing 4.7x (1935 → 9180 MB/s), putting silentjson ahead of even code-generated easyjson there.
 
+Why every parser dips on Medium (including this one): MB/s counts bytes, but parsing cost is mostly per field and per record. Medium records are the most field-dense shape — a float (`strconv` float parsing alone is ~14% of the serial profile), a nested object and two arrays per ~160 bytes — so they carry the worst work-per-byte ratio (~1.6 ns/byte vs 0.46 for Small, 0.26 for Large, 0.11 for Huge). Long strings in Large/Huge scan at near memory speed and dilute the per-field cost, while Small records have only the cheapest field types. The dip is a property of the workload, not of any parser: all seven dip identically on this shape, and the pre-audit tree measured the same ~620-650 MB/s there.
+
 ### Hardware Flexibility (AVX2 vs Pure Go Scalar)
 `silentjson` detects CPU features at runtime: AVX2 accelerates value skipping, space scanning and string appending when present; everything else falls back to an optimized pure Go implementation, so the library **never crashes** on older hardware.
 
