@@ -1843,3 +1843,86 @@ fae_done:
     MOVQ R12, ret1+56(FP)
     RET
 
+
+// findQuoteOrEscapeAVX2 finds the first '"' or '\' in b.
+// Returns (index, isEscape); (-1, false) when neither byte occurs.
+// ABI: b (slice, 24B) in, idx (int, 8B) + isEscape (bool, 1B) out => $0-40.
+TEXT ·findQuoteOrEscapeAVX2(SB), NOSPLIT, $0-40
+    MOVQ b_base+0(FP), SI
+    MOVQ b_len+8(FP), BX
+    XORQ R12, R12            // i (CX is reserved as the shift-count register)
+
+    MOVQ $0x2222222222222222, R10
+    MOVQ R10, X8
+    VPBROADCASTQ X8, Y8      // '"'
+    MOVQ $0x5c5c5c5c5c5c5c5c, R10
+    MOVQ R10, X9
+    VPBROADCASTQ X9, Y9      // '\'
+
+fqoe_loop:
+    MOVQ BX, R11
+    SUBQ R12, R11
+    CMPQ R11, $32
+    JL   fqoe_tail
+
+    VMOVDQU (SI)(R12*1), Y0
+    VPCMPEQB Y8, Y0, Y1      // positions of '"'
+    VPMOVMSKB Y1, AX         // quote mask
+    VPCMPEQB Y9, Y0, Y2      // positions of '\'
+    VPMOVMSKB Y2, DX         // backslash mask
+    MOVL AX, R11
+    ORL  DX, R11             // combined
+    TESTL R11, R11
+    JZ   fqoe_next
+
+    BSFL R11, R8             // lowest set bit = first special byte
+    // classify: is the hit byte a quote? shift the quote mask right by
+    // the bit index and test bit 0 (register shifts must go via CL)
+    MOVL R8, CX
+    MOVL AX, R9
+    SHRL CX, R9
+    TESTL $1, R9
+    JZ   fqoe_hit_escape
+    MOVB $0, R10             // isEscape = false
+    JMP  fqoe_hit_common
+fqoe_hit_escape:
+    MOVB $1, R10             // isEscape = true
+fqoe_hit_common:
+    MOVQ R12, R9
+    MOVQ R9, R11
+    ADDQ R8, R11             // idx = i + bit
+    MOVQ R11, R9
+    JMP  fqoe_ret
+
+fqoe_next:
+    ADDQ $32, R12
+    JMP  fqoe_loop
+
+fqoe_tail:
+    CMPQ R12, BX
+    JGE  fqoe_notfound
+    MOVBQZX (SI)(R12*1), AX
+    CMPB AX, $0x22
+    JEQ  fqoe_tail_quote
+    CMPB AX, $0x5c
+    JEQ  fqoe_tail_escape
+    INCQ R12
+    JMP  fqoe_tail
+fqoe_tail_quote:
+    MOVQ R12, R9
+    MOVB $0, R10
+    JMP  fqoe_ret
+fqoe_tail_escape:
+    MOVQ R12, R9
+    MOVB $1, R10
+    JMP  fqoe_ret
+
+fqoe_notfound:
+    MOVQ $-1, R9
+    MOVB $0, R10
+
+fqoe_ret:
+    VZEROUPPER
+    MOVQ R9, idx+24(FP)
+    MOVB R10, isEscape+32(FP)
+    RET

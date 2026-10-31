@@ -31,3 +31,38 @@ type Employee struct {
 //
 //easyjson:json
 type Employees []Employee
+
+// SmallRec is the "many tiny records" benchmark shape: three fields,
+// ~40 bytes per record.
+//
+//easyjson:json
+type SmallRec struct {
+	ID   int    `json:"id"`
+	Code string `json:"code"`
+	OK   bool   `json:"ok"`
+}
+
+// SmallRecs is the root array type for easyjson (methods are generated
+// on named types only).
+//
+//easyjson:json
+type SmallRecs []SmallRec
+
+// LargeRec is the "few large / very large records" benchmark shape: the
+// same field set as Employee plus kilobyte-scale strings and big arrays;
+// record size is controlled by the generator.
+//
+//easyjson:json
+type LargeRec struct {
+	ID          int      `json:"id"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Tags        []string `json:"tags"`
+	Scores      []int    `json:"scores"`
+	Address     Address  `json:"address"`
+	Active      bool     `json:"active"`
+	Balance     float64  `json:"balance"`
+}
+
+//easyjson:json
+type LargeRecs []LargeRec

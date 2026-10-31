@@ -35,3 +35,12 @@ func skipValueAVX2(raw []byte, start int) int
 
 //go:noescape
 func skipSpaceAVX2(data []byte, start int) int
+
+// findQuoteOrEscapeAVX2 finds the first '"' or '\' in b, scanning 32-byte
+// blocks with AVX2 (scalar loop for the sub-32-byte tail and short inputs).
+// Returns the index of the first hit (-1 if none) and whether it is a
+// backslash. Implemented in find_quote_amd64.s; correctness is pinned by
+// TestFindQuoteOrEscapeSweep against the scalar reference.
+//
+//go:noescape
+func findQuoteOrEscapeAVX2(b []byte) (idx int, isEscape bool)

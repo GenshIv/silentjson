@@ -85,9 +85,13 @@ func skipSpaceASM(data []byte, start int) int {
 	return skipSpaceScalar(data, start)
 }
 
-// findQuoteOrEscapeASM finds the first '"' or '\\' in b.
-// NOTE: no AVX2 implementation exists for this one yet (the symbol declared
-// in asm.go was never implemented), so we always use the scalar fallback.
+// findQuoteOrEscapeASM finds the first '"' or '\\' in b. The AVX2
+// implementation (32-byte blocks, scalar tail) replaced the two
+// bytes.IndexByte scans in findQuoteOrEscapeScalar on the hot string path;
+// equivalence is pinned by TestFindQuoteOrEscapeSweep.
 func findQuoteOrEscapeASM(b []byte) (idx int, isEscape bool) {
+	if hasAVX2 {
+		return findQuoteOrEscapeAVX2(b)
+	}
 	return findQuoteOrEscapeScalar(b)
 }
