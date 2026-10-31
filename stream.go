@@ -160,7 +160,13 @@ func (d *StreamDecoder[T]) nextChunk() ([]byte, error) {
 					d.head = d.tail
 					return frag, nil
 				}
-				return nil, fmt.Errorf("%w: stream truncated inside a value", ErrUnexpectedEOF)
+				d.head = d.tail
+				// Partial fragment: hand the bytes out together with the
+				// truncation error, io.Reader-style (n > 0, err != nil).
+				// A stream consumer may need the tail (e.g. to resume
+				// after a reconnect); callers that only want complete
+				// records just check the error first.
+				return frag, fmt.Errorf("%w: stream truncated inside a value", ErrUnexpectedEOF)
 			}
 			d.head = d.tail
 			return nil, ErrUnexpectedEOF
@@ -204,15 +210,20 @@ func (d *StreamDecoder[T]) Next(cb func(obj *T) bool) error {
 // NextRaw reads the next object from the JSON array and returns its raw JSON bytes.
 // This completely skips the unmarshaling phase, providing extreme throughput for raw extraction.
 // A copy of the underlying bytes is returned to ensure memory safety.
+// NextRaw returns the raw bytes of the next object in the stream.
+// On a stream truncated inside a value it returns the partial fragment
+// TOGETHER with the truncation error (io.Reader semantics): consumers
+// that need the tail bytes (e.g. to resume after a reconnect) have
+// them, consumers that only want complete records check the error.
 func (d *StreamDecoder[T]) NextRaw() ([]byte, error) {
 	chunk, err := d.nextChunk()
-	if err != nil {
+	if err != nil && len(chunk) == 0 {
 		return nil, err
 	}
 	// Copy the chunk because d.buf will be overwritten by future reads
 	res := make([]byte, len(chunk))
 	copy(res, chunk)
-	return res, nil
+	return res, err
 }
 
 // StreamResult holds the result of an asynchronous stream parse operation.

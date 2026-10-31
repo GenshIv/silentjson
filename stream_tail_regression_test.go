@@ -55,14 +55,16 @@ func drainDecode(dec *StreamDecoder[tailRec]) (ids []int, err error) {
 	}
 }
 
-func drainRaw(dec *StreamDecoder[tailRec]) (n int, err error) {
+func drainRaw(dec *StreamDecoder[tailRec]) (n int, lastFrag []byte, err error) {
 	for {
-		_, e := dec.NextRaw()
+		chunk, e := dec.NextRaw()
 		if e == io.EOF {
-			return n, nil
+			return n, nil, nil
 		}
 		if e != nil {
-			return n, e
+			// io.Reader semantics: a truncated stream delivers the partial
+			// fragment together with the error.
+			return n, chunk, e
 		}
 		n++
 	}
@@ -82,9 +84,9 @@ func TestStreamTailComplete(t *testing.T) {
 				t.Errorf("%s (step=%d): decode got %v err=%v, want [1 2] nil", name, step, ids, err)
 			}
 			dec2 := NewStreamDecoder[tailRec](&chunkReader{data: []byte(data), step: step}, reg)
-			n, err := drainRaw(dec2)
-			if err != nil || n != 2 {
-				t.Errorf("%s (step=%d): raw got %d err=%v, want 2 nil", name, step, n, err)
+			n, frag, err := drainRaw(dec2)
+			if err != nil || n != 2 || len(frag) != 0 {
+				t.Errorf("%s (step=%d): raw got %d frag=%q err=%v, want 2 records, no fragment, nil", name, step, n, frag, err)
 			}
 		}
 	}
@@ -104,9 +106,13 @@ func TestStreamTailTruncated(t *testing.T) {
 			if len(ids) == 0 {
 				t.Errorf("%s (step=%d): valid prefix records were lost", name, step)
 			}
-			n, err := drainRaw(NewStreamDecoder[tailRec](&chunkReader{data: []byte(data), step: step}, reg))
+			n, frag, err := drainRaw(NewStreamDecoder[tailRec](&chunkReader{data: []byte(data), step: step}, reg))
 			if err == nil {
-				t.Errorf("%s (step=%d): raw delivered a malformed fragment as a record (n=%d)", name, step, n)
+				t.Errorf("%s (step=%d): truncation not reported (n=%d)", name, step, n)
+			}
+			// the partial fragment must still be delivered alongside the error
+			if len(frag) == 0 {
+				t.Errorf("%s (step=%d): truncated tail fragment lost (io.Reader semantics: bytes + error)", name, step)
 			}
 		}
 	}
