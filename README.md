@@ -20,7 +20,7 @@
 In a world of high-performance Go libraries, `silentjson` stands out by providing massive speed boosts with zero developer friction.
 
 - **Fast Parallel Parsing:** For large JSON arrays, `UnmarshalArrayParallel` distributes records across all CPU cores. On a Ryzen 9 7950X3D it sustains ~3.0 GB/s with full struct binding and ~1.1k allocations per 100k records — 14x faster than `encoding/json` on the same payload, with two orders of magnitude fewer allocations (see benchmarks below).
-- **Fast Serial Parsing:** On a single core, `UnmarshalSlice` handles a "chaos" payload (rotating key order, unknown fields, escaped strings, nulls) at ~530 MB/s — faster than easyjson and jsoniter and 2.6x `encoding/json`, with near-zero garbage (see benchmarks below).
+- **Fast Serial Parsing:** On a single core, `UnmarshalSlice` handles a "chaos" payload (rotating key order, unknown fields, escaped strings, nulls) at ~590 MB/s — faster than easyjson and jsoniter and 2.8x `encoding/json`, with near-zero garbage; on small or very large records it reaches 2.1-9.2 GB/s (see the shape matrix below).
 - **Zero Code Generation:** This is the key. Unlike other fast JSON libraries, you don't need to generate any code. There are no extra build steps, no `go:generate` commands to remember, and no complex CI/CD pipeline configurations. **It works out-of-the-box, just like the standard library, only much faster.** This makes it trivial to integrate into any project, including those deployed in Docker or Kubernetes environments.
 
 > [!TIP]
@@ -56,10 +56,10 @@ Every parser decodes the identical ~16 MB payload: 100,000 `Employee` records in
 
 | Library | Objects/sec | Throughput (MB/s) | Latency (ms/op) | Allocated | Allocs/op |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **SilentJSON** (Parallel) | **18.1M** 👑 | **2963** 👑 | **5.5** 👑 | **~290 KB** 👑 | **~1150** 👑 |
+| **SilentJSON** (Parallel) | **17.7M** 👑 | **2884** 👑 | **5.7** 👑 | **~290 KB** 👑 | **~1150** 👑 |
 | Goccy | 4.1M | 671 | 24.4 | 16.5 MB | 1 |
 | Jsoniter | 2.2M | 360 | 45.5 | 70.9 MB | 954k |
-| **SilentJSON** (Serial) | 1.9M | 532 | 30.7 | **~130 KB** 👑 | **~1030** 👑 |
+| **SilentJSON** (Serial) | 2.1M | 593 | 25.3 | **~130 KB** 👑 | **~1030** 👑 |
 | Easyjson (codegen) | 2.0M | 322 | 50.7 | 15.4 MB | 534k |
 | Standard (`encoding/json`) | 1.26M | 206 | 79.3 | 1.6 MB | 108k |
 | simdjson-go (AST + manual extraction) | 1.0M | 171 | 95.6 | 306 MB | 1.4M |
@@ -85,7 +85,7 @@ xychart-beta
     title "Parsing Speed: 100k Chaos Objects (MB/s, Higher is Better)"
     x-axis ["SilentJSON Par", "Goccy", "Jsoniter", "Easyjson", "SilentJSON", "Standard", "simdjson", "Sonic*"]
     y-axis "MB/s" 0 --> 3200
-    bar [2963, 671, 360, 322, 532, 206, 171, 163]
+    bar [2884, 671, 360, 322, 593, 206, 171, 163]
 ```
 
 #### Payload flavors: what do escapes and UTF-8 actually cost?
@@ -94,11 +94,30 @@ The same 100k-record array rendered three ways (`BenchmarkPayloadFlavors`) separ
 
 | Flavor (100k records) | SilentJSON Serial | SilentJSON Parallel | Standard |
 | :--- | :--- | :--- | :--- |
-| clean (plain ASCII) | 537 MB/s | 3335 MB/s | 194 MB/s |
-| escaped (10% of strings contain `\"`/`\\`) | 541 MB/s | 3266 MB/s | 200 MB/s |
-| utf8 (multibyte runes: `Варшава_中央_łąka`) | 560 MB/s | 3437 MB/s | 204 MB/s |
+| clean (plain ASCII) | 627 MB/s | 3066 MB/s | 210 MB/s |
+| escaped (10% of strings contain `\"`/`\\`) | 613 MB/s | 3254 MB/s | 206 MB/s |
+| utf8 (multibyte runes: `Варшава_中央_łąka`) | 634 MB/s | 3320 MB/s | 207 MB/s |
 
 Takeaways, measured: escapes cost throughput nothing on this parser (they only add allocations for the decoded strings — ~1.2 MB per 16 MB payload), multibyte UTF-8 is free (the scanner looks for `"` and `\` bytes only), and the pre-audit tree could not even complete the escaped row — it failed with a chunk-boundary error (see the splitter fix in the CHANGELOG).
+
+#### Record shapes: many small vs few large vs very large
+
+`BenchmarkShapeComparison` decodes ~14-20 MB of JSON in four record shapes with every parser (small: 500k × 40 B; medium: 100k × 160 B; large: 1k × 14 KB; huge: 8 × 2 MB with a 1.2 MB string, 2048 tags and 4096 scores). Every decoder is verified against `encoding/json` per shape before it is measured (`TestShapeComparisonCorrectness`). With the AVX2 string scanner active:
+
+| Parser (MB/s) | Small | Medium | Large | Huge |
+| :--- | :--- | :--- | :--- | :--- |
+| **SilentJSON Serial** | 2140 | 627 | 3933 | **9180** 👑 |
+| **SilentJSON Parallel** | **3821** 👑 | 2941 | 3885 | 8956 |
+| Easyjson (codegen) | 394 | 338 | 1586 | 5884 |
+| Goccy | 939 | 621 | 1316 | 1415 |
+| Jsoniter | 556 | 454 | 1164 | 1636 |
+| simdjson-go (AST) | 169 | 170 | 1040 | 2270 |
+| Standard (`encoding/json`) | 198 | 192 | 750 | 1249 |
+| Sonic* | 157 | 156 | 462 | 653 |
+
+\* fallback mode on this machine. Parallel numbers on the 100k-record shapes carry ±7% run-to-run noise.
+
+Shape effects worth knowing: on many small records SilentJSON's registry-based decoder is untouchable (5x the nearest reflection parser); on very large records the string scanner dominates and the AVX2 implementation decides the ranking — it lifted huge-record parsing 4.7x (1935 → 9180 MB/s), putting silentjson ahead of even code-generated easyjson there.
 
 ### Hardware Flexibility (AVX2 vs Pure Go Scalar)
 `silentjson` detects CPU features at runtime: AVX2 accelerates value skipping, space scanning and string appending when present; everything else falls back to an optimized pure Go implementation, so the library **never crashes** on older hardware.
@@ -589,11 +608,13 @@ Current results on AMD Ryzen 9 7950X3D (medians of 3 runs, error-checked loops; 
 
 ```
 Parser comparison, 100k chaos objects (16 MB):
-SilentJSON Parallel:  2,963 MB/s
-Goccy:                  671 MB/s
-SilentJSON Serial:      532 MB/s
-Easyjson:               322 MB/s
-Standard JSON:          206 MB/s
+SilentJSON Parallel:  2,884 MB/s
+Goccy:                  698 MB/s
+SilentJSON Serial:      593 MB/s
+Easyjson:               326 MB/s
+Standard JSON:          209 MB/s
+
+Record shapes (serial): small 2140 / medium 627 / large 3933 / huge 9180 MB/s
 
 Streaming, 3M records (500 MB):
 NextRawBlock:         4,012 MB/s

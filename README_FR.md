@@ -15,9 +15,9 @@
 ### 100k objets, charge « chaos » (re-mesuré en mai 2026)
 | Parseur | Débit (Mo/s) |
 | :--- | :--- |
-| **SilentJSON (Parallèle)** | **2 963 Mo/s** ⭐ |
+| **SilentJSON (Parallèle)** | **2 884 Mo/s** ⭐ |
 | Goccy | 671 Mo/s |
-| **SilentJSON (Série)** | **532 Mo/s** |
+| **SilentJSON (Série)** | **593 Mo/s** |
 | Standard (Go) | 206 Mo/s |
 
 > Les anciens débits parallèles de plusieurs Go/s étaient invalides (benchmarks ignorant les erreurs ; le découpeur AVX2 perdait des enregistrements sur les échappements). Tableaux complets dans [README.md](README.md).
