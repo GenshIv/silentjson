@@ -1474,9 +1474,32 @@ TEXT ·findArrayElementsEarlyExitAVX2(SB), NOSPLIT, $8-64
     XORQ CX, CX        // i
     XORQ R8, R8        // totalCount
     XORQ R12, R12      // totalDepth
-    XORQ R10, R10      // start
     XORQ R11, R11      // inString
     MOVQ $0, 0(SP)     // escape_carry
+
+    // Skip leading whitespace before initializing the chunk start — the
+    // scalar splitters do the same (skipSpaceScalar). Without it, an
+    // empty array with inner whitespace ("[ ]") made the scanner emit a
+    // phantom NON-empty chunk from the buffer start to ']', which
+    // callers then parsed as a broken element.
+fae_skip_ws:
+    CMPQ CX, BX
+    JGE  fae_ws_end
+    MOVB (SI)(CX*1), AL
+    CMPB AL, $0x20
+    JEQ  fae_ws_adv
+    CMPB AL, $0x09
+    JEQ  fae_ws_adv
+    CMPB AL, $0x0A
+    JEQ  fae_ws_adv
+    CMPB AL, $0x0D
+    JEQ  fae_ws_adv
+    JMP  fae_ws_end
+fae_ws_adv:
+    INCQ CX
+    JMP  fae_skip_ws
+fae_ws_end:
+    MOVQ CX, R10       // start = first non-whitespace byte
 
     TESTQ SI, SI
     JZ    fae_done

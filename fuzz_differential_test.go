@@ -234,6 +234,12 @@ func FuzzUnmarshalSliceDifferential(f *testing.F) {
 		f.Add([]byte("[" + s + "]"))
 	}
 	f.Add([]byte(`[{"id":1},{"id":2}]`))
+	f.Add([]byte(`[]`))
+	f.Add([]byte(`[ ]`))
+	f.Add([]byte(`[ {"id":1} ]`))
+	f.Add([]byte(`[,{}]`))
+	f.Add([]byte(`[{},,{}]`))
+	f.Add([]byte(`[{},]`))
 	f.Add([]byte(`[{"tags":["a\"b"]}]`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		trimmed := bytes.TrimLeft(data, " \t\n\r")

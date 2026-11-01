@@ -303,3 +303,77 @@ func refSplitterBoundaries(inner []byte) [][2]int {
 	}
 	return out
 }
+
+// TestSplitterEmptyArrayWithWhitespace pins the "[ ]" bug: the AVX2
+// splitter initialized its chunk start at the buffer beginning instead of
+// the first non-whitespace byte, so an empty array with inner whitespace
+// produced a phantom non-empty chunk (leading space .. ']') that callers
+// parsed as a broken element — UnmarshalSlice("[ ]") failed with
+// "insufficient capacity: need 1" or "expected object start".
+func TestSplitterEmptyArrayWithWhitespace(t *testing.T) {
+	for _, in := range []string{`[]`, `[ ]`, "[\t]", "[\r\n ]", `[ ,]`, `[ {"id":1} ]`} {
+		inner := append([]byte(in[1:len(in)-1]), ']')
+		want := refSplitterBoundaries(inner)
+		for name, fn := range splitterUnderTest() {
+			buf := make([]Chunk, 16)
+			count, _ := fn(inner, buf)
+			// every emitted chunk must either be empty (phantom, filtered
+			// by callers) or start at a non-whitespace byte
+			for i := 0; i < count && i < len(buf); i++ {
+				s, e := buf[i].Start, buf[i].End
+				if s == e {
+					continue
+				}
+				if inner[s] == ' ' || inner[s] == '\t' || inner[s] == '\n' || inner[s] == '\r' {
+					t.Errorf("%s: %q chunk[%d] starts at whitespace byte %q", name, in, i, inner[s])
+				}
+				_ = e
+			}
+			_ = want
+		}
+	}
+
+	reg := BuildRegistry(reflect.TypeOf(splitterRec{}))
+	for _, in := range []string{`[]`, `[ ]`, "[\t]", "[\r\n ]", `[ {"id":1} ]`} {
+		dst := make([]splitterRec, 8)
+		out, err := UnmarshalSlice([]byte(in), reg, dst)
+		if err != nil {
+			t.Errorf("UnmarshalSlice(%q): %v", in, err)
+			continue
+		}
+		wantN := 0
+		if in != `[]` && in != `[ ]` && in != "[\t]" && in != "[\r\n ]" {
+			wantN = 1
+		}
+		if len(out) != wantN {
+			t.Errorf("UnmarshalSlice(%q): got %d records, want %d", in, len(out), wantN)
+		}
+		// and the parallel path agrees
+		dst2 := make([]splitterRec, 8)
+		out2, err2 := UnmarshalArrayParallel[splitterRec]([]byte(in), reg, dst2)
+		if err2 != nil || len(out2) != wantN {
+			t.Errorf("UnmarshalArrayParallel(%q): %d records, err=%v", in, len(out2), err2)
+		}
+	}
+
+	// stream decoder over the same inputs (nextChunk shares the splitter)
+	for _, in := range []string{`[]`, `[ ]`} {
+		dec := NewStreamDecoder[splitterRec](bytes.NewReader([]byte(in)), reg)
+		n := 0
+		for {
+			var v splitterRec
+			err := dec.Decode(&v)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Errorf("stream Decode over %q: %v", in, err)
+				break
+			}
+			n++
+		}
+		if n != 0 {
+			t.Errorf("stream Decode over %q: got %d records, want 0", in, n)
+		}
+	}
+}

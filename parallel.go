@@ -48,6 +48,29 @@ func arrayTailClosed(inner []byte, pos int) bool {
 	return i == len(inner)
 }
 
+// validArrayGap reports whether gap is a legal separator between array
+// elements: only whitespace before the first element, and exactly one
+// comma surrounded by whitespace between the others. Leading, doubled
+// or stray commas must be rejected like encoding/json does — the
+// splitter emits phantom empty chunks on commas and callers filter them
+// silently, so the separators themselves need this check.
+func validArrayGap(gap []byte, expectComma bool) bool {
+	i := 0
+	for i < len(gap) && (charTable[gap[i]]&charSpace) != 0 {
+		i++
+	}
+	if expectComma {
+		if i >= len(gap) || gap[i] != ',' {
+			return false
+		}
+		i++
+		for i < len(gap) && (charTable[gap[i]]&charSpace) != 0 {
+			i++
+		}
+	}
+	return i == len(gap)
+}
+
 func emptyArrayRemnant(inner []byte) bool {
 	i := 0
 	for i < len(inner) && (charTable[inner[i]]&charSpace) != 0 {
@@ -123,6 +146,14 @@ func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 		reg.chunkPool.Put(buf[:cap(buf)])
 		return target, nil
 	}
+	prevEnd := 0
+	for i := 0; i < count; i++ {
+		if !validArrayGap(rawInner[prevEnd:buf[i].Start], i > 0) {
+			reg.chunkPool.Put(buf[:cap(buf)])
+			return nil, fmt.Errorf("%w: expected ',' between array elements at %d", ErrTypeMismatch, buf[i].Start)
+		}
+		prevEnd = buf[i].End
+	}
 	structSize := unsafe.Sizeof(*new(T))
 	basePtr := unsafe.Pointer(&target[0])
 
@@ -183,6 +214,8 @@ func UnmarshalArrayParallel[T any](raw []byte, reg *Registry, dst []T) ([]T, err
 	var itemsFound int
 	var offset int
 	var fatalErr error
+	prevElemEnd := 0
+	hadElements := false
 
 	// Fast path for single core or tiny arrays
 	if workers <= 1 {
@@ -210,6 +243,26 @@ func UnmarshalArrayParallel[T any](raw []byte, reg *Registry, dst []T) ([]T, err
 			}
 			if maxDepth != 0 && count < batchSize {
 				fatalErr = errors.New("malformed json: unbalanced braces or brackets")
+				break
+			}
+			for i := 0; i < validCount; i++ {
+				gapStart := prevElemEnd
+				expectComma := hadElements
+				if !hadElements && offset > 0 {
+					// resuming mid-array: the scan window starts at the
+					// separating comma left by the previous batch
+					gapStart = offset
+					expectComma = true
+				}
+				if !validArrayGap(rawInner[gapStart:buf[i].Start], expectComma) {
+					reg.chunkPool.Put(buf[:cap(buf)])
+					fatalErr = fmt.Errorf("%w: expected ',' between array elements at %d", ErrTypeMismatch, buf[i].Start)
+					break
+				}
+				prevElemEnd = buf[i].End
+				hadElements = true
+			}
+			if fatalErr != nil {
 				break
 			}
 			if validCount == 0 && !emptyArrayRemnant(rawInner[offset:]) {
@@ -317,6 +370,24 @@ func UnmarshalArrayParallel[T any](raw []byte, reg *Registry, dst []T) ([]T, err
 			goto CLEANUP
 		}
 
+		for i := 0; i < validCount; i++ {
+			gapStart := prevElemEnd
+			expectComma := hadElements
+			if !hadElements && offset > 0 {
+				// resuming mid-array: the scan window starts at the
+				// separating comma left by the previous batch
+				gapStart = offset
+				expectComma = true
+			}
+			if !validArrayGap(rawInner[gapStart:batch[i].Start], expectComma) {
+				reg.chunkPool.Put(batch[:cap(batch)])
+				fatalErr = fmt.Errorf("%w: expected ',' between array elements at %d", ErrTypeMismatch, batch[i].Start)
+				goto CLEANUP
+			}
+			prevElemEnd = batch[i].End
+			hadElements = true
+		}
+
 		if itemsFound+validCount > len(dst) {
 			reg.chunkPool.Put(batch[:cap(batch)])
 			fatalErr = fmt.Errorf("dst capacity insufficient: need %d", itemsFound+validCount)
@@ -340,7 +411,7 @@ CLEANUP:
 	close(taskCh)
 	wg.Wait()
 
-	if fatalErr == nil && !arrayTailClosed(rawInner, offset) {
+	if fatalErr == nil && !arrayTailClosed(rawInner, prevElemEnd) {
 		fatalErr = fmt.Errorf("%w: unterminated array (missing closing bracket or trailing data)", ErrTypeMismatch)
 	}
 
