@@ -695,3 +695,47 @@ func TestFixOmitEmptyWidths(t *testing.T) {
 		t.Errorf("non-zero omitempty = %s", got)
 	}
 }
+
+// ---------- P0-A (found auditing v2.1.0): bare "[" silently accepted ----------
+
+// The windowed rewrite of UnmarshalSlice added an early return for the
+// zero-records case that bypassed arrayTailClosed: a bare "[" was accepted
+// as an empty array while "[ " was rejected — the truncated envelope fell
+// through on a loop-entry accident. The epilogue must run on every path.
+func TestFixEnvelopeTruncationRejected(t *testing.T) {
+	type row struct {
+		ID int `json:"id"`
+	}
+	reg := BuildRegistry(reflect.TypeOf(row{}))
+
+	truncated := []string{
+		"[",  // bare bracket: was accepted as 0 records, nil error
+		"[ ", // was rejected — the asymmetry proved it was an accident
+		"[ \t\n",
+		`[{"id":1}`,   // truncated right after a complete element
+		`[ {"id":1} `, // element + truncated tail
+	}
+	for _, raw := range truncated {
+		if vals, err := UnmarshalSlice([]byte(raw), reg, make([]row, 4)); err == nil {
+			t.Errorf("UnmarshalSlice(%q) = %d records, nil error; truncated envelope must be rejected", raw, len(vals))
+		}
+		if parVals, err := UnmarshalArrayParallel([]byte(raw), reg, make([]row, 4)); err == nil {
+			t.Errorf("UnmarshalArrayParallel(%q) = %d records, nil error", raw, len(parVals))
+		}
+		tolVals, probs := UnmarshalSliceTolerant([]byte(raw), reg, make([]row, 4))
+		if len(probs) == 0 {
+			t.Errorf("UnmarshalSliceTolerant(%q): truncated envelope reported no problem", raw)
+		}
+		_ = tolVals // the tolerant salvage may legitimately keep a complete element
+	}
+
+	complete := []string{"[]", "[ ]", "[\t\n]", `[{"id":1}]`, `[ {"id":1} ]`}
+	for _, raw := range complete {
+		if _, err := UnmarshalSlice([]byte(raw), reg, make([]row, 4)); err != nil {
+			t.Errorf("UnmarshalSlice(%q): %v", raw, err)
+		}
+		if _, err := UnmarshalArrayParallel([]byte(raw), reg, make([]row, 4)); err != nil {
+			t.Errorf("UnmarshalArrayParallel(%q): %v", raw, err)
+		}
+	}
+}

@@ -206,9 +206,13 @@ func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 	if err != nil {
 		return nil, err
 	}
-	if total == 0 {
-		return dst[:0], nil
-	}
+	// No early return for total == 0: the tail epilogue must run on EVERY
+	// path, or bytes that belong to neither a record nor a validated
+	// separator fall through silently. With no scanned windows
+	// prevEndAbs == 0, so the check covers the whole inner region and
+	// rejects a bare "[" (previously accepted as an empty array, while
+	// "[ " was rejected - an accident of the loop-entry condition).
+	// "[]"/"[ ]" still succeed: their remnant is whitespace + ']' + ws.
 	if !arrayTailClosed(rawInner, prevEndAbs) {
 		return nil, fmt.Errorf("%w: unterminated array (missing closing bracket or trailing data)", ErrTypeMismatch)
 	}
