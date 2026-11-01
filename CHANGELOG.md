@@ -1,5 +1,51 @@
 # Changelog
 
+## [2.1.1] - 2026-11-01 — audit fixes: envelope epilogue + float boundary
+
+Two post-release findings from the differential audit of 2.1.0 — both of
+the "silently wrong" class, both introduced by 2.1.0 itself, both in code
+paths the release advertised as proven (the differential fuzzer / the
+bit-exact float fast path).
+
+### Fixed — UnmarshalSlice accepted a bare "[" as an empty array
+The windowed rewrite added an early return for the zero-records case that
+bypassed `arrayTailClosed`: `UnmarshalSlice("[")` returned 0 records and a
+nil error, while `"[ "` was rejected (and while `encoding/json` rejects
+both) — the outcome depended on a loop-entry accident. The tail epilogue
+now runs on every path: with no scanned windows `prevEndAbs == 0`, so the
+same check covers the whole inner region. `UnmarshalArrayParallel` and
+`UnmarshalSliceTolerant` were already correct (the tolerant API reports
+the unterminated array as a Problem on every such input). The
+differential fuzzer finds the old behavior in ~2s; its crasher is in the
+seed corpus (`da8972bff0a45585`). Pinned by
+`TestFixEnvelopeTruncationRejected` (strict reject, parallel reject,
+tolerant report, complete envelopes still accepted). After the fix:
+120s differential fuzz round clean (622k execs).
+
+### Fixed — parseFloatFast double-rounded at the 2^53 mantissa boundary
+The pre-accumulation guard `mant > (1<<53)/10` let exactly one extra digit
+through at the boundary (`mant == 900719925474099`), accumulating
+mantissas in [9007199254740990, 9007199254740999] — the first values past
+2^53, where `float64(mant)` is inexact and the single multiply/divide
+double-rounds up to 1 ULP away from strconv: `"9007199254740995e-1"`
+parsed as ...996 instead of ...995; also `"900719925474099.5"`, the
+negated forms and the `e-22` variant. The randomized bit-exact test could
+never hit this (a ~10-value window at 9e15; ~2e-10 expected hits in 200k
+samples). The check now happens after accumulation
+(`mant > 1<<53` → refuse): `mant == 2^53` stays on the fast path (exact),
+anything past it falls back to strconv. Measured: no serial throughput
+change (Medium within run-to-run noise on the same machine). Pinned by
+`TestFastFloatMantissaBoundary` (exhaustive over the boundary window ×
+8 exponent shapes, plus direct fast-path refusal assertions) and new
+edge seeds.
+
+### Docs — corrected stale small-record claims
+The "untouchable, 5x the nearest reflection parser" sentence and the
+0.46 ns/byte figure for Small records were computed from the
+truncation-inflated 2169 MB/s (a 31%-truncated decode, see 2.1.0);
+corrected to the honest figures. Parallel small-record leadership
+remains (3555 MB/s — 3.9x the fastest reflection parser).
+
 ## [2.1.0] - 2026-11-01 — correctness, tolerant mode, honest benchmarks
 
 This release turns the library from "fast but silently corrupting on
