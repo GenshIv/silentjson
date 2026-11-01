@@ -31,6 +31,11 @@ type StreamDecoder[T any] struct {
 	// A separating comma is only legal between two elements, so the
 	// comma-skip branches consult this flag to reject leading commas.
 	deliveredFirst bool
+	// tolerant: a damaged record or separator is reported to problemSink
+	// and skipped instead of failing the stream — the caller decides what
+	// the problems mean. nil sink (default) keeps the strict behavior.
+	tolerant    bool
+	problemSink func(Problem)
 	// afterComma is true between a skipped separating comma and the next
 	// delivered element: a second comma in that window is a duplicate
 	// separator and must be rejected.
@@ -129,12 +134,21 @@ func (d *StreamDecoder[T]) nextChunk() ([]byte, error) {
 		if d.buf[d.head] == ',' {
 			// A comma is only legal BETWEEN two elements: leading (before
 			// anything was delivered), trailing (followed by ']') and
-			// doubled are malformed and must be rejected, not skipped.
+			// doubled are malformed. Strict mode rejects them; tolerant
+			// mode reports the problem and skips the stray comma so the
+			// healthy records keep flowing.
 			if !d.deliveredFirst {
-				return nil, fmt.Errorf("%w: leading comma at %d", ErrTypeMismatch, d.head)
-			}
-			if d.afterComma {
-				return nil, fmt.Errorf("%w: duplicate comma at %d", ErrTypeMismatch, d.head)
+				if d.tolerant {
+					d.report(d.head, -1, fmt.Errorf("%w: leading comma", ErrTypeMismatch))
+				} else {
+					return nil, fmt.Errorf("%w: leading comma at %d", ErrTypeMismatch, d.head)
+				}
+			} else if d.afterComma {
+				if d.tolerant {
+					d.report(d.head, -1, fmt.Errorf("%w: duplicate comma", ErrTypeMismatch))
+				} else {
+					return nil, fmt.Errorf("%w: duplicate comma at %d", ErrTypeMismatch, d.head)
+				}
 			}
 			d.afterComma = true
 			d.head++
@@ -142,6 +156,10 @@ func (d *StreamDecoder[T]) nextChunk() ([]byte, error) {
 				d.head++
 			}
 			if d.head < d.tail && d.buf[d.head] == ']' {
+				if d.tolerant {
+					d.report(d.head-1, -1, fmt.Errorf("%w: trailing comma", ErrTypeMismatch))
+					continue
+				}
 				return nil, fmt.Errorf("%w: trailing comma at %d", ErrTypeMismatch, d.head-1)
 			}
 			continue
@@ -192,6 +210,12 @@ func (d *StreamDecoder[T]) nextChunk() ([]byte, error) {
 				// A stream consumer may need the tail (e.g. to resume
 				// after a reconnect); callers that only want complete
 				// records just check the error first.
+				if d.tolerant {
+					// the healthy prefix has already been delivered;
+					// report the truncation and end the stream cleanly
+					d.report(j, -1, fmt.Errorf("%w: stream truncated inside a value", ErrUnexpectedEOF))
+					return nil, io.EOF
+				}
 				return frag, fmt.Errorf("%w: stream truncated inside a value", ErrUnexpectedEOF)
 			}
 			d.head = d.tail
@@ -203,13 +227,42 @@ func (d *StreamDecoder[T]) nextChunk() ([]byte, error) {
 	}
 }
 
+// Tolerant switches the decoder into tolerant mode: damaged records and
+// structural defects are reported through the sink and skipped, and the
+// stream keeps delivering the healthy records. Must be called before the
+// first read. A nil sink keeps the strict fail-fast behavior.
+func (d *StreamDecoder[T]) Tolerant(sink func(Problem)) *StreamDecoder[T] {
+	d.tolerant = sink != nil
+	d.problemSink = sink
+	return d
+}
+
+func (d *StreamDecoder[T]) report(offset, record int, err error) {
+	if d.problemSink != nil {
+		d.problemSink(Problem{Offset: offset, Record: record, Err: err})
+	}
+}
+
 // Decode reads the next object from the JSON array and unmarshals it into obj.
 func (d *StreamDecoder[T]) Decode(obj *T) error {
-	chunk, err := d.nextChunk()
-	if err != nil {
-		return err
+	for {
+		chunk, err := d.nextChunk()
+		if err != nil {
+			if err == io.EOF && d.tolerant && d.head >= d.tail {
+				return io.EOF
+			}
+			return err
+		}
+		if err := parseObjectStrict(chunk, d.reg, unsafe.Pointer(obj), d.copyStrings); err != nil {
+			if d.tolerant {
+				// damaged record: report and move on to the next one
+				d.report(d.head-len(chunk), -1, err)
+				continue
+			}
+			return err
+		}
+		return nil
 	}
-	return parseObjectStrict(chunk, d.reg, unsafe.Pointer(obj), d.copyStrings)
 }
 
 // Next processes the remainder of the JSON array, unmarshaling each object into an internal reusable instance
@@ -225,6 +278,11 @@ func (d *StreamDecoder[T]) Next(cb func(obj *T) bool) error {
 			return err
 		}
 		if err := parseObjectStrict(chunk, d.reg, unsafe.Pointer(&d.obj), d.copyStrings); err != nil {
+			if d.tolerant {
+				// damaged record: report and move on to the next one
+				d.report(d.head-len(chunk), -1, err)
+				continue
+			}
 			return err
 		}
 		if !cb(&d.obj) {

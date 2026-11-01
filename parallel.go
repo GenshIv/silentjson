@@ -182,6 +182,111 @@ func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 	return target, nil
 }
 
+// UnmarshalSliceTolerant decodes as much of a JSON array as possible,
+// isolating defects instead of failing the whole input: a record that
+// fails to parse is skipped (and reported), structural issues (stray
+// commas, unterminated array, trailing data) are reported, and every
+// cleanly decoded record is returned. Deciding what to do with the
+// problems is the caller's job; UnmarshalSlice is the fail-fast policy
+// over the same machinery.
+func UnmarshalSliceTolerant[T any](raw []byte, reg *Registry, dst []T) ([]T, []Problem) {
+	if len(raw) == 0 {
+		return dst[:0], nil
+	}
+
+	buf := reg.chunkPool.Get().([]Chunk)
+	need := estimateChunkCapacity(raw)
+	if cap(buf) < need {
+		buf = make([]Chunk, need)
+	}
+
+	startIdx := skipSpaceASM(raw, 0)
+	if startIdx < 0 || startIdx >= len(raw) || raw[startIdx] != '[' {
+		reg.chunkPool.Put(buf[:cap(buf)])
+		return nil, []Problem{{Offset: 0, Record: -1, Err: errors.New("expected '[' at the beginning of array")}}
+	}
+	rawInner := raw[startIdx+1:]
+
+	count, depth := findArrayElementsEarlyExitASM(rawInner, buf[:len(buf)])
+	if count < 0 || count > len(buf) {
+		reg.chunkPool.Put(buf[:cap(buf)])
+		return nil, []Problem{{Offset: 0, Record: -1, Err: fmt.Errorf("asm returned invalid count: %d", count)}}
+	}
+	validCount := 0
+	for i := 0; i < count; i++ {
+		if buf[i].Start != buf[i].End {
+			buf[validCount] = buf[i]
+			validCount++
+		}
+	}
+	count = validCount
+
+	var problems problemList
+	if count == 0 && !emptyArrayRemnant(rawInner) {
+		problems.add(0, -1, fmt.Errorf("%w: no complete element found (unbalanced braces or unterminated string, scanner depth %d)", ErrTypeMismatch, depth))
+		reg.chunkPool.Put(buf[:cap(buf)])
+		return dst[:0], problems.orNil()
+	}
+	if count > len(dst) {
+		reg.chunkPool.Put(buf[:cap(buf)])
+		return nil, []Problem{{Offset: 0, Record: -1, Err: fmt.Errorf("insufficient capacity: need %d, have %d", count, len(dst))}}
+	}
+
+	structSize := unsafe.Sizeof(*new(T))
+	basePtr := unsafe.Pointer(&dst[0])
+	prevEnd := 0
+	written := 0
+	for i := 0; i < count; i++ {
+		chunk := buf[i]
+		if chunk.Start < 0 || chunk.End > len(rawInner) || chunk.Start >= chunk.End {
+			problems.add(chunk.Start, i, fmt.Errorf("%w: invalid element boundaries", ErrTypeMismatch))
+			continue
+		}
+		if !validArrayGap(rawInner[prevEnd:chunk.Start], i > 0) {
+			// The element extents themselves are valid (the splitter
+			// produced them); only the separator between them is wrong.
+			problems.add(chunk.Start, -1, fmt.Errorf("%w: bad separator between elements", ErrTypeMismatch))
+		}
+		prevEnd = chunk.End
+
+		itemPtr := unsafe.Pointer(uintptr(basePtr) + (uintptr(written) * structSize))
+		if err := ParseObject(rawInner[chunk.Start:chunk.End], reg, itemPtr); err != nil {
+			problems.add(chunk.Start, i, err)
+			continue // skip the damaged record, keep parsing
+		}
+		written++
+	}
+
+	reg.chunkPool.Put(buf[:cap(buf)])
+	if !arrayTailClosed(rawInner, prevEnd) {
+		// The array is not terminated, but the tail may still hold one
+		// complete element the splitter never emitted (it only cuts at a
+		// comma or bracket). Salvage it: parse the remainder as a single
+		// value and report the unterminated array.
+		tail := rawInner[prevEnd:]
+		k := 0
+		for k < len(tail) && (charTable[tail[k]]&charSpace) != 0 {
+			k++
+		}
+		if k < len(tail) && tail[k] == ',' {
+			k++
+			for k < len(tail) && (charTable[tail[k]]&charSpace) != 0 {
+				k++
+			}
+		}
+		if k < len(tail) && written < len(dst) {
+			if _, verr := skipValueStrict(tail, k); verr == nil {
+				itemPtr := unsafe.Pointer(uintptr(basePtr) + (uintptr(written) * structSize))
+				if perr := ParseObject(tail[k:], reg, itemPtr); perr == nil {
+					written++
+				}
+			}
+		}
+		problems.add(prevEnd, -1, fmt.Errorf("%w: unterminated array (missing closing bracket or trailing data)", ErrTypeMismatch))
+	}
+	return dst[:written], problems.orNil()
+}
+
 type parseTask struct {
 	chunks  []Chunk
 	baseIdx int
