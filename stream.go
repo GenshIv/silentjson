@@ -27,6 +27,14 @@ type StreamDecoder[T any] struct {
 	// overwritten by the io.Reader, so zero-copy aliases would dangle.
 	// P1-4 fix: it is per-decoder state, NOT a mutation of the shared registry.
 	copyStrings bool
+	// deliveredFirst is true once the first element has been handed out.
+	// A separating comma is only legal between two elements, so the
+	// comma-skip branches consult this flag to reject leading commas.
+	deliveredFirst bool
+	// afterComma is true between a skipped separating comma and the next
+	// delivered element: a second comma in that window is a duplicate
+	// separator and must be rejected.
+	afterComma bool
 }
 
 // NewStreamDecoder creates a new streaming decoder.
@@ -119,7 +127,23 @@ func (d *StreamDecoder[T]) nextChunk() ([]byte, error) {
 			return nil, io.EOF
 		}
 		if d.buf[d.head] == ',' {
+			// A comma is only legal BETWEEN two elements: leading (before
+			// anything was delivered), trailing (followed by ']') and
+			// doubled are malformed and must be rejected, not skipped.
+			if !d.deliveredFirst {
+				return nil, fmt.Errorf("%w: leading comma at %d", ErrTypeMismatch, d.head)
+			}
+			if d.afterComma {
+				return nil, fmt.Errorf("%w: duplicate comma at %d", ErrTypeMismatch, d.head)
+			}
+			d.afterComma = true
 			d.head++
+			for d.head < d.tail && (charTable[d.buf[d.head]]&charSpace) != 0 {
+				d.head++
+			}
+			if d.head < d.tail && d.buf[d.head] == ']' {
+				return nil, fmt.Errorf("%w: trailing comma at %d", ErrTypeMismatch, d.head-1)
+			}
 			continue
 		}
 
@@ -127,10 +151,12 @@ func (d *StreamDecoder[T]) nextChunk() ([]byte, error) {
 		var chunkBuf [1]Chunk
 		count, _ := findArrayElementsEarlyExitASM(d.buf[d.head:d.tail], chunkBuf[:])
 
-		if count > 0 {
+		if count > 0 && chunkBuf[0].End > 0 {
 			// Complete element found!
 			// chunkBuf[0].End is the index of the comma or closing bracket
 			endIdx := d.head + chunkBuf[0].End
+			d.deliveredFirst = true
+			d.afterComma = false
 			chunk := d.buf[d.head:endIdx]
 
 			// If it ended on a bracket, NextRawBlock/nextChunk handles it by seeing ']' on next call
@@ -454,14 +480,25 @@ func (d *StreamDecoder[T]) NextRawBlock(maxCount int, maxSize int) ([]byte, int,
 			return nil, 0, io.EOF
 		}
 
-		// Skip leading comma if present
+		// Skip the separating comma if present, with the same rules as
+		// nextChunk: only between two elements, never leading or trailing.
 		if d.buf[d.head] == ',' {
+			if !d.deliveredFirst {
+				return nil, 0, fmt.Errorf("%w: leading comma at %d", ErrTypeMismatch, d.head)
+			}
+			if d.afterComma {
+				return nil, 0, fmt.Errorf("%w: duplicate comma at %d", ErrTypeMismatch, d.head)
+			}
+			d.afterComma = true
 			d.head++
 			for d.head < d.tail && (charTable[d.buf[d.head]]&charSpace) != 0 {
 				d.head++
 			}
 			if d.head >= d.tail {
 				continue
+			}
+			if d.buf[d.head] == ']' {
+				return nil, 0, fmt.Errorf("%w: trailing comma at %d", ErrTypeMismatch, d.head-1)
 			}
 		}
 
@@ -488,12 +525,45 @@ func (d *StreamDecoder[T]) NextRawBlock(maxCount int, maxSize int) ([]byte, int,
 		}
 
 		if count > 0 {
+			// Filter phantom empty chunks (stray commas) out of the count
+			// and validate the separators between the real elements.
+			real := 0
+			prevEnd := 0
+			for i := 0; i < count; i++ {
+				if chunks[i].Start == chunks[i].End {
+					continue
+				}
+				// Separators BETWEEN scan windows are consumed by the
+				// comma branch before the window starts, so only gaps
+				// between elements INSIDE the window expect a comma here.
+				expectComma := real > 0
+				gapStart := prevEnd
+				if !validArrayGap(dataToScan[gapStart:chunks[i].Start], expectComma) {
+					d.reg.chunkPool.Put(chunks[:cap(chunks)])
+					return nil, 0, fmt.Errorf("%w: expected ',' between array elements at %d", ErrTypeMismatch, d.head+chunks[i].Start)
+				}
+				prevEnd = chunks[i].End
+				chunks[real] = chunks[i]
+				real++
+			}
+			if real == 0 {
+				d.reg.chunkPool.Put(chunks[:cap(chunks)])
+				if d.isEOF {
+					return nil, 0, ErrUnexpectedEOF
+				}
+				if err := d.fill(); err != nil {
+					return nil, 0, err
+				}
+				continue
+			}
 			// Complete elements found!
-			endIdx := d.head + chunks[count-1].End
+			endIdx := d.head + chunks[real-1].End
 			res := d.buf[d.head:endIdx]
 			d.head = endIdx
+			d.deliveredFirst = true
+			d.afterComma = false
 			d.reg.chunkPool.Put(chunks[:cap(chunks)])
-			return res, count, nil
+			return res, real, nil
 		}
 		d.reg.chunkPool.Put(chunks[:cap(chunks)])
 

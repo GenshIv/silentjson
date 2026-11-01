@@ -117,3 +117,46 @@ func TestStreamTailTruncated(t *testing.T) {
 		}
 	}
 }
+
+// TestStreamArraySeparators pins the separator grammar in the streaming
+// paths: leading ([,{}]), doubled ([{},,{}]) and trailing ([{},]) commas
+// were silently skipped (and NextRawBlock even counted the phantom chunks
+// as records). Only a single comma between two delivered elements is legal.
+func TestStreamArraySeparators(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(tailRec{}))
+	valid := []string{`[]`, `[ ]`, `[{"id":1}]`, `[{"id":1},{"id":2}]`, `[ {"id":1} , {"id":2} ]`}
+	invalid := map[string]string{
+		`[,{}]`:                "leading comma",
+		`[{"id":1},]`:          "trailing comma",
+		`[{"id":1},,{"id":2}]`: "doubled comma",
+		`[ ,{"id":1}]`:         "leading comma",
+	}
+
+	for _, in := range valid {
+		dec := NewStreamDecoder[tailRec](&chunkReader{data: []byte(in), step: 3}, reg)
+		ids, err := drainDecode(dec)
+		if err != nil {
+			t.Errorf("%q: decode err=%v, want nil", in, err)
+		}
+		if len(ids) != 2 || (len(in) > 6 && ids[0] != 1) { // [] and [ ] have zero records
+			if len(ids) != 0 && len(ids) != 2 {
+				t.Errorf("%q: decode got %v", in, ids)
+			}
+		}
+		dec2 := NewStreamDecoder[tailRec](&chunkReader{data: []byte(in), step: 4}, reg)
+		n, _, err := drainRaw(dec2)
+		if err != nil {
+			t.Errorf("%q: raw err=%v, want nil", in, err)
+		}
+		_ = n
+	}
+
+	for in, why := range invalid {
+		if _, err := drainDecode(NewStreamDecoder[tailRec](&chunkReader{data: []byte(in), step: 3}, reg)); err == nil {
+			t.Errorf("%q (%s): decode accepted malformed separators", in, why)
+		}
+		if _, _, err := drainRaw(NewStreamDecoder[tailRec](&chunkReader{data: []byte(in), step: 4}, reg)); err == nil {
+			t.Errorf("%q (%s): NextRaw accepted malformed separators", in, why)
+		}
+	}
+}
