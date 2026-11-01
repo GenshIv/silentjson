@@ -124,7 +124,13 @@ func TestStreamTailTruncated(t *testing.T) {
 // as records). Only a single comma between two delivered elements is legal.
 func TestStreamArraySeparators(t *testing.T) {
 	reg := BuildRegistry(reflect.TypeOf(tailRec{}))
-	valid := []string{`[]`, `[ ]`, `[{"id":1}]`, `[{"id":1},{"id":2}]`, `[ {"id":1} , {"id":2} ]`}
+	valid := map[string]int{
+		`[]`:                      0,
+		`[ ]`:                     0,
+		`[{"id":1}]`:              1,
+		`[{"id":1},{"id":2}]`:     2,
+		`[ {"id":1} , {"id":2} ]`: 2,
+	}
 	invalid := map[string]string{
 		`[,{}]`:                "leading comma",
 		`[{"id":1},]`:          "trailing comma",
@@ -132,23 +138,15 @@ func TestStreamArraySeparators(t *testing.T) {
 		`[ ,{"id":1}]`:         "leading comma",
 	}
 
-	for _, in := range valid {
-		dec := NewStreamDecoder[tailRec](&chunkReader{data: []byte(in), step: 3}, reg)
-		ids, err := drainDecode(dec)
-		if err != nil {
-			t.Errorf("%q: decode err=%v, want nil", in, err)
+	for in, wantN := range valid {
+		ids, err := drainDecode(NewStreamDecoder[tailRec](&chunkReader{data: []byte(in), step: 3}, reg))
+		if err != nil || len(ids) != wantN {
+			t.Errorf("%q: decode got %d records err=%v, want %d nil", in, len(ids), err, wantN)
 		}
-		if len(ids) != 2 || (len(in) > 6 && ids[0] != 1) { // [] and [ ] have zero records
-			if len(ids) != 0 && len(ids) != 2 {
-				t.Errorf("%q: decode got %v", in, ids)
-			}
+		n, _, err := drainRaw(NewStreamDecoder[tailRec](&chunkReader{data: []byte(in), step: 4}, reg))
+		if err != nil || n != wantN {
+			t.Errorf("%q: raw got %d records err=%v, want %d nil", in, n, err, wantN)
 		}
-		dec2 := NewStreamDecoder[tailRec](&chunkReader{data: []byte(in), step: 4}, reg)
-		n, _, err := drainRaw(dec2)
-		if err != nil {
-			t.Errorf("%q: raw err=%v, want nil", in, err)
-		}
-		_ = n
 	}
 
 	for in, why := range invalid {
