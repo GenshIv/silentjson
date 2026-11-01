@@ -33,7 +33,7 @@ func TestFastFloatBitExact(t *testing.T) {
 	}
 	for _, s := range edge {
 		want, wantErr := strconv.ParseFloat(s, 64)
-		got, ok := parseJSONFloat([]byte(s))
+		got, ok, _ := parseJSONFloat([]byte(s))
 		if wantErr != nil {
 			t.Fatalf("strconv rejected seed %q: %v", s, wantErr)
 		}
@@ -72,7 +72,7 @@ func TestFastFloatBitExact(t *testing.T) {
 		if err != nil {
 			continue // out of float range entirely: skip
 		}
-		got, ok := parseJSONFloat([]byte(s))
+		got, ok, _ := parseJSONFloat([]byte(s))
 		if !ok {
 			t.Fatalf("parseJSONFloat rejected %q", s)
 		}
@@ -102,7 +102,7 @@ func TestFastFloatMantissaBoundary(t *testing.T) {
 			if err != nil {
 				t.Fatalf("strconv rejected %q", s)
 			}
-			got, ok := parseJSONFloat([]byte(s))
+			got, ok, _ := parseJSONFloat([]byte(s))
 			if !ok {
 				t.Fatalf("parseJSONFloat rejected %q", s)
 			}
@@ -118,13 +118,13 @@ func TestFastFloatMantissaBoundary(t *testing.T) {
 		"-9007199254740995e-1", "9007199254740995e-22",
 		"900719925474099.5", // same mantissa via the fraction form
 	} {
-		if _, ok := parseFloatFast([]byte(s)); ok {
+		if _, ok, _ := parseFloatFast([]byte(s)); ok {
 			t.Errorf("parseFloatFast(%q) accepted: float64(mant) would be inexact", s)
 		}
 	}
 	// ...while the exact boundary stays on it.
 	for _, s := range []string{"9007199254740991", "9007199254740992"} {
-		if _, ok := parseFloatFast([]byte(s)); !ok {
+		if _, ok, _ := parseFloatFast([]byte(s)); !ok {
 			t.Errorf("parseFloatFast(%q) refused: mant <= 2^53 is exact and must stay fast", s)
 		}
 	}
@@ -134,11 +134,11 @@ func TestFastFloatRejectsGarbage(t *testing.T) {
 	bad := []string{"", "-", "1.", ".5", "01", "1e", "1e+", "1e999", "0x1p2",
 		"Inf", "NaN", "+1", "1_000", "1.2.3", "--1"}
 	// 1e-999 is VALID: like strconv and encoding/json, underflow yields 0
-	if v, ok := parseJSONFloat([]byte("1e-999")); !ok || v != 0 {
+	if v, ok, _ := parseJSONFloat([]byte("1e-999")); !ok || v != 0 {
 		t.Errorf("1e-999: got (%v,%v), want (0,true) like encoding/json", v, ok)
 	}
 	for _, s := range bad {
-		if v, ok := parseJSONFloat([]byte(s)); ok {
+		if v, ok, _ := parseJSONFloat([]byte(s)); ok {
 			t.Errorf("%q accepted as %v", s, v)
 		}
 	}

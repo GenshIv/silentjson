@@ -192,13 +192,26 @@ func validJSONNumber(b []byte) bool {
 }
 
 // parseJSONFloat parses a strict JSON number token into a float64.
-// Range errors (±Inf) are rejected, matching encoding/json.
+// Range errors (±Inf) are rejected, matching encoding/json. The third
+// result reports an input truncated mid-number (unexpected EOF): ok=false
+// with truncated=true means the token is a proper prefix of a valid
+// number and the input ended; the value then carries the partial parsed
+// so far (0 when none is recoverable exactly).
 // pow10[i] = 10^i for i in [0,22]: every value is exactly representable
 // as a float64, which is what makes the fast path below bit-exact.
 var pow10 = [23]float64{1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22}
 
 // parseFloatFast handles the common number shapes (up to 16 significant
 // digits, |decimal exponent| <= 22) in a single validating pass.
+//
+// Results: (value, ok, truncated). ok and truncated are never both true.
+// truncated reports an input cut off in the middle of the number grammar
+// (b is a proper prefix of a valid JSON number — "12.", "1.5e", "1.5e+",
+// "-"): the value is then the best effort accumulated before the input
+// ran out ("12." → 12, "1.5e+" → 1.5), so the caller can report an
+// unexpected EOF without throwing the partial data away. ok=false with
+// truncated=false means real garbage — or an out-of-envelope number for
+// the strconv fallback to decide.
 //
 // Bit-exactness argument: while the accumulated mantissa stays <= 2^53
 // float64(mant) is exact, and 10^k is exactly representable for k <= 22,
@@ -212,7 +225,7 @@ var pow10 = [23]float64{1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 
 // exponents, subnormals near the boundaries) also reports not-ok and falls
 // back to the strconv path, which also produces the correct strict grammar
 // error for garbage.
-func parseFloatFast(b []byte) (float64, bool) {
+func parseFloatFast(b []byte) (v float64, ok bool, truncated bool) {
 	i := 0
 	neg := false
 	if i < len(b) && b[i] == '-' {
@@ -220,7 +233,9 @@ func parseFloatFast(b []byte) (float64, bool) {
 		i++
 	}
 	if i >= len(b) {
-		return 0, false
+		// "" is garbage; "-" is a prefix of "-1" — the input ended
+		// where a digit was required. Nothing parsed yet either way.
+		return 0, false, neg
 	}
 
 	var mant uint64
@@ -240,27 +255,32 @@ func parseFloatFast(b []byte) (float64, bool) {
 				// multiply/divide then double-rounds and can
 				// land 1 ULP off strconv (e.g. 9007199254740995e-1).
 				// mant == 2^53 stays fast: it is exact.
-				return 0, false
+				return 0, false, false
 			}
 			digits++
 			i++
 		}
 	} else {
-		return 0, false
+		return 0, false, false
 	}
 
 	exp10 := 0
 	// fraction
 	if i < len(b) && b[i] == '.' {
 		i++
-		if i >= len(b) || b[i] < '0' || b[i] > '9' {
-			return 0, false
+		if i >= len(b) {
+			// "12." — the fraction needs at least one digit and the
+			// input ended first: truncation, partial value 12.
+			return partialFloat(neg, mant, exp10), false, true
+		}
+		if b[i] < '0' || b[i] > '9' {
+			return 0, false, false // "12.x": grammar broke before the input did
 		}
 		for i < len(b) && b[i] >= '0' && b[i] <= '9' {
 			d := uint64(b[i] - '0')
 			mant = mant*10 + d
 			if mant > 1<<53 {
-				return 0, false // same 2^53 boundary as above
+				return 0, false, false // same 2^53 boundary as above
 			}
 			digits++
 			exp10--
@@ -268,7 +288,7 @@ func parseFloatFast(b []byte) (float64, bool) {
 		}
 	}
 	if digits == 0 {
-		return 0, false
+		return 0, false, false
 	}
 	// exponent
 	if i < len(b) && (b[i] == 'e' || b[i] == 'E') {
@@ -280,27 +300,32 @@ func parseFloatFast(b []byte) (float64, bool) {
 			}
 			i++
 		}
-		if i >= len(b) || b[i] < '0' || b[i] > '9' {
-			return 0, false
+		if i >= len(b) {
+			// "12e", "12e+" — the exponent needs at least one digit
+			// and the input ended first: truncation. exp10 already
+			// carries the fraction scale here ("1.5e" → 1.5).
+			return partialFloat(neg, mant, exp10), false, true
+		}
+		if b[i] < '0' || b[i] > '9' {
+			return 0, false, false // "12ex"
 		}
 		ev := 0
 		for i < len(b) && b[i] >= '0' && b[i] <= '9' {
 			ev = ev*10 + int(b[i]-'0')
 			if ev > 100000 {
-				return 0, false // absurd exponent: fallback
+				return 0, false, false // absurd exponent: fallback
 			}
 			i++
 		}
 		exp10 += esign * ev
 	}
 	if i != len(b) {
-		return 0, false // trailing garbage: let the strict path report it
+		return 0, false, false // trailing garbage: let the strict path report it
 	}
 	if exp10 > 22 || exp10 < -22 {
-		return 0, false
+		return 0, false, false
 	}
 
-	var v float64
 	if exp10 >= 0 {
 		v = float64(mant) * pow10[exp10]
 	} else {
@@ -316,23 +341,107 @@ func parseFloatFast(b []byte) (float64, bool) {
 	// ~9e37 — far from the Inf/subnormal boundaries — but guard anyway so
 	// a future edit to the envelope cannot silently corrupt values.
 	if (v == 0 && mant != 0) || v != v || v > 1.7976931348623157e308 || v < -1.7976931348623157e308 {
-		return 0, false
+		return 0, false, false
 	}
-	return v, true
+	return v, true, false
 }
 
-func parseJSONFloat(b []byte) (float64, bool) {
-	if v, ok := parseFloatFast(b); ok {
-		return v, true
+// partialFloat is the best-effort value of a truncated token: the digits
+// accumulated so far, scaled by the decimal exponent already consumed and
+// signed. A dangling "." or an unfinished exponent contributes nothing —
+// what they would add is unknown, and 0 would be a lie, so it is simply
+// not there. exp10 >= -16 always: more fraction digits would have pushed
+// the mantissa past 2^53 and refused earlier.
+func partialFloat(neg bool, mant uint64, exp10 int) float64 {
+	v := float64(mant)
+	if exp10 >= 0 {
+		v *= pow10[exp10]
+	} else {
+		v /= pow10[-exp10]
+	}
+	if neg {
+		v = -v
+	}
+	return v
+}
+
+// incompleteNumber reports whether b is a proper prefix of some valid JSON
+// number — the token stopped because the input ended, not because the
+// grammar broke ("12.", "1.5e", "1.5e+", "-" qualify; "12.5", "01", "1ex",
+// "1.2.3" do not: they are complete or unfixable). encoding/json
+// classifies exactly these shapes at the end of the buffer as "unexpected
+// end of JSON input", and as invalid-character errors when a delimiter
+// follows instead. This also covers the one shape parseFloatFast cannot
+// see: the past-2^53 mantissa, which it refuses before reaching the
+// truncation point.
+func incompleteNumber(b []byte) bool {
+	i := 0
+	signed := false
+	if i < len(b) && b[i] == '-' {
+		i++
+		signed = true
+	}
+	if i == len(b) {
+		return signed // "" → no; "-" → yes, a prefix of "-1"
+	}
+	ds := i
+	for i < len(b) && b[i] >= '0' && b[i] <= '9' {
+		i++
+	}
+	if i == ds || (i-ds > 1 && b[ds] == '0') {
+		return false // no integer digit, or "01...": no continuation can fix it
+	}
+	if i == len(b) {
+		return false // complete integer
+	}
+	if b[i] == '.' {
+		i++
+		fs := i
+		for i < len(b) && b[i] >= '0' && b[i] <= '9' {
+			i++
+		}
+		if i == fs {
+			// "." with no digits yet: truncation only if the input
+			// ended right here ("12."); "12.e2" is unfixable.
+			return i == len(b)
+		}
+		if i == len(b) {
+			return false // complete "12.5"
+		}
+	}
+	if b[i] == 'e' || b[i] == 'E' {
+		i++
+		if i < len(b) && (b[i] == '+' || b[i] == '-') {
+			i++
+		}
+		if i == len(b) {
+			return true // "12.5e", "12e-": digits required, input ended
+		}
+		return false // exponent digits seen ("12e2": complete) or garbage ("12ex")
+	}
+	return false // trailing garbage
+}
+
+func parseJSONFloat(b []byte) (float64, bool, bool) {
+	v, ok, trunc := parseFloatFast(b)
+	if ok {
+		return v, true, false
 	}
 	if !validJSONNumber(b) {
-		return 0, false
+		// Not a valid number. If the token is a proper prefix of one,
+		// it ended because the input did — report truncation, keeping
+		// the fast walk's partial value when it produced one (v is 0
+		// when the fast path bailed on the mantissa before the cut).
+		if trunc || incompleteNumber(b) {
+			return v, false, true
+		}
+		return 0, false, false
 	}
-	v, err := strconv.ParseFloat(unsafe.String(unsafe.SliceData(b), len(b)), 64)
+	f, err := strconv.ParseFloat(unsafe.String(unsafe.SliceData(b), len(b)), 64)
 	if err != nil {
-		return 0, false
+		return 0, false, false
 	}
-	return v, true
+	return f, true, false
 }
 
 // ---------- Fixed-width integer helpers (P0-1/P0-2 fix) ----------

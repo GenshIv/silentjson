@@ -2,10 +2,11 @@
 
 ## [2.1.1] - 2026-11-01 — audit fixes: envelope epilogue + float boundary + stream tail
 
-Three post-release findings from the differential audit of 2.1.0 — all of
+Four post-release findings from the differential audit of 2.1.0 — all of
 the "silently wrong" class, all introduced by 2.1.0 itself, all in code
 paths the release advertised as proven (the differential fuzzer / the
-bit-exact float fast path / the audited stream tail validation).
+bit-exact float fast path / the audited stream tail validation / the
+strict number grammar).
 
 ### Fixed — the stream silently accepted a truncated envelope
 A stream cut off before the closing bracket ended with a clean io.EOF,
@@ -69,6 +70,35 @@ change (Medium within run-to-run noise on the same machine). Pinned by
 `TestFastFloatMantissaBoundary` (exhaustive over the boundary window ×
 8 exponent shapes, plus direct fast-path refusal assertions) and new
 edge seeds.
+
+### Fixed — a number truncated at EOF was reported as a type mismatch
+A float token cut off by the end of the input fell out of parseFloatFast
+with the same not-ok used for real garbage, so `{"price":12.`, `1.5e+` or
+a bare `-` in a float field surfaced as ErrTypeMismatch "invalid number" —
+the wrong error class: the grammar did not break, the input ended.
+encoding/json classifies exactly these shapes at the buffer end as
+"unexpected end of JSON input" (and keeps them invalid-character errors
+when a delimiter follows). parseFloatFast now distinguishes truncation at
+its three end-of-buffer sites and returns the value accumulated so far
+alongside ("12." → 12, "1.5e+" → 1.5 — the fraction scale already carried
+in exp10 applies); parseJSONFloat extends the classification to any
+rejected token that is a proper prefix of a valid number (the new
+incompleteNumber helper — this also covers the past-2^53 mantissa the
+fast path refuses before it can see the cut, where no exact partial value
+exists and the field is left at 0). The float decoders keep that partial
+value in the field — allocating a fresh *float64 when needed — before
+returning ErrUnexpectedEOF, so everything decoded before the cut survives
+(the stream-tail contract: data first, then the sticky error);
+skipValueStrict classifies unknown-field tokens the same way. A truncated
+shape followed by a delimiter stays a type mismatch, untouched. Pinned by
+TestFloatTruncatedAtEOFReportsEOFAndKeepsPartial (6 EOF shapes with
+partial-value assertions), TestFloatTruncatedAtEOFPreservesEarlierFields,
+TestFloatTruncatedAtEOFPointerPartial,
+TestTruncatedNumberUnknownFieldAtEOF,
+TestTruncatedShapeWithDelimiterStaysTypeMismatch (6 negative controls)
+and TestParseJSONFloatTruncationClassification (unit table: 9 truncated /
+7 complete / 12 garbage shapes). After the fix: full suite green, -race
+green, both differential fuzzers clean (45s/217k and 45s/224k execs).
 
 ### Docs — corrected stale small-record claims
 The "untouchable, 5x the nearest reflection parser" sentence and the

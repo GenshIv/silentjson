@@ -499,6 +499,14 @@ func skipValueStrict(raw []byte, i int) (int, error) {
 			i++
 		}
 		if !validJSONNumber(raw[start:i]) {
+			// P1-B: a token cut off by the end of the input is an
+			// unexpected EOF, not a grammar error — encoding/json
+			// reports exactly these shapes as "unexpected end of JSON
+			// input". With a delimiter following, the grammar did
+			// break: keep the type mismatch.
+			if i >= len(raw) && incompleteNumber(raw[start:i]) {
+				return 0, fmt.Errorf("%w: truncated number %q at %d", ErrUnexpectedEOF, raw[start:i], start)
+			}
 			return 0, fmt.Errorf("%w: invalid number %q at %d", ErrTypeMismatch, raw[start:i], start)
 		}
 		return i, nil
@@ -722,8 +730,21 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 				for i < len(raw) && (charTable[raw[i]]&maskValueEnd) == 0 {
 					i++
 				}
-				fval, ok := parseJSONFloat(raw[valStart:i])
+				fval, ok, trunc := parseJSONFloat(raw[valStart:i])
 				if !ok {
+					if trunc && i >= len(raw) {
+						// P1-B: the token ran into the end of the input mid-grammar.
+						// Keep the value parsed so far, then report the EOF — the
+						// fields decoded before the cut stay populated (the same
+						// contract as the stream tail: data first, sticky error).
+						dst := unsafe.Pointer(uintptr(ptr) + info.Offset)
+						if info.Bits == 32 {
+							*(*float32)(dst) = float32(fval)
+						} else {
+							*(*float64)(dst) = fval
+						}
+						return 0, fmt.Errorf("%w: truncated number %q for field %q", ErrUnexpectedEOF, raw[valStart:i], info.Key)
+					}
 					return 0, fmt.Errorf("%w: invalid number %q for field %q", ErrTypeMismatch, raw[valStart:i], info.Key)
 				}
 				dst := unsafe.Pointer(uintptr(ptr) + info.Offset)
@@ -878,8 +899,25 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 					for i < len(raw) && (charTable[raw[i]]&maskValueEnd) == 0 {
 						i++
 					}
-					fval, ok := parseJSONFloat(raw[valStart:i])
+					fval, ok, trunc := parseJSONFloat(raw[valStart:i])
 					if !ok {
+						if trunc && i >= len(raw) {
+							// P1-B: keep the partial value — allocating the pointee
+							// like the success path — then report the EOF.
+							fieldPtr := unsafe.Pointer(uintptr(ptr) + info.Offset)
+							elemPtr := *(*unsafe.Pointer)(fieldPtr)
+							if elemPtr == nil {
+								nv := reflect.New(info.ElemType)
+								elemPtr = nv.UnsafePointer()
+								*(*unsafe.Pointer)(fieldPtr) = elemPtr
+							}
+							if info.Bits == 32 {
+								*(*float32)(elemPtr) = float32(fval)
+							} else {
+								*(*float64)(elemPtr) = fval
+							}
+							return 0, fmt.Errorf("%w: truncated number %q for field %q", ErrUnexpectedEOF, raw[valStart:i], info.Key)
+						}
 						return 0, fmt.Errorf("%w: invalid number %q for field %q", ErrTypeMismatch, raw[valStart:i], info.Key)
 					}
 					fieldPtr := unsafe.Pointer(uintptr(ptr) + info.Offset)
