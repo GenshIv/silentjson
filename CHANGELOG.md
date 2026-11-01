@@ -28,6 +28,9 @@ edge cases" into "fast and provably careful":
   huge-record serial 9.1 GB/s, marshaling +11.5%, tolerant mode free
   on clean data.
 
+### Fixed — silent truncation on arrays larger than the chunk-buffer estimate
+The splitter stops when its chunk buffer fills (the documented "early exit" contract), but the serial `UnmarshalSlice`/`UnmarshalSliceTolerant` performed a SINGLE scan — arrays with more elements than the buffer estimate (len/128+1024) silently returned only the first window's records. 500k tiny records against a ~157k-chunk estimate parsed 31% of the payload, and the published "small records" serial numbers were ~3x overstated because of it. Both engines now loop over scan windows until the whole array is consumed (mirroring the parallel producer), the separator grammar is validated window-relative, and `TestSplitterWindowLoop` (200k records > estimate) pins full-count decoding. The array-tail check is what surfaced this: it turned the silent truncation into a loud error, which is exactly its job.
+
 ### Migration notes
 - **Removed broken exported API**: `MarshalIntPtr` and `MarshalFloatPtr`
   (both corrupted memory for their documented types). Use the

@@ -111,85 +111,110 @@ func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 		reg.chunkPool.Put(buf[:cap(buf)])
 		return nil, errors.New("expected '[' at the beginning of array")
 	}
-	startIdx++
-	rawInner := raw[startIdx:]
+	rawInner := raw[startIdx+1:]
 
-	count, depth := findArrayElementsEarlyExitASM(rawInner, buf[:len(buf)])
-	if count < 0 || count > len(buf) {
-		reg.chunkPool.Put(buf[:cap(buf)])
-		return nil, fmt.Errorf("asm returned invalid count: %d", count)
-	}
-	validCount := 0
-	prevEnd := 0
-	for i := 0; i < count; i++ {
-		if buf[i].Start == buf[i].End {
-			continue // phantom chunk emitted on a stray comma
-		}
-		// separator grammar folded into the same pass as the phantom
-		// filter: one walk over the chunks instead of two
-		if !validArrayGap(rawInner[prevEnd:buf[i].Start], validCount > 0) {
-			reg.chunkPool.Put(buf[:cap(buf)])
-			return nil, fmt.Errorf("%w: expected ',' between array elements at %d", ErrTypeMismatch, buf[i].Start)
-		}
-		buf[validCount] = buf[i]
-		validCount++
-		prevEnd = buf[i].End
-	}
-	count = validCount
-	if count == 0 && !emptyArrayRemnant(rawInner) {
-		// Zero real elements are only legitimate for an actually empty
-		// array; anything else means the scanner desynchronized on
-		// malformed input (the splitter emits phantom empty chunks on
-		// stray commas, so this check must run after the filter).
-		reg.chunkPool.Put(buf[:cap(buf)])
-		return nil, fmt.Errorf("%w: malformed array element (unbalanced braces or unterminated string, scanner depth %d)", ErrTypeMismatch, depth)
-	}
-
-	if len(dst) < count {
-		reg.chunkPool.Put(buf[:cap(buf)])
-		return nil, fmt.Errorf("insufficient capacity: need %d, have %d", count, len(dst))
-	}
-
-	target := dst[:count]
-	if count == 0 {
-		reg.chunkPool.Put(buf[:cap(buf)])
-		return target, nil
-	}
+	// The splitter stops when the chunk buffer fills (its documented
+	// "early exit" contract), so arrays with more elements than the
+	// buffer estimate are scanned in repeated windows until the whole
+	// array is consumed. A single scan silently returned only the first
+	// window's records — e.g. 500k tiny records against a ~157k-chunk
+	// estimate parsed just 31% of the payload — until the array-tail
+	// check turned the silent truncation into a loud error.
+	scanOffset := 0
+	total := 0
+	prevEndAbs := 0 // absolute end of the last accepted element
 	structSize := unsafe.Sizeof(*new(T))
-	basePtr := unsafe.Pointer(&target[0])
+	basePtr := unsafe.Pointer(&dst[0])
 
 	var err error
-	for i := 0; i < count; i++ {
-		chunk := buf[i]
-		if chunk.Start < 0 || chunk.End > len(raw) || chunk.Start >= chunk.End {
-			err = fmt.Errorf("invalid json boundaries at chunk %d", i)
+	for scanOffset < len(rawInner) {
+		count, depth := findArrayElementsEarlyExitASM(rawInner[scanOffset:], buf[:len(buf)])
+		if count < 0 || count > len(buf) {
+			reg.chunkPool.Put(buf[:cap(buf)])
+			return nil, fmt.Errorf("asm returned invalid count: %d", count)
+		}
+		if count == 0 {
+			if !emptyArrayRemnant(rawInner[scanOffset:]) {
+				reg.chunkPool.Put(buf[:cap(buf)])
+				return nil, fmt.Errorf("%w: malformed array element (unbalanced braces or unterminated string, scanner depth %d)", ErrTypeMismatch, depth)
+			}
 			break
 		}
+		stepAdvance := buf[count-1].End // capture before compaction below
 
-		itemPtr := unsafe.Pointer(uintptr(basePtr) + (uintptr(i) * structSize))
-
-		if err = ParseObject(rawInner[chunk.Start:chunk.End], reg, itemPtr); err != nil {
+		validCount := 0
+		prevEnd := 0 // window-relative
+		for i := 0; i < count; i++ {
+			if buf[i].Start == buf[i].End {
+				continue // phantom chunk emitted on a stray comma
+			}
+			// Separator grammar folded into the phantom filter. For the
+			// first element of a resumed window the gap starts right at
+			// the separating comma left at the window start.
+			gapStart := prevEnd
+			if validCount == 0 {
+				gapStart = 0
+			}
+			if !validArrayGap(rawInner[scanOffset+gapStart:scanOffset+buf[i].Start], total > 0 || validCount > 0) {
+				reg.chunkPool.Put(buf[:cap(buf)])
+				return nil, fmt.Errorf("%w: expected ',' between array elements at %d", ErrTypeMismatch, scanOffset+buf[i].Start)
+			}
+			buf[validCount] = buf[i]
+			validCount++
+			prevEnd = buf[i].End
+		}
+		if validCount == 0 {
+			// window held only phantom chunks (e.g. the lone closing
+			// bracket): legitimate only as an empty-array remnant
+			if !emptyArrayRemnant(rawInner[scanOffset:]) {
+				reg.chunkPool.Put(buf[:cap(buf)])
+				return nil, fmt.Errorf("%w: malformed array element (unbalanced braces or unterminated string, scanner depth %d)", ErrTypeMismatch, depth)
+			}
 			break
 		}
+		if total+validCount > len(dst) {
+			reg.chunkPool.Put(buf[:cap(buf)])
+			return nil, fmt.Errorf("insufficient capacity: need %d, have %d", total+validCount, len(dst))
+		}
+
+		for j := 0; j < validCount; j++ {
+			chunk := buf[j]
+			absS, absE := scanOffset+chunk.Start, scanOffset+chunk.End
+			if absS < 0 || absE > len(rawInner) || absS >= absE {
+				err = fmt.Errorf("invalid json boundaries at chunk %d", total+j)
+				break
+			}
+			itemPtr := unsafe.Pointer(uintptr(basePtr) + (uintptr(total+j) * structSize))
+			if err = ParseObject(rawInner[absS:absE], reg, itemPtr); err != nil {
+				break
+			}
+		}
+		if err != nil {
+			break
+		}
+		total += validCount
+		prevEndAbs = scanOffset + prevEnd
+		next := scanOffset + stepAdvance
+		if next <= scanOffset {
+			reg.chunkPool.Put(buf[:cap(buf)])
+			return nil, fmt.Errorf("%w: scanner did not advance", ErrTypeMismatch)
+		}
+		scanOffset = next
 	}
 
 	reg.chunkPool.Put(buf[:cap(buf)])
 	if err != nil {
 		return nil, err
 	}
-	if !arrayTailClosed(rawInner, buf[count-1].End) {
+	if total == 0 {
+		return dst[:0], nil
+	}
+	if !arrayTailClosed(rawInner, prevEndAbs) {
 		return nil, fmt.Errorf("%w: unterminated array (missing closing bracket or trailing data)", ErrTypeMismatch)
 	}
-	return target, nil
+	return dst[:total], nil
 }
 
-// UnmarshalSliceTolerant decodes as much of a JSON array as possible,
-// isolating defects instead of failing the whole input: a record that
-// fails to parse is skipped (and reported), structural issues (stray
-// commas, unterminated array, trailing data) are reported, and every
-// cleanly decoded record is returned. Deciding what to do with the
-// problems is the caller's job; UnmarshalSlice is the fail-fast policy
-// over the same machinery.
 func UnmarshalSliceTolerant[T any](raw []byte, reg *Registry, dst []T) ([]T, []Problem) {
 	if len(raw) == 0 {
 		return dst[:0], nil
@@ -208,63 +233,84 @@ func UnmarshalSliceTolerant[T any](raw []byte, reg *Registry, dst []T) ([]T, []P
 	}
 	rawInner := raw[startIdx+1:]
 
-	count, depth := findArrayElementsEarlyExitASM(rawInner, buf[:len(buf)])
-	if count < 0 || count > len(buf) {
-		reg.chunkPool.Put(buf[:cap(buf)])
-		return nil, []Problem{{Offset: 0, Record: -1, Err: fmt.Errorf("asm returned invalid count: %d", count)}}
-	}
-	validCount := 0
-	for i := 0; i < count; i++ {
-		if buf[i].Start != buf[i].End {
-			buf[validCount] = buf[i]
-			validCount++
-		}
-	}
-	count = validCount
-
 	var problems problemList
-	if count == 0 && !emptyArrayRemnant(rawInner) {
-		problems.add(0, -1, fmt.Errorf("%w: no complete element found (unbalanced braces or unterminated string, scanner depth %d)", ErrTypeMismatch, depth))
-		reg.chunkPool.Put(buf[:cap(buf)])
-		return dst[:0], problems.orNil()
-	}
-	if count > len(dst) {
-		reg.chunkPool.Put(buf[:cap(buf)])
-		return nil, []Problem{{Offset: 0, Record: -1, Err: fmt.Errorf("insufficient capacity: need %d, have %d", count, len(dst))}}
-	}
-
+	scanOffset := 0
+	written := 0
+	prevEndAbs := 0
 	structSize := unsafe.Sizeof(*new(T))
 	basePtr := unsafe.Pointer(&dst[0])
-	prevEnd := 0
-	written := 0
-	for i := 0; i < count; i++ {
-		chunk := buf[i]
-		if chunk.Start < 0 || chunk.End > len(rawInner) || chunk.Start >= chunk.End {
-			problems.add(chunk.Start, i, fmt.Errorf("%w: invalid element boundaries", ErrTypeMismatch))
-			continue
-		}
-		if !validArrayGap(rawInner[prevEnd:chunk.Start], i > 0) {
-			// The element extents themselves are valid (the splitter
-			// produced them); only the separator between them is wrong.
-			problems.add(chunk.Start, -1, fmt.Errorf("%w: bad separator between elements", ErrTypeMismatch))
-		}
-		prevEnd = chunk.End
 
-		itemPtr := unsafe.Pointer(uintptr(basePtr) + (uintptr(written) * structSize))
-		if err := ParseObject(rawInner[chunk.Start:chunk.End], reg, itemPtr); err != nil {
-			problems.add(chunk.Start, i, err)
-			continue // skip the damaged record, keep parsing
+	for scanOffset < len(rawInner) {
+		count, _ := findArrayElementsEarlyExitASM(rawInner[scanOffset:], buf[:len(buf)])
+		if count < 0 || count > len(buf) {
+			reg.chunkPool.Put(buf[:cap(buf)])
+			return nil, []Problem{{Offset: scanOffset, Record: -1, Err: fmt.Errorf("asm returned invalid count: %d", count)}}
 		}
-		written++
+		if count == 0 {
+			// No complete element in this window: either the array ended
+			// (legitimate empty remnant) or the tail is damaged/truncated.
+			// Do not report here — the tail stage below salvages a valid
+			// last element and reports the unterminated array exactly
+			// once, instead of double-reporting the same defect.
+			break
+		}
+		stepAdvance := buf[count-1].End // capture before compaction below
+
+		validCount := 0
+		prevEnd := 0
+		for i := 0; i < count; i++ {
+			if buf[i].Start == buf[i].End {
+				continue
+			}
+			gapStart := prevEnd
+			if validCount == 0 {
+				gapStart = 0
+			}
+			if !validArrayGap(rawInner[scanOffset+gapStart:scanOffset+buf[i].Start], written > 0 || validCount > 0) {
+				problems.add(scanOffset+buf[i].Start, -1, fmt.Errorf("%w: bad separator between elements", ErrTypeMismatch))
+			}
+			buf[validCount] = buf[i]
+			validCount++
+			prevEnd = buf[i].End
+		}
+		if validCount == 0 {
+			break // phantom-only window (e.g. the lone ']'): nothing to do
+		}
+		if written+validCount > len(dst) {
+			reg.chunkPool.Put(buf[:cap(buf)])
+			return nil, append(problems.orNil(), Problem{Offset: scanOffset, Record: -1,
+				Err: fmt.Errorf("insufficient capacity: need %d, have %d", written+validCount, len(dst))})
+		}
+
+		for j := 0; j < validCount; j++ {
+			chunk := buf[j]
+			absS, absE := scanOffset+chunk.Start, scanOffset+chunk.End
+			if absS < 0 || absE > len(rawInner) || absS >= absE {
+				problems.add(absS, written+j, fmt.Errorf("%w: invalid element boundaries", ErrTypeMismatch))
+				continue
+			}
+			itemPtr := unsafe.Pointer(uintptr(basePtr) + (uintptr(written) * structSize))
+			if perr := ParseObject(rawInner[absS:absE], reg, itemPtr); perr != nil {
+				problems.add(absS, written+j, perr)
+				continue // skip the damaged record, keep parsing
+			}
+			written++
+		}
+		prevEndAbs = scanOffset + prevEnd
+		next := scanOffset + stepAdvance
+		if next <= scanOffset {
+			break
+		}
+		scanOffset = next
 	}
 
 	reg.chunkPool.Put(buf[:cap(buf)])
-	if !arrayTailClosed(rawInner, prevEnd) {
+	if !arrayTailClosed(rawInner, prevEndAbs) {
 		// The array is not terminated, but the tail may still hold one
 		// complete element the splitter never emitted (it only cuts at a
 		// comma or bracket). Salvage it: parse the remainder as a single
 		// value and report the unterminated array.
-		tail := rawInner[prevEnd:]
+		tail := rawInner[prevEndAbs:]
 		k := 0
 		for k < len(tail) && (charTable[tail[k]]&charSpace) != 0 {
 			k++
@@ -283,7 +329,7 @@ func UnmarshalSliceTolerant[T any](raw []byte, reg *Registry, dst []T) ([]T, []P
 				}
 			}
 		}
-		problems.add(prevEnd, -1, fmt.Errorf("%w: unterminated array (missing closing bracket or trailing data)", ErrTypeMismatch))
+		problems.add(prevEndAbs, -1, fmt.Errorf("%w: unterminated array (missing closing bracket or trailing data)", ErrTypeMismatch))
 	}
 	return dst[:written], problems.orNil()
 }

@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"io"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -375,5 +376,57 @@ func TestSplitterEmptyArrayWithWhitespace(t *testing.T) {
 		if n != 0 {
 			t.Errorf("stream Decode over %q: got %d records, want 0", in, n)
 		}
+	}
+}
+
+// TestSplitterWindowLoop pins the scan-window loop in UnmarshalSlice: the
+// splitter stops when the chunk buffer fills ("early exit" contract), and a
+// single scan silently returned only the first window's records — 500k tiny
+// records against a ~157k-chunk estimate parsed just 31% of the payload
+// (the README "small records" numbers were ~3x overstated because of it).
+// The parser must consume the WHOLE array, windows or not.
+func TestSplitterWindowLoop(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(splitterRec{}))
+	// 200k records of ~40 bytes = ~8 MB -> chunk estimate len/128+1024 ≈ 63k
+	// < 200k: forces multiple scan windows.
+	const n = 200_000
+	src := make([]splitterRec, n)
+	var buf bytes.Buffer
+	buf.WriteString("[")
+	for i := 0; i < n; i++ {
+		src[i].ID = i
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		buf.WriteString(`{"id":`)
+		buf.WriteString(strconv.Itoa(i))
+		buf.WriteString(`,"path":"p`)
+		buf.WriteString(strconv.Itoa(i % 97))
+		buf.WriteString(`"}`)
+	}
+	buf.WriteString("]")
+	raw := buf.Bytes()
+	if est := estimateChunkCapacity(raw); est >= n {
+		t.Fatalf("test setup: chunk estimate %d >= %d records; make records smaller", est, n)
+	}
+
+	dst := make([]splitterRec, n)
+	out, err := UnmarshalSlice(raw, reg, dst)
+	if err != nil {
+		t.Fatalf("UnmarshalSlice: %v", err)
+	}
+	if len(out) != n {
+		t.Fatalf("got %d records, want %d (silent truncation across scan windows?)", len(out), n)
+	}
+	for i := range out {
+		if out[i].ID != i {
+			t.Fatalf("record %d: got ID %d", i, out[i].ID)
+		}
+	}
+
+	// tolerant path agrees on clean data
+	out2, problems := UnmarshalSliceTolerant(raw, reg, dst)
+	if len(problems) != 0 || len(out2) != n {
+		t.Fatalf("tolerant: %d records, %d problems", len(out2), len(problems))
 	}
 }

@@ -15,9 +15,9 @@
 ### 100k Objekte, "Chaos"-Payload (neu gemessen Mai 2026)
 | Parser | Durchsatz (MB/s) |
 | :--- | :--- |
-| **SilentJSON (Parallel)** | **2.909 MB/s** ⭐ |
+| **SilentJSON (Parallel)** | **3.161 MB/s** ⭐ |
 | Goccy | 671 MB/s |
-| **SilentJSON (Serial)** | **552 MB/s** |
+| **SilentJSON (Serial)** | **626 MB/s** |
 | Standard (Go) | 206 MB/s |
 
 > Die alten Multi-GB/s-Parallelwerte waren ungültig (Benchmarks ignorierten Fehler; der AVX2-Splitter verlor Datensätze bei Escape-Sequenzen). Vollständige Tabellen in [README.md](README.md).
