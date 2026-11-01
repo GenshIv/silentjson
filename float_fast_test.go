@@ -21,6 +21,7 @@ func TestFastFloatBitExact(t *testing.T) {
 		"1e22", "-1e22", "1e-22", "123.456e-20", "9e37", "9e-23",
 		"9007199254740992",       // 2^53 exactly
 		"9007199254740991",       // 2^53-1
+		"9007199254740995e-1",    // mantissa one digit past 2^53: fast path must refuse, strconv decides
 		"1234567890123456",       // 16 digits, mant < 2^53
 		"999999999999999",        // 15 nines
 		"1.7976931348623157e308", // out of envelope -> fallback
@@ -77,6 +78,54 @@ func TestFastFloatBitExact(t *testing.T) {
 		}
 		if math.Float64bits(got) != math.Float64bits(want) {
 			t.Fatalf("%q: bits differ: got %x want %x", s, math.Float64bits(got), math.Float64bits(want))
+		}
+	}
+}
+
+// The 2^53 mantissa boundary: while the accumulated mantissa stays <= 2^53
+// float64(mant) is exact and the single multiply/divide is correctly rounded.
+// One digit past 2^53 makes float64(mant) inexact and the fast path MUST
+// refuse — it used to accept and then double-round up to 1 ULP off strconv
+// (e.g. "9007199254740995e-1" parsed as ...996 instead of ...995).
+func TestFastFloatMantissaBoundary(t *testing.T) {
+	// Exhaustive over the boundary window: mantissas 9007199254740990..99
+	// are exactly the values the old pre-guard (mant > (1<<53)/10) let
+	// through with one extra digit. Every shape must stay bit-exact —
+	// via the fast path where the mantissa is exact, via the strconv
+	// fallback everywhere else.
+	exps := []string{"", "e0", "e1", "e2", "e-1", "e-2", "e-22", "e22"}
+	for m := uint64(9007199254740990); m <= 9007199254740999; m++ {
+		ms := strconv.FormatUint(m, 10)
+		for _, e := range exps {
+			s := ms + e
+			want, err := strconv.ParseFloat(s, 64)
+			if err != nil {
+				t.Fatalf("strconv rejected %q", s)
+			}
+			got, ok := parseJSONFloat([]byte(s))
+			if !ok {
+				t.Fatalf("parseJSONFloat rejected %q", s)
+			}
+			if math.Float64bits(got) != math.Float64bits(want) {
+				t.Errorf("%q: bits differ: got %x want %x", s, math.Float64bits(got), math.Float64bits(want))
+			}
+		}
+	}
+
+	// the fast path itself must refuse the inexact-mantissa class...
+	for _, s := range []string{
+		"9007199254740993e-1", "9007199254740995e-1", "9007199254740999e-1",
+		"-9007199254740995e-1", "9007199254740995e-22",
+		"900719925474099.5", // same mantissa via the fraction form
+	} {
+		if _, ok := parseFloatFast([]byte(s)); ok {
+			t.Errorf("parseFloatFast(%q) accepted: float64(mant) would be inexact", s)
+		}
+	}
+	// ...while the exact boundary stays on it.
+	for _, s := range []string{"9007199254740991", "9007199254740992"} {
+		if _, ok := parseFloatFast([]byte(s)); !ok {
+			t.Errorf("parseFloatFast(%q) refused: mant <= 2^53 is exact and must stay fast", s)
 		}
 	}
 }

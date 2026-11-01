@@ -200,14 +200,18 @@ var pow10 = [23]float64{1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 
 // parseFloatFast handles the common number shapes (up to 16 significant
 // digits, |decimal exponent| <= 22) in a single validating pass.
 //
-// Bit-exactness argument: with <= 16 digits the mantissa fits uint64 and
-// stays below 2^53, and 10^k is exactly representable for k <= 22, so
-// mant*10^k is the exact integer value of the literal (correctly rounded
+// Bit-exactness argument: while the accumulated mantissa stays <= 2^53
+// float64(mant) is exact, and 10^k is exactly representable for k <= 22,
+// so mant*10^k is the exact integer value of the literal (correctly rounded
 // by one IEEE multiply) and mant/10^k is the correctly rounded true
-// quotient — both identical to what strconv.ParseFloat returns. Anything
-// outside the envelope (more digits, bigger exponents, subnormals near
-// the boundaries) reports not-ok and falls back to the strconv path,
-// which also produces the correct strict grammar error for garbage.
+// quotient — both identical to what strconv.ParseFloat returns. The moment
+// the mantissa passes 2^53 (e.g. the 16th digit of 9007199254740995)
+// float64(mant) becomes inexact and one more rounding step would
+// double-round up to 1 ULP away from strconv — so the fast path refuses
+// and falls back. Anything else outside the envelope (more digits, bigger
+// exponents, subnormals near the boundaries) also reports not-ok and falls
+// back to the strconv path, which also produces the correct strict grammar
+// error for garbage.
 func parseFloatFast(b []byte) (float64, bool) {
 	i := 0
 	neg := false
@@ -230,10 +234,14 @@ func parseFloatFast(b []byte) (float64, bool) {
 	} else if b[i] >= '1' && b[i] <= '9' {
 		for i < len(b) && b[i] >= '0' && b[i] <= '9' {
 			d := uint64(b[i] - '0')
-			if mant > (1<<53)/10 {
-				return 0, false // mantissa would exceed 2^53
-			}
 			mant = mant*10 + d
+			if mant > 1<<53 {
+				// float64(mant) would be inexact: the single
+				// multiply/divide then double-rounds and can
+				// land 1 ULP off strconv (e.g. 9007199254740995e-1).
+				// mant == 2^53 stays fast: it is exact.
+				return 0, false
+			}
 			digits++
 			i++
 		}
@@ -250,10 +258,10 @@ func parseFloatFast(b []byte) (float64, bool) {
 		}
 		for i < len(b) && b[i] >= '0' && b[i] <= '9' {
 			d := uint64(b[i] - '0')
-			if mant > (1<<53)/10 {
-				return 0, false
-			}
 			mant = mant*10 + d
+			if mant > 1<<53 {
+				return 0, false // same 2^53 boundary as above
+			}
 			digits++
 			exp10--
 			i++
