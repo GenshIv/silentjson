@@ -1,11 +1,42 @@
 # Changelog
 
-## [2.1.1] - 2026-11-01 — audit fixes: envelope epilogue + float boundary
+## [2.1.1] - 2026-11-01 — audit fixes: envelope epilogue + float boundary + stream tail
 
-Two post-release findings from the differential audit of 2.1.0 — both of
-the "silently wrong" class, both introduced by 2.1.0 itself, both in code
+Three post-release findings from the differential audit of 2.1.0 — all of
+the "silently wrong" class, all introduced by 2.1.0 itself, all in code
 paths the release advertised as proven (the differential fuzzer / the
-bit-exact float fast path).
+bit-exact float fast path / the audited stream tail validation).
+
+### Fixed — the stream silently accepted a truncated envelope
+A stream cut off before the closing bracket ended with a clean io.EOF,
+making a truncated feed indistinguishable from a complete one:
+`[{"id":1},{"id":2}` delivered both records and reported success (pinned
+as "valid" until now), a bare `[` was reported as an empty array,
+`[{"id":1},` (trailing comma at EOF) reported success — while
+UnmarshalSlice rejects the same inputs (since P0-A), encoding/json reports
+"unexpected end of JSON input", and even this library's own README
+promised that "truncation is reported". The stream now reports
+ErrUnexpectedEOF for every shape of a truncated envelope — WITHOUT losing
+data. The healthy records are delivered first, including the final
+element that is complete but lost its terminator (the splitter only cuts
+at a comma or a bracket): nextChunk hands it out as a record and reports
+the truncation on the NEXT call (io.Reader-style two-step, sticky on
+repeated reads); NextRawBlock now salvages that final element the same
+way (previously it dropped the valid record and errored — inconsistent
+with nextChunk); the NextChanParallel worker parses a salvaged
+terminator-less batch as the single value it is (re-splitting it finds
+zero chunks, which silently dropped the record). Tolerant streams report
+the defect through the sink exactly once (parity with
+UnmarshalSliceTolerant, which already reported the unterminated array)
+and end cleanly. Fixed on the way: the NextChanParallel worker read
+d.isEOF directly while the producer was still filling the buffer (a data
+race the race detector can now reach); the batch carries a dispatch-time
+snapshot instead. Pinned by TestStreamTailUnterminatedReported (6 envelope
+shapes x 5 streaming APIs x whole-buffer and socket-like reads), the
+updated TestStreamTailComplete / TestStreamTailTruncated (sticky error,
+mid-value fragment+error unchanged) and the tolerant parity case in
+TestTolerantStream. After the fix: full suite green, -race green, both
+differential fuzzers clean (90s/452k and 120s/610k execs).
 
 ### Fixed — UnmarshalSlice accepted a bare "[" as an empty array
 The windowed rewrite added an early return for the zero-records case that

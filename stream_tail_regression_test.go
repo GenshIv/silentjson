@@ -6,8 +6,19 @@ package silentjson
 // fragment is now validated grammatically: exactly one complete value at
 // EOF is delivered (a valid last element cut off from its terminator),
 // anything else is a clean truncation error.
+//
+// The truncated-envelope fix makes the tail LOUD as well: a stream that
+// reaches EOF without ever seeing ']' reports ErrUnexpectedEOF instead of
+// ending cleanly. The old behavior made a truncated feed indistinguishable
+// from a complete one — and contradicted UnmarshalSlice, which rejects the
+// same input (and encoding/json, which reports "unexpected end of JSON
+// input"). No data is lost: the healthy records — including a final
+// element that is complete but lost its terminator — are delivered FIRST,
+// the truncation is reported on the next call (io.Reader-style two-step),
+// and the error is sticky.
 
 import (
+	"errors"
 	"io"
 	"reflect"
 	"testing"
@@ -30,6 +41,9 @@ func (r *chunkReader) Read(p []byte) (int, error) {
 		return 0, io.EOF
 	}
 	n := r.step
+	if n <= 0 {
+		n = 1
+	}
 	if n > len(p) {
 		n = len(p)
 	}
@@ -73,9 +87,8 @@ func drainRaw(dec *StreamDecoder[tailRec]) (n int, lastFrag []byte, err error) {
 func TestStreamTailComplete(t *testing.T) {
 	reg := BuildRegistry(reflect.TypeOf(tailRec{}))
 	for name, data := range map[string]string{
-		"complete":                          `[{"id":1},{"id":2}]`,
-		"trailing whitespace":               "[{\"id\":1},{\"id\":2}]  \n",
-		"last element unterminated (valid)": `[{"id":1},{"id":2}`,
+		"complete":            `[{"id":1},{"id":2}]`,
+		"trailing whitespace": "[{\"id\":1},{\"id\":2}]  \n",
 	} {
 		for _, step := range []int{len(data), 3} { // whole-buffer and socket-like reads
 			dec := NewStreamDecoder[tailRec](&chunkReader{data: []byte(data), step: step}, reg)
@@ -92,6 +105,110 @@ func TestStreamTailComplete(t *testing.T) {
 	}
 }
 
+// TestStreamTailUnterminatedReported pins the loud-truncation policy for
+// every shape of a truncated envelope: the stream must report
+// ErrUnexpectedEOF (not end with a clean io.EOF), keep every healthy
+// record — including the final element that is complete but lost its
+// terminator — and keep reporting the error on repeated reads.
+func TestStreamTailUnterminatedReported(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(tailRec{}))
+	cases := []struct {
+		name    string
+		input   string
+		wantIDs []int
+	}{
+		{"last element unterminated", `[{"id":1},{"id":2}`, []int{1, 2}},
+		{"trailing comma at EOF", `[{"id":1},`, []int{1}},
+		{"bare [", `[`, nil},
+		{"whitespace body", "[ ", nil},
+		{"empty input", ``, nil},
+		{"whitespace input", " \n\t", nil},
+	}
+	for _, c := range cases {
+		for _, step := range []int{len(c.input), 3} {
+			// Decode: records first, then ErrUnexpectedEOF, sticky.
+			dec := NewStreamDecoder[tailRec](&chunkReader{data: []byte(c.input), step: step}, reg)
+			var ids []int
+			var err error
+			for {
+				var v tailRec
+				if err = dec.Decode(&v); err != nil {
+					break
+				}
+				ids = append(ids, v.ID)
+			}
+			if !errors.Is(err, ErrUnexpectedEOF) {
+				t.Errorf("%s (step=%d): Decode ended with %v, want ErrUnexpectedEOF (truncated envelope must be reported)", c.name, step, err)
+			}
+			if !reflect.DeepEqual(ids, c.wantIDs) {
+				t.Errorf("%s (step=%d): Decode delivered %v, want %v (healthy records must not be lost)", c.name, step, ids, c.wantIDs)
+			}
+			if err2 := dec.Decode(&tailRec{}); !errors.Is(err2, ErrUnexpectedEOF) {
+				t.Errorf("%s (step=%d): repeated Decode after truncation returned %v, want sticky ErrUnexpectedEOF", c.name, step, err2)
+			}
+
+			// NextRaw: same policy — records, then the error.
+			decRaw := NewStreamDecoder[tailRec](&chunkReader{data: []byte(c.input), step: step}, reg)
+			n := 0
+			for {
+				_, err = decRaw.NextRaw()
+				if err != nil {
+					break
+				}
+				n++
+			}
+			if !errors.Is(err, ErrUnexpectedEOF) || n != len(c.wantIDs) {
+				t.Errorf("%s (step=%d): NextRaw delivered %d records, err=%v; want %d + ErrUnexpectedEOF", c.name, step, n, err, len(c.wantIDs))
+			}
+
+			// NextRawBlock: salvages the final terminator-less element,
+			// then reports the truncation.
+			decBlk := NewStreamDecoder[tailRec](&chunkReader{data: []byte(c.input), step: step}, reg)
+			nb := 0
+			var count int
+			for {
+				_, count, err = decBlk.NextRawBlock(0, 0)
+				if err != nil {
+					break
+				}
+				nb += count
+			}
+			if !errors.Is(err, ErrUnexpectedEOF) || nb != len(c.wantIDs) {
+				t.Errorf("%s (step=%d): NextRawBlock delivered %d records, err=%v; want %d + ErrUnexpectedEOF", c.name, step, nb, err, len(c.wantIDs))
+			}
+
+			// NextChan: items, then exactly one error result.
+			var nc int
+			var chanErr error
+			for res := range NewStreamDecoder[tailRec](&chunkReader{data: []byte(c.input), step: step}, reg).NextChan(4) {
+				if res.Err != nil {
+					chanErr = res.Err
+				} else {
+					nc++
+				}
+			}
+			if !errors.Is(chanErr, ErrUnexpectedEOF) || nc != len(c.wantIDs) {
+				t.Errorf("%s (step=%d): NextChan delivered %d records, err=%v; want %d + ErrUnexpectedEOF", c.name, step, nc, chanErr, len(c.wantIDs))
+			}
+
+			// NextChanParallel: the salvaged terminator-less batch must
+			// still become a record (worker fallback), then the error.
+			var np int
+			var parErr error
+			for res := range NewStreamDecoder[tailRec](&chunkReader{data: []byte(c.input), step: step}, reg).NextChanParallel(2, 4) {
+				if res.Err != nil {
+					parErr = res.Err
+				} else {
+					np++
+				}
+			}
+			if !errors.Is(parErr, ErrUnexpectedEOF) || np != len(c.wantIDs) {
+				t.Errorf("%s (step=%d): NextChanParallel delivered %d records, err=%v; want %d + ErrUnexpectedEOF", c.name, step, np, parErr, len(c.wantIDs))
+			}
+		}
+	}
+}
+
 func TestStreamTailTruncated(t *testing.T) {
 	reg := BuildRegistry(reflect.TypeOf(tailRec{}))
 	for name, data := range map[string]string{
@@ -99,20 +216,26 @@ func TestStreamTailTruncated(t *testing.T) {
 		"cut in string":  `[{"id":1},{"id":2},{"na`,
 	} {
 		for _, step := range []int{len(data), 3} {
-			ids, err := drainDecode(NewStreamDecoder[tailRec](&chunkReader{data: []byte(data), step: step}, reg))
+			dec := NewStreamDecoder[tailRec](&chunkReader{data: []byte(data), step: step}, reg)
+			ids, err := drainDecode(dec)
 			if err == nil {
 				t.Errorf("%s (step=%d): decode expected truncation error, got nil (ids=%v)", name, step, ids)
 			}
 			if len(ids) == 0 {
-				t.Errorf("%s (step=%d): valid prefix records were lost", name, step)
+				t.Errorf("%s (step=%d): valid prefix records were lost (ids=%v)", name, step, ids)
 			}
-			n, frag, err := drainRaw(NewStreamDecoder[tailRec](&chunkReader{data: []byte(data), step: step}, reg))
+			dec2 := NewStreamDecoder[tailRec](&chunkReader{data: []byte(data), step: step}, reg)
+			n, frag, err := drainRaw(dec2)
 			if err == nil {
 				t.Errorf("%s (step=%d): truncation not reported (n=%d)", name, step, n)
 			}
 			// the partial fragment must still be delivered alongside the error
 			if len(frag) == 0 {
 				t.Errorf("%s (step=%d): truncated tail fragment lost (io.Reader semantics: bytes + error)", name, step)
+			}
+			// the truncation is sticky: repeated reads keep reporting it
+			if _, err := dec2.NextRaw(); !errors.Is(err, ErrUnexpectedEOF) {
+				t.Errorf("%s (step=%d): repeated NextRaw after truncation returned %v, want ErrUnexpectedEOF", name, step, err)
 			}
 		}
 	}

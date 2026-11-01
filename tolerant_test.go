@@ -74,6 +74,7 @@ func TestTolerantStream(t *testing.T) {
 		{"damaged record mid-stream", `[{"id":1},{"id":xx},{"id":3}]`, []int{1, 3}, 1},
 		{"leading comma", `[,{"id":1},{"id":2}]`, []int{1, 2}, 1},
 		{"trailing comma", `[{"id":1},{"id":2},]`, []int{1, 2}, 1},
+		{"unterminated array", `[{"id":1},{"id":2}`, []int{1, 2}, 1},
 		{"truncated tail", `[{"id":1},{"id":2},{"na`, []int{1, 2}, 1},
 	}
 	for _, c := range cases {

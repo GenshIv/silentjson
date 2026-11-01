@@ -40,6 +40,16 @@ type StreamDecoder[T any] struct {
 	// delivered element: a second comma in that window is a duplicate
 	// separator and must be rejected.
 	afterComma bool
+	// tailTruncated latches the "truncated envelope" end-state: EOF was
+	// reached and ']' was never seen. A stream cut off before the closing
+	// bracket must not end with a clean io.EOF — that made a truncated
+	// feed indistinguishable from a complete one (and contradicted
+	// UnmarshalSlice, which rejects the same input). The healthy records —
+	// including a final element that is complete but lost its terminator —
+	// are still delivered first (data must not be lost); the truncation is
+	// reported on the NEXT call (strict: ErrUnexpectedEOF, sticky) or once
+	// through the problem sink (tolerant: report, then clean io.EOF).
+	tailTruncated bool
 }
 
 // NewStreamDecoder creates a new streaming decoder.
@@ -95,6 +105,14 @@ func (d *StreamDecoder[T]) nextChunk() ([]byte, error) {
 	if d.hasEnded {
 		return nil, io.EOF
 	}
+	if d.tailTruncated {
+		// The truncated envelope was already reported: stay in the
+		// end-state instead of silently degrading to a clean io.EOF.
+		if d.tolerant {
+			return nil, io.EOF
+		}
+		return nil, ErrUnexpectedEOF
+	}
 
 	for {
 		// Ensure we have enough data to check at least one character
@@ -103,7 +121,17 @@ func (d *StreamDecoder[T]) nextChunk() ([]byte, error) {
 				return nil, err
 			}
 			if d.head >= d.tail && d.isEOF {
-				return nil, io.EOF
+				// EOF with the buffer fully drained and no ']' ever seen:
+				// a complete stream would have set hasEnded by now. Reaching
+				// this point means the envelope is truncated (a bare "[",
+				// a trailing comma, an empty body — all of which used to end
+				// with a clean io.EOF, silently accepting the damage).
+				d.tailTruncated = true
+				if d.tolerant {
+					d.report(d.tail, -1, fmt.Errorf("%w: stream truncated before the closing bracket", ErrUnexpectedEOF))
+					return nil, io.EOF
+				}
+				return nil, ErrUnexpectedEOF
 			}
 		}
 
@@ -202,9 +230,20 @@ func (d *StreamDecoder[T]) nextChunk() ([]byte, error) {
 				end, err := skipValueStrict(frag, 0)
 				if err == nil && end == len(frag) {
 					d.head = d.tail
+					// The final element is complete, only its terminator
+					// (']') never arrived: deliver it as a record — the
+					// healthy data must not be lost — and latch the
+					// truncation so the NEXT call reports it instead of
+					// ending cleanly (io.Reader-style two-step). The latch
+					// also keeps the tolerant report one-shot.
+					d.tailTruncated = true
+					if d.tolerant {
+						d.report(j, -1, fmt.Errorf("%w: stream truncated before the closing bracket", ErrUnexpectedEOF))
+					}
 					return frag, nil
 				}
 				d.head = d.tail
+				d.tailTruncated = true
 				// Partial fragment: hand the bytes out together with the
 				// truncation error, io.Reader-style (n > 0, err != nil).
 				// A stream consumer may need the tail (e.g. to resume
@@ -362,6 +401,10 @@ type streamBatch[T any] struct {
 	count   int
 	baseIdx int
 	done    chan error
+	// tailTrunc snapshots d.tailTruncated at dispatch time. Workers must
+	// not read the decoder directly: the producer keeps filling/advancing
+	// it while earlier batches are still in flight (data race).
+	tailTrunc bool
 }
 
 // NextChanParallel launches a worker pool to parse the JSON stream concurrently.
@@ -398,7 +441,7 @@ func (d *StreamDecoder[T]) NextChanParallel(workers int, bufferSize int) <-chan 
 	for w := 0; w < workers; w++ {
 		go func() {
 			for task := range taskCh {
-				if d.isEOF && task.count == 0 { // Just in case
+				if task.count == 0 { // Just in case: the producer never dispatches empty batches
 					task.done <- nil
 					continue
 				}
@@ -412,6 +455,21 @@ func (d *StreamDecoder[T]) NextChanParallel(workers int, bufferSize int) <-chan 
 				c, _ := findArrayElementsEarlyExitASM(task.raw, chunks)
 				if c > len(chunks) {
 					c = len(chunks)
+				}
+				// The producer's last batch can be a salvaged unterminated
+				// element (a complete value at EOF, cut off from the closing
+				// bracket): the splitter emits chunks only at a comma or a
+				// bracket, so re-splitting such a batch yields zero. Parse it
+				// as the single value it is instead of dropping the record
+				// the caller was promised. task.count is always >= 1 here.
+				// task.tailTrunc is the dispatch-time snapshot of the
+				// decoder flag: reading the decoder itself would race with
+				// the producer's next NextRawBlock call.
+				if c == 0 && len(task.raw) > 0 && task.tailTrunc {
+					if end, verr := skipValueStrict(task.raw, 0); verr == nil && end == len(task.raw) {
+						chunks[0] = Chunk{Start: 0, End: len(task.raw)}
+						c = 1
+					}
 				}
 
 				var err error
@@ -505,6 +563,9 @@ func (d *StreamDecoder[T]) NextRawBlock(maxCount int, maxSize int) ([]byte, int,
 	if d.hasEnded {
 		return nil, 0, io.EOF
 	}
+	if d.tailTruncated {
+		return nil, 0, ErrUnexpectedEOF
+	}
 
 	for {
 		if d.head >= d.tail {
@@ -512,7 +573,11 @@ func (d *StreamDecoder[T]) NextRawBlock(maxCount int, maxSize int) ([]byte, int,
 				return nil, 0, err
 			}
 			if d.head >= d.tail && d.isEOF {
-				return nil, 0, io.EOF
+				// No ']' was ever seen: the envelope is truncated
+				// (bare "[", trailing comma, empty body). Report it
+				// instead of ending cleanly.
+				d.tailTruncated = true
+				return nil, 0, ErrUnexpectedEOF
 			}
 		}
 
@@ -607,6 +672,7 @@ func (d *StreamDecoder[T]) NextRawBlock(maxCount int, maxSize int) ([]byte, int,
 			if real == 0 {
 				d.reg.chunkPool.Put(chunks[:cap(chunks)])
 				if d.isEOF {
+					d.tailTruncated = true
 					return nil, 0, ErrUnexpectedEOF
 				}
 				if err := d.fill(); err != nil {
@@ -627,6 +693,25 @@ func (d *StreamDecoder[T]) NextRawBlock(maxCount int, maxSize int) ([]byte, int,
 
 		// If we reach here, we couldn't find a complete element within the available data
 		if d.isEOF {
+			// The splitter emits an element only at a comma or the closing
+			// bracket, so the final element of an unterminated array lands
+			// here. If it is exactly one complete value, salvage it as a
+			// record — the healthy data must not be lost (mirrors nextChunk
+			// and UnmarshalSliceTolerant) — and let the next call report
+			// the truncation.
+			j := d.head
+			for j < d.tail && (charTable[d.buf[j]]&charSpace) != 0 {
+				j++
+			}
+			if j < d.tail {
+				frag := d.buf[j:d.tail]
+				if end, err := skipValueStrict(frag, 0); err == nil && end == len(frag) {
+					d.head = d.tail
+					d.tailTruncated = true
+					return frag, 1, nil
+				}
+			}
+			d.tailTruncated = true
 			return nil, 0, ErrUnexpectedEOF
 		}
 		if err := d.fill(); err != nil {
