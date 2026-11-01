@@ -560,7 +560,13 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 		}
 
 		i++
-		keySlice, keyBytes, consumed, err := readJSONString(raw[i:], copyStrings)
+		// Keys are parsed with copyStrings=false ALWAYS: the key string is
+		// transient (hash lookup, case fallback, error text) and never
+		// stored in the destination, so the zero-copy alias into the input
+		// buffer is safe and saves an allocation per key — in stream mode
+		// that is ~9 of the ~12.5 per-record allocations. Values keep the
+		// caller's copyStrings semantics.
+		keySlice, keyBytes, consumed, err := readJSONString(raw[i:], false)
 		if err != nil {
 			return 0, err
 		}

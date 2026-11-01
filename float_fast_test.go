@@ -1,0 +1,96 @@
+package silentjson
+
+// parseFloatFast must be BIT-IDENTICAL to strconv.ParseFloat on everything
+// it accepts: the differential fuzzer compares full float fields, and the
+// envelope claim (mant < 2^53, |exp10| <= 22, exact 10^k) is what makes a
+// single multiply/divide produce the correctly rounded result.
+
+import (
+	"math"
+	"math/rand"
+	"strconv"
+	"testing"
+)
+
+func TestFastFloatBitExact(t *testing.T) {
+	edge := []string{
+		"0", "-0", "0.0", "-0.0", "0e0", "0.0e-0",
+		"1", "-1", "2", "10", "100",
+		"0.1", "0.2", "0.3", "0.5", "0.7",
+		"1.5", "2.25", "3.9", "99.99", "2319", "103.5", "115.0",
+		"1e22", "-1e22", "1e-22", "123.456e-20", "9e37", "9e-23",
+		"9007199254740992",       // 2^53 exactly
+		"9007199254740991",       // 2^53-1
+		"1234567890123456",       // 16 digits, mant < 2^53
+		"999999999999999",        // 15 nines
+		"1.7976931348623157e308", // out of envelope -> fallback
+		"5e-324",                 // subnormal -> fallback
+		"1.1", "2.2", "3.3", "1e21", "1e-21",
+		"123456789.123456789", // 18 digits -> fallback
+		"0.000000000000000001",
+		"1e23", "-1e-23", // outside |exp|<=22 -> fallback
+	}
+	for _, s := range edge {
+		want, wantErr := strconv.ParseFloat(s, 64)
+		got, ok := parseJSONFloat([]byte(s))
+		if wantErr != nil {
+			t.Fatalf("strconv rejected seed %q: %v", s, wantErr)
+		}
+		if !ok {
+			t.Fatalf("parseJSONFloat rejected %q", s)
+		}
+		if math.Float64bits(got) != math.Float64bits(want) {
+			t.Fatalf("%q: bits differ: got %x (%v) want %x (%v)", s, math.Float64bits(got), got, math.Float64bits(want), want)
+		}
+	}
+
+	// randomized within and around the envelope
+	r := rand.New(rand.NewSource(42))
+	for i := 0; i < 200000; i++ {
+		digits := 1 + r.Intn(16)
+		mant := make([]byte, digits)
+		for j := range mant {
+			mant[j] = byte('0' + r.Intn(10))
+		}
+		if mant[0] == '0' && digits > 1 {
+			mant[0] = '1' + byte(r.Intn(9))
+		}
+		s := string(mant)
+		switch r.Intn(4) {
+		case 0:
+			s = s + "." + strconv.Itoa(r.Intn(1000000))
+		case 1:
+			s = s + "e" + strconv.Itoa(r.Intn(44)-22)
+		case 2:
+			s = s + "." + strconv.Itoa(r.Intn(1000)) + "e" + strconv.Itoa(r.Intn(60)-30)
+		}
+		if r.Intn(2) == 0 {
+			s = "-" + s
+		}
+		want, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			continue // out of float range entirely: skip
+		}
+		got, ok := parseJSONFloat([]byte(s))
+		if !ok {
+			t.Fatalf("parseJSONFloat rejected %q", s)
+		}
+		if math.Float64bits(got) != math.Float64bits(want) {
+			t.Fatalf("%q: bits differ: got %x want %x", s, math.Float64bits(got), math.Float64bits(want))
+		}
+	}
+}
+
+func TestFastFloatRejectsGarbage(t *testing.T) {
+	bad := []string{"", "-", "1.", ".5", "01", "1e", "1e+", "1e999", "0x1p2",
+		"Inf", "NaN", "+1", "1_000", "1.2.3", "--1"}
+	// 1e-999 is VALID: like strconv and encoding/json, underflow yields 0
+	if v, ok := parseJSONFloat([]byte("1e-999")); !ok || v != 0 {
+		t.Errorf("1e-999: got (%v,%v), want (0,true) like encoding/json", v, ok)
+	}
+	for _, s := range bad {
+		if v, ok := parseJSONFloat([]byte(s)); ok {
+			t.Errorf("%q accepted as %v", s, v)
+		}
+	}
+}

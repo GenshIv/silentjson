@@ -60,7 +60,7 @@ Every parser decodes the identical ~16 MB payload: 100,000 `Employee` records in
 | **SilentJSON** (Parallel) | **17.8M** 👑 | **2909** 👑 | **5.7** 👑 | **~290 KB** 👑 | ~1150 (fewest: goccy, 1, at 16.5 MB) |
 | Goccy | 4.1M | 671 | 24.4 | 16.5 MB | 1 |
 | Jsoniter | 3.2M | 524 | 38.2 | 70.9 MB | 954k |
-| **SilentJSON** (Serial) | 2.0M | 552 | 28.9 | **~130 KB** 👑 | ~1030 |
+| **SilentJSON** (Serial) | 2.2M | 621 | 25.9 | **~130 KB** 👑 | ~1030 |
 | Easyjson (codegen) | 2.0M | 322 | 50.7 | 15.4 MB | 534k |
 | Standard (`encoding/json`) | 1.26M | 206 | 79.4 | 1.6 MB | 108k |
 | simdjson-go (AST + manual extraction) | 1.0M | 171 | 95.6 | 306 MB | 1.4M |
@@ -197,7 +197,7 @@ xychart-beta
     bar [137, 351, 386, 454, 1984, 2468, 4012]
 ```
 
-*Honest reading of the struct-binding group: **jsoniter leads single-thread struct binding (454 vs 386 MB/s)**, and the standard library is the leanest on memory (107 MB, 5.1M allocs) while being the slowest. The measured reason for the jsoniter gap: silentjson's stream decoder materializes every key and every string value (≈12.5 allocations per record) because its sliding buffer is reused across reads, while jsoniter matches field names in place and allocates only values (≈4.9 per record). Matching keys without materializing them is the known optimization lead for closing that gap. `NextRawBlock()` remains in a class of its own (~4.0 GB/s, near-zero allocations) when struct binding is not needed, and `NextChanParallel` trades memory for 2 GB/s with binding.*
+*Honest reading of the struct-binding group: **silentjson's Next/Decode now leads single-thread struct binding (568 vs jsoniter's 454 MB/s)** — keys are matched in place (zero-copy, ~9 fewer allocations per record) and numbers take the single-pass fast path. The standard library remains the leanest on memory (107 MB) while being the slowest; silentjson's stream now allocates 84 MB / 10.5M allocs per 500 MB, down from 263 MB / 37.5M. `NextRawBlock()` remains in a class of its own (~4.0 GB/s, near-zero allocations) when struct binding is not needed, and `NextChanParallel` trades memory for 2 GB/s with binding.*
 
 
 ### 3. Serialization (Generation / Marshal)
@@ -622,7 +622,7 @@ Parser comparison, 100k chaos objects (16 MB):
 SilentJSON Parallel:  2,909 MB/s
 Goccy:                  683 MB/s
 Jsoniter:               524 MB/s
-SilentJSON Serial:      552 MB/s
+SilentJSON Serial:      621 MB/s
 Easyjson:               327 MB/s
 Standard JSON:          206 MB/s
 

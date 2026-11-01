@@ -120,11 +120,20 @@ func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 		return nil, fmt.Errorf("asm returned invalid count: %d", count)
 	}
 	validCount := 0
+	prevEnd := 0
 	for i := 0; i < count; i++ {
-		if buf[i].Start != buf[i].End {
-			buf[validCount] = buf[i]
-			validCount++
+		if buf[i].Start == buf[i].End {
+			continue // phantom chunk emitted on a stray comma
 		}
+		// separator grammar folded into the same pass as the phantom
+		// filter: one walk over the chunks instead of two
+		if !validArrayGap(rawInner[prevEnd:buf[i].Start], validCount > 0) {
+			reg.chunkPool.Put(buf[:cap(buf)])
+			return nil, fmt.Errorf("%w: expected ',' between array elements at %d", ErrTypeMismatch, buf[i].Start)
+		}
+		buf[validCount] = buf[i]
+		validCount++
+		prevEnd = buf[i].End
 	}
 	count = validCount
 	if count == 0 && !emptyArrayRemnant(rawInner) {
@@ -145,14 +154,6 @@ func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 	if count == 0 {
 		reg.chunkPool.Put(buf[:cap(buf)])
 		return target, nil
-	}
-	prevEnd := 0
-	for i := 0; i < count; i++ {
-		if !validArrayGap(rawInner[prevEnd:buf[i].Start], i > 0) {
-			reg.chunkPool.Put(buf[:cap(buf)])
-			return nil, fmt.Errorf("%w: expected ',' between array elements at %d", ErrTypeMismatch, buf[i].Start)
-		}
-		prevEnd = buf[i].End
 	}
 	structSize := unsafe.Sizeof(*new(T))
 	basePtr := unsafe.Pointer(&target[0])

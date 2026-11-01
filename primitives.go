@@ -193,7 +193,130 @@ func validJSONNumber(b []byte) bool {
 
 // parseJSONFloat parses a strict JSON number token into a float64.
 // Range errors (±Inf) are rejected, matching encoding/json.
+// pow10[i] = 10^i for i in [0,22]: every value is exactly representable
+// as a float64, which is what makes the fast path below bit-exact.
+var pow10 = [23]float64{1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20, 1e21, 1e22}
+
+// parseFloatFast handles the common number shapes (up to 16 significant
+// digits, |decimal exponent| <= 22) in a single validating pass.
+//
+// Bit-exactness argument: with <= 16 digits the mantissa fits uint64 and
+// stays below 2^53, and 10^k is exactly representable for k <= 22, so
+// mant*10^k is the exact integer value of the literal (correctly rounded
+// by one IEEE multiply) and mant/10^k is the correctly rounded true
+// quotient — both identical to what strconv.ParseFloat returns. Anything
+// outside the envelope (more digits, bigger exponents, subnormals near
+// the boundaries) reports not-ok and falls back to the strconv path,
+// which also produces the correct strict grammar error for garbage.
+func parseFloatFast(b []byte) (float64, bool) {
+	i := 0
+	neg := false
+	if i < len(b) && b[i] == '-' {
+		neg = true
+		i++
+	}
+	if i >= len(b) {
+		return 0, false
+	}
+
+	var mant uint64
+	digits := 0
+
+	// integer part ("0" alone, or [1-9][0-9]*)
+	if b[i] == '0' {
+		mant = 0
+		digits = 1
+		i++
+	} else if b[i] >= '1' && b[i] <= '9' {
+		for i < len(b) && b[i] >= '0' && b[i] <= '9' {
+			d := uint64(b[i] - '0')
+			if mant > (1<<53)/10 {
+				return 0, false // mantissa would exceed 2^53
+			}
+			mant = mant*10 + d
+			digits++
+			i++
+		}
+	} else {
+		return 0, false
+	}
+
+	exp10 := 0
+	// fraction
+	if i < len(b) && b[i] == '.' {
+		i++
+		if i >= len(b) || b[i] < '0' || b[i] > '9' {
+			return 0, false
+		}
+		for i < len(b) && b[i] >= '0' && b[i] <= '9' {
+			d := uint64(b[i] - '0')
+			if mant > (1<<53)/10 {
+				return 0, false
+			}
+			mant = mant*10 + d
+			digits++
+			exp10--
+			i++
+		}
+	}
+	if digits == 0 {
+		return 0, false
+	}
+	// exponent
+	if i < len(b) && (b[i] == 'e' || b[i] == 'E') {
+		i++
+		esign := 1
+		if i < len(b) && (b[i] == '+' || b[i] == '-') {
+			if b[i] == '-' {
+				esign = -1
+			}
+			i++
+		}
+		if i >= len(b) || b[i] < '0' || b[i] > '9' {
+			return 0, false
+		}
+		ev := 0
+		for i < len(b) && b[i] >= '0' && b[i] <= '9' {
+			ev = ev*10 + int(b[i]-'0')
+			if ev > 100000 {
+				return 0, false // absurd exponent: fallback
+			}
+			i++
+		}
+		exp10 += esign * ev
+	}
+	if i != len(b) {
+		return 0, false // trailing garbage: let the strict path report it
+	}
+	if exp10 > 22 || exp10 < -22 {
+		return 0, false
+	}
+
+	var v float64
+	if exp10 >= 0 {
+		v = float64(mant) * pow10[exp10]
+	} else {
+		v = float64(mant) / pow10[-exp10]
+	}
+	if neg {
+		v = -v
+	}
+	// overflow/underflow to Inf/0 means we left the exactly-representable
+	// envelope (mant < 2^53 and |exp| <= 22 cannot overflow, but be safe
+	// against future edits) — fall back rather than guess.
+	// mant < 2^53 and |exp10| <= 22 keep the result between ~4.5e-23 and
+	// ~9e37 — far from the Inf/subnormal boundaries — but guard anyway so
+	// a future edit to the envelope cannot silently corrupt values.
+	if (v == 0 && mant != 0) || v != v || v > 1.7976931348623157e308 || v < -1.7976931348623157e308 {
+		return 0, false
+	}
+	return v, true
+}
+
 func parseJSONFloat(b []byte) (float64, bool) {
+	if v, ok := parseFloatFast(b); ok {
+		return v, true
+	}
 	if !validJSONNumber(b) {
 		return 0, false
 	}
