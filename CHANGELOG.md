@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased] — empty destination panic fix + JSON spec conformance tests
+
+### Fixed — UnmarshalSlice and UnmarshalSliceTolerant panicked on empty destination
+Taking `&dst[0]` on an empty slice panicked before the capacity check could run. Both functions now defer basePtr computation until after the first window is scanned; if dst is empty but the array has elements, a clear `"insufficient capacity: need N, have 0"` error is returned instead of a panic. Empty arrays with empty destinations succeed as expected.
+
+### Fixed — UnmarshalArrayParallel silently ignored non-empty arrays with empty destination
+When dst was empty, the parallel API returned `nil, nil` without checking whether the array actually contained elements. It now scans for at least one element first; if elements exist but dst is empty, it returns `"insufficient capacity: array has elements but destination is empty"`.
+
+### Added — comprehensive JSON spec conformance tests
+New `json_spec_errors_test.go` covers 27 error cases across object syntax (missing braces, trailing commas, unquoted keys), array syntax, string escapes, number validation (leading zeros, multiple decimals), literal parsing (misspelled true/false/null), type mismatches, stream truncation behavior, and valid edge cases per RFC 8259.
+
 ## [2.1.1] - 2026-11-01 — audit fixes: envelope epilogue + float boundary + stream tail
 
 Four post-release findings from the differential audit of 2.1.0 — all of
