@@ -739,3 +739,42 @@ func TestFixEnvelopeTruncationRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestFixEmptyStructSliceDelimiter(t *testing.T) {
+    type Item struct {
+        Value int `json:"value"`
+    }
+
+    type Root struct {
+        Items []Item `json:"items"`
+        ID    int    `json:"id"`
+    }
+
+    reg := BuildRegistry(reflect.TypeOf(Root{}))
+
+    // Empty slice followed by another field.
+    var valid Root
+    err := ParseObject(
+        []byte(`{"items":[],"id":1}`),
+        reg,
+        unsafe.Pointer(&valid),
+    )
+    if err != nil {
+        t.Fatalf("valid JSON rejected: %v", err)
+    }
+    if len(valid.Items) != 0 || valid.ID != 1 {
+        t.Fatalf("unexpected result: %+v", valid)
+    }
+
+    // Missing comma must be rejected.
+    var invalid Root
+    err = ParseObject(
+        []byte(`{"items":[] "id":1}`),
+        reg,
+        unsafe.Pointer(&invalid),
+    )
+    if err == nil {
+        t.Fatal("invalid JSON accepted: missing comma after empty struct slice")
+    }
+}
+
