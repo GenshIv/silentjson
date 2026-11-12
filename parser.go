@@ -945,7 +945,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 				}
 				if i < len(raw) && raw[i] == ']' {
 					i++
-					continue
+					break
 				}
 
 				header := (*reflect.SliceHeader)(unsafe.Pointer(uintptr(ptr) + info.Offset))
