@@ -124,7 +124,13 @@ func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 	total := 0
 	prevEndAbs := 0 // absolute end of the last accepted element
 	structSize := unsafe.Sizeof(*new(T))
-	basePtr := unsafe.Pointer(&dst[0])
+
+	// Defer basePtr computation until we know there's at least one element
+	// to write; taking &dst[0] on an empty slice panics.
+	var basePtr unsafe.Pointer
+	if len(dst) > 0 {
+		basePtr = unsafe.Pointer(&dst[0])
+	}
 
 	var err error
 	for scanOffset < len(rawInner) {
@@ -242,7 +248,13 @@ func UnmarshalSliceTolerant[T any](raw []byte, reg *Registry, dst []T) ([]T, []P
 	written := 0
 	prevEndAbs := 0
 	structSize := unsafe.Sizeof(*new(T))
-	basePtr := unsafe.Pointer(&dst[0])
+
+	// Defer basePtr computation until we know there's at least one element
+	// to write; taking &dst[0] on an empty slice panics.
+	var basePtr unsafe.Pointer
+	if len(dst) > 0 {
+		basePtr = unsafe.Pointer(&dst[0])
+	}
 
 	for scanOffset < len(rawInner) {
 		count, _ := findArrayElementsEarlyExitASM(rawInner[scanOffset:], buf[:len(buf)])
@@ -356,7 +368,22 @@ func UnmarshalArrayParallel[T any](raw []byte, reg *Registry, dst []T) ([]T, err
 	rawInner := raw[startIdx:]
 
 	structSize := unsafe.Sizeof(*new(T))
+
+	// If dst is empty, we must check whether the array actually has elements.
+	// Scan for at least one element to distinguish "empty array" from
+	// "non-empty array with insufficient destination".
 	if len(dst) == 0 {
+		hasElements := false
+		i := 0
+		for i < len(rawInner) && (charTable[rawInner[i]]&charSpace) != 0 {
+			i++
+		}
+		if i < len(rawInner) && rawInner[i] != ']' {
+			hasElements = true
+		}
+		if hasElements {
+			return nil, fmt.Errorf("insufficient capacity: array has elements but destination is empty")
+		}
 		return dst[:0], nil
 	}
 	basePtr := unsafe.Pointer(&dst[0])
