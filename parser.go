@@ -152,6 +152,9 @@ func countArrayItems(buf []byte) int {
 
 // MarshalSlice serializes a slice into a JSON array.
 func MarshalSlice[S ~[]T, T any](slice S, reg *Registry, buf []byte) []byte {
+	if err := validateRegistryType[T](reg); err != nil {
+		panic("silentjson: " + err.Error())
+	}
 	buf = append(buf, '[')
 	for i := 0; i < len(slice); i++ {
 		if i > 0 {
@@ -166,6 +169,9 @@ func MarshalSlice[S ~[]T, T any](slice S, reg *Registry, buf []byte) []byte {
 
 // Marshal serializes a single structure.
 func Marshal[T any](obj *T, reg *Registry, buf []byte) []byte {
+	if err := validateRegistryType[T](reg); err != nil {
+		panic("silentjson: " + err.Error())
+	}
 	return MarshalObject(unsafe.Pointer(obj), reg, buf)
 }
 

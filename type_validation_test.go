@@ -2,6 +2,7 @@ package silentjson
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"reflect"
 	"testing"
@@ -316,4 +317,86 @@ func (r *signalingReader) Read(p []byte) (int, error) {
 	default:
 	}
 	return 0, io.EOF
+}
+
+// Marshal type validation tests
+
+func TestTypeValidation_Marshal_Matching(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(TypeA{}))
+	obj := TypeA{ID: 1, Name: "Alice"}
+	buf := Marshal(&obj, reg, nil)
+	if !bytes.Contains(buf, []byte(`"id":1`)) {
+		t.Errorf("expected id field in output, got: %s", buf)
+	}
+}
+
+func TestTypeValidation_Marshal_MismatchedRegistry(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(TypeA{}))
+	obj := TypeB{Code: 1, Msg: "test"}
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for mismatched registry type")
+		}
+		msg := fmt.Sprintf("%v", r)
+		if !typeContains(msg, "registry built for") {
+			t.Errorf("expected type mismatch error, got: %s", msg)
+		}
+	}()
+	Marshal(&obj, reg, nil)
+}
+
+func TestTypeValidation_Marshal_NilRegistry(t *testing.T) {
+	obj := TypeA{ID: 1}
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for nil registry")
+		}
+		msg := fmt.Sprintf("%v", r)
+		if !typeContains(msg, "registry is nil") {
+			t.Errorf("expected nil registry error, got: %s", msg)
+		}
+	}()
+	Marshal(&obj, nil, nil)
+}
+
+func TestTypeValidation_MarshalSlice_Matching(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(TypeA{}))
+	slice := []TypeA{{ID: 1, Name: "Alice"}, {ID: 2, Name: "Bob"}}
+	buf := MarshalSlice(slice, reg, nil)
+	if !bytes.Contains(buf, []byte(`"id":1`)) || !bytes.Contains(buf, []byte(`"id":2`)) {
+		t.Errorf("expected both items in output, got: %s", buf)
+	}
+}
+
+func TestTypeValidation_MarshalSlice_MismatchedRegistry(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(TypeA{}))
+	slice := []TypeB{{Code: 1, Msg: "test"}}
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for mismatched registry type")
+		}
+		msg := fmt.Sprintf("%v", r)
+		if !typeContains(msg, "registry built for") {
+			t.Errorf("expected type mismatch error, got: %s", msg)
+		}
+	}()
+	MarshalSlice(slice, reg, nil)
+}
+
+func TestTypeValidation_MarshalSlice_NilRegistry(t *testing.T) {
+	slice := []TypeA{{ID: 1}}
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for nil registry")
+		}
+		msg := fmt.Sprintf("%v", r)
+		if !typeContains(msg, "registry is nil") {
+			t.Errorf("expected nil registry error, got: %s", msg)
+		}
+	}()
+	MarshalSlice(slice, nil, nil)
 }
