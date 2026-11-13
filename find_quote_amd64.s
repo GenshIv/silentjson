@@ -1420,15 +1420,16 @@ tail_brace_close_found:
     TESTQ R9, R9
     JNZ  tail_next
 
+    INCQ R8
+    CMPQ R13, DX
+    JGE  tail_reset_start
+
     MOVQ R13, AX
     SHLQ $4, AX
     MOVQ R10, 0(DI)(AX*1)
     MOVQ CX, 8(DI)(AX*1)
     INCQ 8(DI)(AX*1)
     INCQ R13
-    INCQ R8
-    CMPQ R13, DX
-    JGE  done
 tail_reset_start:
     MOVQ $-1, R10
     JMP  tail_next
