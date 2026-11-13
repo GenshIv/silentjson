@@ -504,12 +504,13 @@ escaped_copy:
     MOVQ R14, BX
     DECQ BX
     MOVQ BX, 0(SP)
-    MOVQ R12, 8(SP)
-    MOVQ R14, 16(SP)
     CALL ·allocBytes(SB)
-    MOVQ 8(SP), R12
+    MOVQ src_base+0(FP), R12
+    // Recompute end position from allocation size (slice len at 16(SP))
     MOVQ 16(SP), R14
-    MOVQ AX, DI
+    INCQ R14
+    // Read slice ptr from stack[8] - works for both normal and -race builds
+    MOVQ 8(SP), DI
     XORQ DX, DX
     XORQ R13, R13
     MOVQ R14, R15
