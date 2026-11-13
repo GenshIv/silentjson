@@ -948,19 +948,9 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 				for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
 					i++
 				}
-				if i < len(raw) && raw[i] == ']' {
-					// Empty array: truncate the slice
-					header := (*reflect.SliceHeader)(unsafe.Pointer(uintptr(ptr) + info.Offset))
-					if header.Data == 0 || header.Cap == 0 {
-						newSlice := reflect.MakeSlice(info.SliceType, 0, 16)
-						reflect.NewAt(info.SliceType, unsafe.Pointer(header)).Elem().Set(newSlice)
-					}
-					header.Len = 0
-					i++
-					break
-				}
 
 				header := (*reflect.SliceHeader)(unsafe.Pointer(uintptr(ptr) + info.Offset))
+				prevLen := header.Len
 				if header.Data == 0 || header.Cap == 0 {
 					newSlice := reflect.MakeSlice(info.SliceType, 0, 16)
 					// Typed Set keeps the backing array alive for the GC
@@ -969,60 +959,75 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 				header.Len = 0
 				elemSize := info.ElemType.Size()
 
-				for {
-					if header.Len >= header.Cap {
-						newCap := header.Cap * 2
-						if newCap == 0 {
-							newCap = 16
+				if i < len(raw) && raw[i] == ']' {
+					// Empty array: truncate the slice
+					i++
+				} else {
+					for {
+						if header.Len >= header.Cap {
+							newCap := header.Cap * 2
+							if newCap == 0 {
+								newCap = 16
+							}
+							oldSlice := reflect.NewAt(info.SliceType, unsafe.Pointer(header)).Elem()
+							newSlice := reflect.MakeSlice(info.SliceType, header.Len, newCap)
+							reflect.Copy(newSlice, oldSlice)
+							// Typed Set keeps the backing array alive for the GC
+							oldSlice.Set(newSlice)
 						}
-						oldSlice := reflect.NewAt(info.SliceType, unsafe.Pointer(header)).Elem()
-						newSlice := reflect.MakeSlice(info.SliceType, header.Len, newCap)
-						reflect.Copy(newSlice, oldSlice)
-						// Typed Set keeps the backing array alive for the GC
-						oldSlice.Set(newSlice)
-					}
 
-					// Convert the array start first: arithmetic from a raw
-					// uintptr fails checkptr (see the comment in
-					// parseRootSlice).
-					base := unsafe.Pointer(header.Data)
-					var elemPtr unsafe.Pointer
-					if info.ElemType.Kind() == reflect.Ptr {
-						nv := reflect.New(info.ElemType.Elem())
-						elemPtr = nv.UnsafePointer()
-						*(*unsafe.Pointer)(unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)) = elemPtr
-					} else {
-						elemPtr = unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)
-						// Zero the memory quickly using Go's optimized memclr
-						b := unsafe.Slice((*byte)(elemPtr), elemSize)
-						for j := range b {
-							b[j] = 0
+						// Convert the array start first: arithmetic from a raw
+						// uintptr fails checkptr (see the comment in
+						// parseRootSlice).
+						base := unsafe.Pointer(header.Data)
+						var elemPtr unsafe.Pointer
+						if info.ElemType.Kind() == reflect.Ptr {
+							nv := reflect.New(info.ElemType.Elem())
+							elemPtr = nv.UnsafePointer()
+							*(*unsafe.Pointer)(unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)) = elemPtr
+						} else {
+							elemPtr = unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)
+							// Zero the memory quickly using Go's optimized memclr
+							b := unsafe.Slice((*byte)(elemPtr), elemSize)
+							for j := range b {
+								b[j] = 0
+							}
 						}
-					}
 
-					consumed, err := parseObjectAt(raw[i:], info.Sub, elemPtr, copyStrings)
-					if err != nil {
-						return 0, err
-					}
-					header.Len++
-					i += consumed
+						consumed, err := parseObjectAt(raw[i:], info.Sub, elemPtr, copyStrings)
+						if err != nil {
+							return 0, err
+						}
+						header.Len++
+						i += consumed
 
-					for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
-						i++
-					}
-					if i >= len(raw) {
-						return 0, ErrUnexpectedEOF
-					}
-					if raw[i] == ',' {
-						i++
 						for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
 							i++
 						}
-					} else if raw[i] == ']' {
-						i++
-						break
-					} else {
-						return 0, fmt.Errorf("unexpected char in struct slice")
+						if i >= len(raw) {
+							return 0, ErrUnexpectedEOF
+						}
+						if raw[i] == ',' {
+							i++
+							for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+								i++
+							}
+						} else if raw[i] == ']' {
+							i++
+							break
+						} else {
+							return 0, fmt.Errorf("unexpected char in struct slice")
+						}
+					}
+				}
+
+				// Clear stale pointers in reused backing array for pointer-bearing slices.
+				// This prevents old objects from remaining reachable by the GC after
+				// truncation or replacement with a shorter array.
+				if info.ElemType.Kind() == reflect.Ptr && header.Len < prevLen {
+					base := unsafe.Pointer(header.Data)
+					for j := header.Len; j < prevLen; j++ {
+						*(*unsafe.Pointer)(unsafe.Pointer(uintptr(base) + uintptr(j)*elemSize)) = nil
 					}
 				}
 
