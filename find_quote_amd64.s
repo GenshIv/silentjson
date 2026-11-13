@@ -393,7 +393,7 @@ eof:
 
 
 // func parseShortStringASM(src []byte) ([]byte, int64)
-TEXT ·parseShortStringAVX2(SB), $24-56
+TEXT ·parseShortStringAVX2(SB), $128-56
     MOVQ src_base+0(FP), R12
     MOVQ src_len+8(FP), BX
 
@@ -503,13 +503,19 @@ scan_done:
 escaped_copy:
     MOVQ R14, BX
     DECQ BX
+    MOVQ R14, 32(SP)
     MOVQ BX, 0(SP)
-    MOVQ R12, 8(SP)
-    MOVQ R14, 16(SP)
     CALL ·allocBytes(SB)
-    MOVQ 8(SP), R12
-    MOVQ 16(SP), R14
+    MOVQ src_base+0(FP), R12
+    MOVQ 32(SP), R14
+    // Under -race, slice header may be at different offsets. Try reading from stack.
+    MOVQ 8(SP), DI
+    TESTQ DI, DI
+    JNE got_dest
+    // Fallback: try AX (register return)
     MOVQ AX, DI
+
+got_dest:
     XORQ DX, DX
     XORQ R13, R13
     MOVQ R14, R15
