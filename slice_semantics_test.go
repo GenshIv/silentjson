@@ -1,6 +1,7 @@
 package silentjson
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
@@ -733,8 +734,20 @@ func TestRootSlicePtr_EOFOnFullSlice(t *testing.T) {
 	// it would write out of bounds.
 	payload2 := []byte(`[{"id":2,"name":"b"}`)
 	err = ParseObject(payload2, reg, unsafe.Pointer(&items))
-	if err == nil {
-		t.Fatal("expected EOF error for truncated input")
+	if !errors.Is(err, ErrUnexpectedEOF) {
+		t.Fatalf("expected ErrUnexpectedEOF for truncated input, got: %v", err)
+	}
+
+	// Verify data preservation: the successfully decoded element must remain accessible
+	header = (*reflect.SliceHeader)(unsafe.Pointer(&items))
+	if header.Len != 1 {
+		t.Fatalf("expected len=1 after EOF error (one element successfully decoded), got %d", header.Len)
+	}
+	if items[0] == nil {
+		t.Fatal("successfully decoded element was cleared by cleanup")
+	}
+	if items[0].ID != 2 || items[0].Name != "b" {
+		t.Errorf("successfully decoded element has wrong values: id=%d name=%s", items[0].ID, items[0].Name)
 	}
 }
 
@@ -787,8 +800,21 @@ func TestSliceField_EOFOnFullSlice(t *testing.T) {
 	// Now parse truncated input: one valid element followed by EOF (no closing ])
 	payload2 := []byte(`{"name":"test","items":[{"id":2,"name":"b"}`)
 	err = ParseObject(payload2, reg, unsafe.Pointer(&obj))
-	if err == nil {
-		t.Fatal("expected EOF error for truncated input")
+	if !errors.Is(err, ErrUnexpectedEOF) {
+		t.Fatalf("expected ErrUnexpectedEOF for truncated input, got: %v", err)
+	}
+
+	// Verify data preservation: the successfully decoded element must remain accessible
+	field = reflect.ValueOf(&obj).Elem().FieldByName("Items")
+	header = (*reflect.SliceHeader)(unsafe.Pointer(field.UnsafeAddr()))
+	if header.Len != 1 {
+		t.Fatalf("expected len=1 after EOF error (one element successfully decoded), got %d", header.Len)
+	}
+	if obj.Items[0] == nil {
+		t.Fatal("successfully decoded element was cleared by cleanup")
+	}
+	if obj.Items[0].ID != 2 || obj.Items[0].Name != "b" {
+		t.Errorf("successfully decoded element has wrong values: id=%d name=%s", obj.Items[0].ID, obj.Items[0].Name)
 	}
 }
 
