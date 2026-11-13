@@ -452,7 +452,7 @@ func (d *StreamDecoder[T]) NextChanParallel(workers int, bufferSize int) <-chan 
 		bufferSize = 1
 	}
 
-	ch := make(chan StreamResult[*T], 1)
+	ch := make(chan StreamResult[*T], bufferSize)
 
 	// Check for initialization error before starting any goroutines.
 	if d.initErr != nil {

@@ -275,18 +275,18 @@ func TestTypeValidation_NextChanParallel_InitError(t *testing.T) {
 }
 
 // Test that no parsing or input-reading work is performed when initErr is set.
-// We use a reader that blocks on read to verify this.
+// We use a reader that signals when Read() is invoked to verify this.
 func TestTypeValidation_NextChanParallel_NoWorkOnInitError(t *testing.T) {
 	reg := BuildRegistry(reflect.TypeOf(TypeA{}))
 
-	// Use a channel-based reader that blocks until signaled
-	readCh := make(chan struct{})
-	r := &blockingReader{ch: readCh}
+	// Use a reader that signals when Read() is called
+	readCalled := make(chan struct{}, 1)
+	r := &signalingReader{ch: readCalled}
 	dec := NewStreamDecoder[TypeB](r, reg)
 
 	ch := dec.NextChanParallel(1, 1)
 
-	// Should receive the init error immediately without blocking on read
+	// Should receive the init error immediately without invoking the reader
 	select {
 	case result := <-ch:
 		if result.Err == nil {
@@ -296,21 +296,24 @@ func TestTypeValidation_NextChanParallel_NoWorkOnInitError(t *testing.T) {
 		t.Fatal("blocked waiting for result; reader was likely called")
 	}
 
-	// Verify the reader was never called by checking that readCh is still empty
+	// Verify the reader was never called by checking that readCalled is still empty
 	select {
-	case <-readCh:
+	case <-readCalled:
 		t.Error("reader was called despite init error")
 	default:
 		// Good - reader was not called
 	}
 }
 
-// blockingReader blocks on Read until signaled.
-type blockingReader struct {
+// signalingReader signals on a channel when Read() is invoked.
+type signalingReader struct {
 	ch chan struct{}
 }
 
-func (r *blockingReader) Read(p []byte) (int, error) {
-	<-r.ch
+func (r *signalingReader) Read(p []byte) (int, error) {
+	select {
+	case r.ch <- struct{}{}:
+	default:
+	}
 	return 0, io.EOF
 }
