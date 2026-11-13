@@ -673,24 +673,23 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 		keyLen := len(decoded)
 		var keyU64 uint64
 		if keyLen > 0 && keyLen <= 8 {
-			b := unsafe.SliceData(decoded)
 			switch keyLen {
 			case 1:
-				keyU64 = uint64(*b)
+				keyU64 = uint64(decoded[0])
 			case 2:
-				keyU64 = uint64(*(*uint16)(unsafe.Pointer(b)))
+				keyU64 = uint64(loadUint16(decoded, 0))
 			case 3:
-				keyU64 = uint64(*(*uint16)(unsafe.Pointer(b))) | (uint64(*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 2))) << 16)
+				keyU64 = uint64(loadUint16(decoded, 0)) | (uint64(decoded[2]) << 16)
 			case 4:
-				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b)))
+				keyU64 = uint64(loadUint32(decoded, 0))
 			case 5:
-				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b))) | (uint64(*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 4))) << 32)
+				keyU64 = uint64(loadUint32(decoded, 0)) | (uint64(decoded[4]) << 32)
 			case 6:
-				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b))) | (uint64(*(*uint16)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 4))) << 32)
+				keyU64 = uint64(loadUint32(decoded, 0)) | (uint64(loadUint16(decoded, 4)) << 32)
 			case 7:
-				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b))) | (uint64(*(*uint16)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 4))) << 32) | (uint64(*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 6))) << 48)
+				keyU64 = uint64(loadUint32(decoded, 0)) | (uint64(loadUint16(decoded, 4)) << 32) | (uint64(decoded[6]) << 48)
 			case 8:
-				keyU64 = *(*uint64)(unsafe.Pointer(b))
+				keyU64 = loadUint64(decoded, 0)
 			}
 		}
 
@@ -831,10 +830,10 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 				if i+4 <= len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == nullMagic {
 					*(*bool)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = false
 					i += 4
-				} else if i+3 < len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == trueMagic {
-					*(*bool)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = true
-					i += 4
-				} else if i+4 < len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == falsePrefixMagic && (charTable[raw[i+4]]&charLetterE) != 0 {
+			} else if i+4 <= len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == trueMagic {
+				*(*bool)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = true
+				i += 4
+			} else if i+5 <= len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == falsePrefixMagic && (charTable[raw[i+4]]&charLetterE) != 0 {
 					*(*bool)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = false
 					i += 5
 				} else {

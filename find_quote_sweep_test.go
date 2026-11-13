@@ -60,7 +60,7 @@ func TestFindQuoteOrEscapeSweep(t *testing.T) {
 
 	// Long buffers: single special bytes at every offset across several
 	// SIMD blocks, including exactly at 32-byte boundaries.
-	for n := range []int{64, 96, 129} {
+	for _, n := range []int{64, 96, 129} {
 		for pos := 0; pos < n; pos++ {
 			for _, spec := range []byte{'"', '\\', 'x'} {
 				buf := make([]byte, n)

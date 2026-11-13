@@ -7,6 +7,7 @@ import (
 )
 
 var hasAVX2 = cpu.X86.HasAVX2
+var hasPCLMULQDQ = cpu.X86.HasPCLMULQDQ
 
 func parseShortStringASM(src []byte) ([]byte, int64) {
 	if hasAVX2 {
@@ -65,7 +66,7 @@ func findObjectBoundariesEarlyExitASM(data []byte, chunks []Chunk) (int, int) {
 }
 
 func findArrayElementsEarlyExitASM(data []byte, chunks []Chunk) (int, int) {
-	if hasAVX2 {
+	if hasAVX2 && hasPCLMULQDQ {
 		return findArrayElementsEarlyExitAVX2(data, chunks)
 	}
 	return findArrayElementsEarlyExitScalar(data, chunks)

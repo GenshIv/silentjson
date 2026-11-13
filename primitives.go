@@ -654,6 +654,25 @@ func readJSONString(src []byte, copyStrings bool) (s string, content []byte, con
 	return unsafe.String(unsafe.SliceData(buf), len(buf)), buf, consumed, nil
 }
 
+// loadUint16 loads a uint16 from an arbitrary byte offset (safe on all architectures).
+func loadUint16(b []byte, offset int) uint16 {
+	return uint16(b[offset]) | (uint16(b[offset+1]) << 8)
+}
+
+// loadUint32 loads a uint32 from an arbitrary byte offset (safe on all architectures).
+func loadUint32(b []byte, offset int) uint32 {
+	return uint32(b[offset]) | (uint32(b[offset+1]) << 8) |
+		(uint32(b[offset+2]) << 16) | (uint32(b[offset+3]) << 24)
+}
+
+// loadUint64 loads a uint64 from an arbitrary byte offset (safe on all architectures).
+func loadUint64(b []byte, offset int) uint64 {
+	return uint64(b[offset]) | (uint64(b[offset+1]) << 8) |
+		(uint64(b[offset+2]) << 16) | (uint64(b[offset+3]) << 24) |
+		(uint64(b[offset+4]) << 32) | (uint64(b[offset+5]) << 40) |
+		(uint64(b[offset+6]) << 48) | (uint64(b[offset+7]) << 56)
+}
+
 func parseJSONString(raw []byte, start int, copyStrings bool) (string, int, error) {
 	s, _, consumed, err := readJSONString(raw[start:], copyStrings)
 	return s, int(consumed), err

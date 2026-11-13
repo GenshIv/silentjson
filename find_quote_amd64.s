@@ -136,6 +136,12 @@ asw_avx2_loop:
     CMPQ R9, $32
     JL   asw_scalar_loop       // < 32 bytes remaining => scalar tail
 
+    // Check capacity for bulk copy of 32 bytes (after escape expansion)
+    MOVQ R11, AX
+    ADDQ $32, AX
+    CMPQ AX, DX
+    JG   asw_scalar_loop       // not enough room for full chunk, use scalar path
+
     // Load 32 bytes from s[CX:]
     VMOVDQU (SI)(CX*1), Y0
 
@@ -167,6 +173,12 @@ asw_avx2_special:
     JZ   asw_escape_special    // nothing to copy before the special char
 
 asw_avx2_copy_prefix:
+    // Check capacity for this byte
+    MOVQ R11, AX
+    ADDQ $1, AX
+    CMPQ AX, DX
+    JG   asw_overflow
+
     MOVB (SI)(CX*1), AL
     MOVB AL, 0(DI)
     INCQ DI
@@ -207,6 +219,12 @@ asw_escape_write:
 asw_scalar_loop:
     CMPQ CX, BX
     JGE  asw_clean_done
+
+    // Check capacity for this byte (after escape expansion)
+    MOVQ R11, AX
+    ADDQ $1, AX
+    CMPQ AX, DX
+    JG   asw_overflow
 
     MOVB (SI)(CX*1), AL
     CMPB AL, $0x22
@@ -326,6 +344,9 @@ loop:
     JMP loop
 
 escape:
+    // Check bounds before reading escaped byte
+    CMPQ CX, BX
+    JGE eof                    // EOF after backslash -> error
     MOVB (SI)(CX*1), AL        // Read byte after '\'
     INCQ CX
 
@@ -837,6 +858,12 @@ avx_advance:
     JMP  avx_loop
 
 scalar_tail:
+    // Apply escape carry from previous SIMD block
+    CMPQ 0(SP), $0
+    JEQ  no_carry_tail
+    INCQ CX                      // Skip escaped byte at start of tail
+    MOVQ $0, 0(SP)               // Clear carry flag
+no_carry_tail:
     CMPQ CX, BX
     JGE  done
     MOVB (SI)(CX*1), AL

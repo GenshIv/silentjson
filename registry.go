@@ -149,24 +149,24 @@ func fillRegistry(typ reflect.Type, reg *Registry) {
 		keyLen := len(key)
 		var keyU64 uint64
 		if keyLen > 0 && keyLen <= 8 {
-			b := unsafe.SliceData([]byte(key))
+			keyBytes := []byte(key)
 			switch keyLen {
 			case 1:
-				keyU64 = uint64(*b)
+				keyU64 = uint64(keyBytes[0])
 			case 2:
-				keyU64 = uint64(*(*uint16)(unsafe.Pointer(b)))
+				keyU64 = uint64(loadUint16(keyBytes, 0))
 			case 3:
-				keyU64 = uint64(*(*uint16)(unsafe.Pointer(b))) | (uint64(*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 2))) << 16)
+				keyU64 = uint64(loadUint16(keyBytes, 0)) | (uint64(keyBytes[2]) << 16)
 			case 4:
-				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b)))
+				keyU64 = uint64(loadUint32(keyBytes, 0))
 			case 5:
-				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b))) | (uint64(*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 4))) << 32)
+				keyU64 = uint64(loadUint32(keyBytes, 0)) | (uint64(keyBytes[4]) << 32)
 			case 6:
-				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b))) | (uint64(*(*uint16)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 4))) << 32)
+				keyU64 = uint64(loadUint32(keyBytes, 0)) | (uint64(loadUint16(keyBytes, 4)) << 32)
 			case 7:
-				keyU64 = uint64(*(*uint32)(unsafe.Pointer(b))) | (uint64(*(*uint16)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 4))) << 32) | (uint64(*(*uint8)(unsafe.Pointer(uintptr(unsafe.Pointer(b)) + 6))) << 48)
+				keyU64 = uint64(loadUint32(keyBytes, 0)) | (uint64(loadUint16(keyBytes, 4)) << 32) | (uint64(keyBytes[6]) << 48)
 			case 8:
-				keyU64 = *(*uint64)(unsafe.Pointer(b))
+				keyU64 = loadUint64(keyBytes, 0)
 			}
 		}
 
