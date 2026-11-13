@@ -62,6 +62,7 @@ type Registry struct {
 	buildErr    error
 	typeName    string
 	lowerMap    map[string]int16 // lowercase json name -> field index (case-insensitive fallback)
+	RootType    reflect.Type    // exact type passed to BuildRegistry, for destination validation
 }
 
 // Err returns the error that occurred while building the registry, if any.
@@ -100,6 +101,7 @@ func buildRegistryLocked(typ reflect.Type) *Registry {
 	}
 	reg := &Registry{
 		typeName: typ.String(),
+		RootType: typ,
 	}
 	reg.chunkPool.New = func() any {
 		return make([]Chunk, 131072)

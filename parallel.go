@@ -3,10 +3,27 @@ package silentjson
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"runtime"
 	"sync"
 	"unsafe"
 )
+
+// validateRegistryType checks that the registry was built for type T.
+// Uses exact reflect.Type identity, not size comparison.
+func validateRegistryType[T any](reg *Registry) error {
+	if reg == nil {
+		return errors.New("registry is nil")
+	}
+	if reg.RootType == nil {
+		return errors.New("registry RootType is nil (BuildRegistry was not called with the correct type)")
+	}
+	dstType := reflect.TypeOf((*T)(nil)).Elem()
+	if dstType != reg.RootType {
+		return fmt.Errorf("registry built for %s, but destination type is %s", reg.RootType.String(), dstType.String())
+	}
+	return nil
+}
 
 func estimateChunkCapacity(raw []byte) int {
 	if len(raw) == 0 {
@@ -100,12 +117,9 @@ func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 		return dst[:0], nil
 	}
 
-	// Validate that the registry element type matches the destination type.
-	// This prevents memory corruption from incompatible registry/destination pairs.
-	tSize := unsafe.Sizeof(*new(T))
-	if reg.ElemType != nil && reg.ElemType.Size() != tSize {
-		return nil, fmt.Errorf("registry element type size (%d) does not match destination type size (%d)",
-			reg.ElemType.Size(), tSize)
+	// Validate that the registry was built for type T using exact type identity.
+	if err := validateRegistryType[T](reg); err != nil {
+		return nil, fmt.Errorf("UnmarshalSlice: %w", err)
 	}
 
 	buf := reg.chunkPool.Get().([]Chunk)
@@ -238,11 +252,9 @@ func UnmarshalSliceTolerant[T any](raw []byte, reg *Registry, dst []T) ([]T, []P
 		return dst[:0], nil
 	}
 
-	// Validate that the registry element type matches the destination type.
-	tSize := unsafe.Sizeof(*new(T))
-	if reg.ElemType != nil && reg.ElemType.Size() != tSize {
-		return nil, []Problem{{Offset: 0, Record: -1, Err: fmt.Errorf("registry element type size (%d) does not match destination type size (%d)",
-			reg.ElemType.Size(), tSize)}}
+	// Validate that the registry was built for type T using exact type identity.
+	if err := validateRegistryType[T](reg); err != nil {
+		return nil, []Problem{{Offset: 0, Record: -1, Err: fmt.Errorf("UnmarshalSliceTolerant: %w", err)}}
 	}
 
 	buf := reg.chunkPool.Get().([]Chunk)
@@ -375,11 +387,9 @@ func UnmarshalArrayParallel[T any](raw []byte, reg *Registry, dst []T) ([]T, err
 		return nil, nil
 	}
 
-	// Validate that the registry element type matches the destination type.
-	tSize := unsafe.Sizeof(*new(T))
-	if reg.ElemType != nil && reg.ElemType.Size() != tSize {
-		return nil, fmt.Errorf("registry element type size (%d) does not match destination type size (%d)",
-			reg.ElemType.Size(), tSize)
+	// Validate that the registry was built for type T using exact type identity.
+	if err := validateRegistryType[T](reg); err != nil {
+		return nil, fmt.Errorf("UnmarshalArrayParallel: %w", err)
 	}
 
 	startIdx := skipSpaceASM(raw, 0)

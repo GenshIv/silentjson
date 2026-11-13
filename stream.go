@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"sync"
 	"unsafe"
 )
@@ -50,18 +51,36 @@ type StreamDecoder[T any] struct {
 	// reported on the NEXT call (strict: ErrUnexpectedEOF, sticky) or once
 	// through the problem sink (tolerant: report, then clean io.EOF).
 	tailTruncated bool
+	// initErr stores a construction-time type validation error. Checked on
+	// first decode operation to avoid changing the constructor signature.
+	initErr error
 }
 
 // NewStreamDecoder creates a new streaming decoder.
 // It does NOT modify the passed registry (the registry may be shared with
 // direct ParseObject callers); copy-on-read string semantics are applied
 // per-decoder instead.
+//
+// The registry must have been built for type T. If not, the first decode
+// operation will return a type mismatch error.
 func NewStreamDecoder[T any](r io.Reader, reg *Registry) *StreamDecoder[T] {
+	var initErr error
+	if reg == nil {
+		initErr = errors.New("registry is nil")
+	} else if reg.RootType == nil {
+		initErr = errors.New("registry RootType is nil (BuildRegistry was not called with the correct type)")
+	} else {
+		dstType := reflect.TypeOf((*T)(nil)).Elem()
+		if dstType != reg.RootType {
+			initErr = fmt.Errorf("registry built for %s, but destination type is %s", reg.RootType.String(), dstType.String())
+		}
+	}
 	return &StreamDecoder[T]{
 		r:           r,
 		reg:         reg,
 		copyStrings: true,
 		buf:         make([]byte, 256*1024), // 256 KB sliding buffer
+		initErr:     initErr,
 	}
 }
 
@@ -284,6 +303,9 @@ func (d *StreamDecoder[T]) report(offset, record int, err error) {
 
 // Decode reads the next object from the JSON array and unmarshals it into obj.
 func (d *StreamDecoder[T]) Decode(obj *T) error {
+	if d.initErr != nil {
+		return fmt.Errorf("NewStreamDecoder: %w", d.initErr)
+	}
 	for {
 		chunk, err := d.nextChunk()
 		if err != nil {
@@ -308,6 +330,9 @@ func (d *StreamDecoder[T]) Decode(obj *T) error {
 // and passing it to the provided callback. This enables strictly zero-allocation stream processing.
 // If the callback returns false, the iteration stops early.
 func (d *StreamDecoder[T]) Next(cb func(obj *T) bool) error {
+	if d.initErr != nil {
+		return fmt.Errorf("NewStreamDecoder: %w", d.initErr)
+	}
 	for {
 		chunk, err := d.nextChunk()
 		if err != nil {
@@ -339,6 +364,9 @@ func (d *StreamDecoder[T]) Next(cb func(obj *T) bool) error {
 // that need the tail bytes (e.g. to resume after a reconnect) have
 // them, consumers that only want complete records check the error.
 func (d *StreamDecoder[T]) NextRaw() ([]byte, error) {
+	if d.initErr != nil {
+		return nil, fmt.Errorf("NewStreamDecoder: %w", d.initErr)
+	}
 	chunk, err := d.nextChunk()
 	if err != nil && len(chunk) == 0 {
 		return nil, err
@@ -371,6 +399,10 @@ func (d *StreamDecoder[T]) NextChan(bufferSize int) <-chan StreamResult[*T] {
 
 	go func() {
 		defer close(ch)
+		if d.initErr != nil {
+			ch <- StreamResult[*T]{Err: fmt.Errorf("NewStreamDecoder: %w", d.initErr)}
+			return
+		}
 		i := 0
 		for {
 			chunk, err := d.nextChunk()
@@ -499,6 +531,10 @@ func (d *StreamDecoder[T]) NextChanParallel(workers int, bufferSize int) <-chan 
 		// Submitter
 		go func() {
 			defer close(ch)
+			if d.initErr != nil {
+				ch <- StreamResult[*T]{Err: fmt.Errorf("NewStreamDecoder: %w", d.initErr)}
+				return
+			}
 			for batch := range batchQueue {
 				err := <-batch.done
 				if err != nil {
