@@ -731,10 +731,10 @@ func TestRootSlicePtr_EOFOnFullSlice(t *testing.T) {
 	// After parsing the first element, len will be 1 and the grow logic will run.
 	// But if there's an error path that tries to clear a slot at len without growing,
 	// it would write out of bounds.
-	payload2 := []byte(`[{"id":2,"name":"b"}]`)
+	payload2 := []byte(`[{"id":2,"name":"b"}`)
 	err = ParseObject(payload2, reg, unsafe.Pointer(&items))
-	if err != nil {
-		t.Fatalf("second parse failed: %v", err)
+	if err == nil {
+		t.Fatal("expected EOF error for truncated input")
 	}
 }
 
@@ -784,11 +784,11 @@ func TestSliceField_EOFOnFullSlice(t *testing.T) {
 		t.Fatalf("first parse failed: %v", err)
 	}
 
-	// Now parse with valid input (should grow and succeed)
-	payload2 := []byte(`{"name":"test","items":[{"id":2,"name":"b"}]}`)
+	// Now parse truncated input: one valid element followed by EOF (no closing ])
+	payload2 := []byte(`{"name":"test","items":[{"id":2,"name":"b"}`)
 	err = ParseObject(payload2, reg, unsafe.Pointer(&obj))
-	if err != nil {
-		t.Fatalf("second parse failed: %v", err)
+	if err == nil {
+		t.Fatal("expected EOF error for truncated input")
 	}
 }
 
