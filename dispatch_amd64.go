@@ -73,21 +73,18 @@ func findObjectBoundariesEarlyExitASM(data []byte, chunks []Chunk) (int, int) {
 	return findObjectBoundariesEarlyExitScalar(data, chunks)
 }
 
+// useArraySplitterAVX2 is a pure function that determines whether the AVX2
+// array splitter implementation should be used based on CPU features.
+// This is testable without executing any assembly instructions.
+func useArraySplitterAVX2(avx2, pclmul bool) bool {
+	return avx2 && pclmul
+}
+
 func findArrayElementsEarlyExitASM(data []byte, chunks []Chunk) (int, int) {
-	if hasAVX2 && hasPCLMULQDQ {
+	if useArraySplitterAVX2(hasAVX2, hasPCLMULQDQ) {
 		return findArrayElementsEarlyExitAVX2(data, chunks)
 	}
 	return findArrayElementsEarlyExitScalar(data, chunks)
-}
-
-// arraySplitterPath returns the implementation path that would be selected for
-// findArrayElementsEarlyExitASM without executing it. Used by tests to verify
-// dispatch logic. Returns "avx2" or "scalar".
-func arraySplitterPath() string {
-	if hasAVX2 && hasPCLMULQDQ {
-		return "avx2"
-	}
-	return "scalar"
 }
 
 func skipValueASM(raw []byte, start int) int {

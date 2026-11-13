@@ -187,35 +187,37 @@ func TestAppendString_CapacityBoundaries(t *testing.T) {
 		t.Skip("AVX2 not available")
 	}
 
-	tests := []struct {
-		name     string
-		input    string
-		capacity int
-	}{
-		// Exact capacity needed for plain string (no escapes)
-		{"exact_plain", "hello", 7}, // "hello" = 5 + 2 quotes
-        
-		// One byte short of exact
-		{"one_short", "hello", 6},
-		
-		// Exact capacity with one escaped quote
-		{"exact_one_quote", `he"llo`, 9}, // he\"llo = 7 + 2 quotes
-		
-		// Exact capacity with one escaped backslash
-		{"exact_one_backslash", "he\\llo", 9}, // he\\llo = 7 + 2 quotes
-		
-		// Exact capacity with multiple escapes
-		{"exact_multiple_escapes", `a"b\c`, 11}, // a\"b\\c = 7 + 2 quotes
-		
-		// Empty string
-		{"empty_string", "", 2},
-		
-		// Very long string with no escapes
-		{"long_no_escapes", strings.Repeat("x", 100), 102},
-		
-		// Long string with high escape ratio (every other char is a quote)
-		{"high_escape_ratio", strings.Repeat(`"`, 50), 152}, // 50 quotes -> 100 escaped bytes + 2 quotes
-	}
+		tests := []struct {
+			name     string
+			input    string
+			capacity int
+		}{
+			// Exact capacity needed for plain string (no escapes)
+			{"exact_plain", "hello", 7}, // "hello" = 5 + 2 quotes
+
+			// One byte short of exact
+			{"one_short", "hello", 6},
+
+			// Exact capacity with one escaped quote
+			{"exact_one_quote", `he"llo`, 9}, // he\"llo = 7 + 2 quotes
+
+			// Exact capacity with one escaped backslash
+			{"exact_one_backslash", "he\\llo", 9}, // he\\llo = 7 + 2 quotes
+
+			// Exact capacity with multiple escapes
+			// Input: a"b\c (5 bytes) -> Output: "a\"b\\c" (9 bytes)
+			{"exact_multiple_escapes", `a"b\c`, 9},
+
+			// Empty string
+			{"empty_string", "", 2},
+
+			// Very long string with no escapes
+			{"long_no_escapes", strings.Repeat("x", 100), 102},
+
+			// Long string with high escape ratio (every char is a quote)
+			// Input: 50 quotes -> Output: " + 50*\" + " = 102 bytes
+			{"high_escape_ratio", strings.Repeat(`"`, 50), 102},
+		}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -468,44 +470,45 @@ func TestFindObjectBoundaries_EscapeCarry_Detailed(t *testing.T) {
 	}
 }
 
-// TestFindObjectBoundaries_Comprehensive compares AVX2 and scalar implementations
-// across a comprehensive set of escape-carry scenarios at various SIMD boundaries.
+// TestFindObjectBoundaries_Comprehensive tests escape-carry scenarios at various SIMD boundaries.
+// The AVX2 and scalar EarlyExit implementations have different semantics:
+// - Scalar expects comma-separated objects or closing brackets (array context)
+// - AVX2 finds concatenated objects (NDJSON-like)
+// This test focuses on the AVX2 implementation's escape-carry behavior at SIMD boundaries,
+// with separate verification that scalar works correctly for its intended use case.
 func TestFindObjectBoundaries_Comprehensive(t *testing.T) {
 	testCases := []struct {
 		name     string
 		input    string
-		expected int // expected number of objects (for AVX2)
+		expected int // expected number of objects for AVX2
 	}{
 		// Escape at first SIMD boundary (position 31) - backslash escapes the quote
 		{"escape_at_31", `{"key":"` + strings.Repeat("a", 23) + `\"rest"}`, 1},
-		
+
 		// Escape at second SIMD boundary (position 63)
 		{"escape_at_63", `{"key":"` + strings.Repeat("a", 55) + `\"rest"}`, 1},
-		
+
 		// Escape at third SIMD boundary (position 95)
 		{"escape_at_95", `{"key":"` + strings.Repeat("a", 87) + `\"rest"}`, 1},
-		
+
 		// Backslash not at boundary
 		{"escape_not_at_boundary", `{"key":"val\"ue"}`, 1},
-		
+
 		// Two consecutive backslashes before quote (escaped backslash, then string ends)
 		{"double_backslash", `{"key":"val\\"}`, 1},
-		
-		// Escaped backslash at end of string value
-		{"backslash_at_end", `{"key":"val\\"}`, 1},
-		
+
 		// Four consecutive backslashes before quote (two escaped backslashes, then string ends)
-		{"quadruple_backslash", `{"key":"val\\\\\\"}`, 1},
-		
+		{"quadruple_backslash", `{"key":"val\\\\"}`, 1},
+
 		// Multiple objects with escapes
 		{"multiple_objects_escapes", `{"key":"v\"a"}{"key2":"v\"b"}`, 2},
-		
+
 		// Short input (less than 32 bytes)
 		{"short_input", `{"key":"value"}`, 1},
-		
+
 		// Empty input
 		{"empty_input", ``, 0},
-		
+
 		// No complete objects
 		{"incomplete_object", `{"key":`, 0},
 	}
@@ -513,54 +516,158 @@ func TestFindObjectBoundaries_Comprehensive(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			input := []byte(tc.input)
-			
-			// Test AVX2 implementation (primary - handles concatenated objects)
+
 			if hasAVX2 {
+				// Test AVX2 implementation (primary for concatenated objects)
 				chunksAVX2 := make([]Chunk, 20)
-				countAVX2, _ := findObjectBoundariesAVX2(input, chunksAVX2)
-				
-				// Verify expected count for AVX2
+				countAVX2, _ := findObjectBoundariesEarlyExitAVX2(input, chunksAVX2)
+
+				// Verify expected count
 				if countAVX2 != tc.expected {
-					t.Errorf("AVX2: expected %d objects, got %d", tc.expected, countAVX2)
+					t.Errorf("expected %d objects, got %d (AVX2)", tc.expected, countAVX2)
 				}
-				
+
 				// Verify chunk boundaries are within input range
 				for i := 0; i < countAVX2; i++ {
 					if chunksAVX2[i].Start < 0 || chunksAVX2[i].End > len(input) || chunksAVX2[i].Start >= chunksAVX2[i].End {
-						t.Errorf("AVX2 chunk %d out of range: start=%d, end=%d, input_len=%d",
+						t.Errorf("chunk %d out of range: start=%d, end=%d, input_len=%d",
 							i, chunksAVX2[i].Start, chunksAVX2[i].End, len(input))
 					}
 				}
-				
-				// Test scalar implementation for comparison
-				chunksScalar := make([]Chunk, 20)
-				countScalar, _ := findObjectBoundariesScalar(input, chunksScalar)
-				
-				// Note: Scalar version has different semantics - it expects
-				// comma-separated objects or closing brackets. It may not find
-				// objects that AVX2 finds in concatenated input. We only compare
-				// when both find objects.
-				if countScalar > 0 && countAVX2 > 0 {
-					minCount := countAVX2
-					if countScalar < minCount {
-						minCount = countScalar
+
+				// For inputs with commas (array context), compare with scalar
+				if strings.Contains(tc.input, ",") {
+					chunksScalar := make([]Chunk, 20)
+					countScalar, _ := findObjectBoundariesEarlyExitScalar(input, chunksScalar)
+
+					if countAVX2 != countScalar {
+						t.Errorf("count mismatch (comma-separated): AVX2=%d scalar=%d", countAVX2, countScalar)
 					}
-					for i := 0; i < minCount; i++ {
-						if chunksAVX2[i].Start != chunksScalar[i].Start || chunksAVX2[i].End != chunksScalar[i].End {
-							t.Errorf("AVX2 vs scalar: chunk %d mismatch (AVX2: %d-%d, scalar: %d-%d)",
-								i, chunksAVX2[i].Start, chunksAVX2[i].End, chunksScalar[i].Start, chunksScalar[i].End)
+
+					for i := 0; i < countScalar; i++ {
+						if chunksAVX2[i] != chunksScalar[i] {
+							t.Errorf("chunk %d mismatch: AVX2=%+v scalar=%+v", i, chunksAVX2[i], chunksScalar[i])
 						}
 					}
 				}
 			} else {
-				// AVX2 not available - test scalar only
-				chunksScalar := make([]Chunk, 20)
-				countScalar, _ := findObjectBoundariesScalar(input, chunksScalar)
-				
-				// Scalar may not find objects in concatenated input without
-				// commas or brackets, so we don't enforce the expected count.
-				t.Logf("scalar: found %d objects", countScalar)
+				// AVX2 not available - test scalar only for comma-separated inputs
+				if strings.Contains(tc.input, ",") {
+					chunksScalar := make([]Chunk, 20)
+					countScalar, _ := findObjectBoundariesEarlyExitScalar(input, chunksScalar)
+					t.Logf("scalar: found %d objects (AVX2 unavailable)", countScalar)
+				}
 			}
+		})
+	}
+}
+
+// TestFindObjectBoundaries_EscapeCarry_Sweep tests escape carry at every byte position
+// relative to SIMD block boundaries for the AVX2 implementation.
+func TestFindObjectBoundaries_EscapeCarry_Sweep(t *testing.T) {
+	if !hasAVX2 {
+		t.Skip("AVX2 not available")
+	}
+
+	// Test positions around each 32-byte boundary: -2, -1, 0, +1, +2 relative to boundary
+	for boundary := 32; boundary <= 96; boundary += 32 {
+		for offset := -2; offset <= 2; offset++ {
+			pos := boundary + offset
+
+			// Construct input: {"key":"<padding>"rest"} where backslash is at pos
+			prefixLen := 8 // `{"key":"`
+			paddingLen := pos - prefixLen
+			if paddingLen < 0 {
+				continue
+			}
+
+			input := `{"key":"` + strings.Repeat("a", paddingLen) + `\"rest"}`
+
+			t.Run(fmt.Sprintf("boundary_%d_offset_%d", boundary, offset), func(t *testing.T) {
+				chunksAVX2 := make([]Chunk, 10)
+				countAVX2, _ := findObjectBoundariesEarlyExitAVX2([]byte(input), chunksAVX2)
+
+				// Should find exactly 1 object with proper escape carry
+				if countAVX2 != 1 {
+					t.Errorf("expected 1 object, got %d", countAVX2)
+				} else if chunksAVX2[0].End != len(input) {
+					t.Errorf("object should span entire input: end=%d, input_len=%d", chunksAVX2[0].End, len(input))
+				}
+			})
+		}
+	}
+}
+
+// TestFindObjectBoundaries_BackslashCount tests various counts of consecutive backslashes
+// before a quote to verify proper escape handling in AVX2 implementation.
+func TestFindObjectBoundaries_BackslashCount(t *testing.T) {
+	if !hasAVX2 {
+		t.Skip("AVX2 not available")
+	}
+
+	for n := 1; n <= 6; n++ {
+		backslashes := strings.Repeat(`\`, n)
+		// Input: {"key":"val" + N backslashes + "rest"}
+		// Odd N: last backslash escapes the quote, string continues -> incomplete object (0 found)
+		// Even N: all backslashes escaped, quote ends string -> complete object + trailing garbage
+		input := `{"key":"val"` + backslashes + `"rest"}`
+
+		t.Run(fmt.Sprintf("backslash_%d", n), func(t *testing.T) {
+			chunksAVX2 := make([]Chunk, 10)
+			countAVX2, _ := findObjectBoundariesEarlyExitAVX2([]byte(input), chunksAVX2)
+
+			if n%2 == 1 {
+				// Odd: escaped quote means string continues, no closing brace -> incomplete
+				if countAVX2 != 0 {
+					t.Errorf("odd backslash count (%d): expected 0 objects (incomplete), got %d", n, countAVX2)
+				}
+			} else {
+				// Even: quote ends string, "rest"} is trailing garbage -> 1 complete object
+				if countAVX2 != 1 {
+					t.Errorf("even backslash count (%d): expected 1 object, got %d", n, countAVX2)
+				}
+			}
+		})
+	}
+}
+
+// TestFindObjectBoundaries_CommaSeparated_Differential verifies that AVX2 and scalar
+// agree on the objects they both find. Note: AVX2 finds more objects than scalar
+// EarlyExit because it continues scanning after each comma, while scalar exits early.
+// We compare only up to the scalar count (the guaranteed minimum).
+func TestFindObjectBoundaries_CommaSeparated_Differential(t *testing.T) {
+	if !hasAVX2 {
+		t.Skip("AVX2 not available")
+	}
+
+	testCases := []string{
+		`{"a":1},{"b":2}`,
+		`{"a":"x"},{"b":"y"}`,
+		`{"a":"v\"a"},{"b":"v\"b"}`,
+		`{"a":1},`,
+	}
+
+	for _, input := range testCases {
+		t.Run(input, func(t *testing.T) {
+			chunksAVX2 := make([]Chunk, 10)
+			countAVX2, _ := findObjectBoundariesEarlyExitAVX2([]byte(input), chunksAVX2)
+
+			chunksScalar := make([]Chunk, 10)
+			countScalar, _ := findObjectBoundariesEarlyExitScalar([]byte(input), chunksScalar)
+
+			// AVX2 should find at least as many objects as scalar
+			if countAVX2 < countScalar {
+				t.Errorf("AVX2 found fewer objects than scalar: AVX2=%d scalar=%d", countAVX2, countScalar)
+			}
+
+			// Compare chunk boundaries for objects that both found
+			for i := 0; i < countScalar; i++ {
+				if chunksAVX2[i] != chunksScalar[i] {
+					t.Errorf("chunk %d mismatch: AVX2=%+v scalar=%+v", i, chunksAVX2[i], chunksScalar[i])
+				}
+			}
+
+			t.Logf("AVX2=%d objects, scalar=%d objects (AVX2 finds more due to continued scanning)", countAVX2, countScalar)
 		})
 	}
 }
