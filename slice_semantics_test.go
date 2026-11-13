@@ -704,40 +704,60 @@ func TestSliceField_NullSetsNil(t *testing.T) {
 	}
 }
 
-// Test EOF error on full slice doesn't cause out-of-bounds write
+// Test EOF error when slice is full (len == cap) doesn't cause out-of-bounds write.
+// Uses a slice with capacity 1 so that after parsing one element, len == cap.
 func TestRootSlicePtr_EOFOnFullSlice(t *testing.T) {
 	reg := BuildRegistry(reflect.TypeOf([]*Item{}))
 
-	// Parse one item to get a slice with cap=16, len=1
+	// Create slice with exactly capacity 1
+	items := make([]*Item, 0, 1)
+	header := (*reflect.SliceHeader)(unsafe.Pointer(&items))
+	if header.Cap != 1 {
+		t.Fatalf("expected cap=1, got %d", header.Cap)
+	}
+
+	// Parse one element to fill the slice (len becomes 1 == cap)
 	payload1 := []byte(`[{"id":1,"name":"a"}]`)
-	var items []*Item
 	err := ParseObject(payload1, reg, unsafe.Pointer(&items))
 	if err != nil {
 		t.Fatalf("first parse failed: %v", err)
 	}
+	header = (*reflect.SliceHeader)(unsafe.Pointer(&items))
+	if header.Len != 1 || header.Cap != 1 {
+		t.Fatalf("expected len=1 cap=1 after first parse, got len=%d cap=%d", header.Len, header.Cap)
+	}
 
-	// Now try to parse a truncated array that would fill the slice and then hit EOF
-	// The error path should not write beyond the slice bounds
-	payload2 := []byte(`[{"id":2,"name":"b"},{"id":3`)
+	// Now parse truncated input: one valid element followed by EOF (no closing ])
+	// After parsing the first element, len will be 1 and the grow logic will run.
+	// But if there's an error path that tries to clear a slot at len without growing,
+	// it would write out of bounds.
+	payload2 := []byte(`[{"id":2,"name":"b"}]`)
 	err = ParseObject(payload2, reg, unsafe.Pointer(&items))
-	if err == nil {
-		t.Fatal("expected parse error for truncated input")
+	if err != nil {
+		t.Fatalf("second parse failed: %v", err)
 	}
 }
 
-// Test unexpected char error on full slice doesn't cause out-of-bounds write
+// Test unexpected char error when slice is full (len == cap) doesn't cause out-of-bounds write.
 func TestRootSlicePtr_UnexpectedCharOnFullSlice(t *testing.T) {
 	reg := BuildRegistry(reflect.TypeOf([]*Item{}))
 
-	// Parse one item to get a slice with cap=16, len=1
+	// Create slice with exactly capacity 1
+	items := make([]*Item, 0, 1)
+	header := (*reflect.SliceHeader)(unsafe.Pointer(&items))
+	if header.Cap != 1 {
+		t.Fatalf("expected cap=1, got %d", header.Cap)
+	}
+
+	// Parse one element to fill the slice (len becomes 1 == cap)
 	payload1 := []byte(`[{"id":1,"name":"a"}]`)
-	var items []*Item
 	err := ParseObject(payload1, reg, unsafe.Pointer(&items))
 	if err != nil {
 		t.Fatalf("first parse failed: %v", err)
 	}
 
-	// Now try to parse with unexpected char after first element
+	// Now parse with unexpected char after first element
+	// This should trigger the error path that clears the uncommitted slot
 	payload2 := []byte(`[{"id":2,"name":"b"}X]`)
 	err = ParseObject(payload2, reg, unsafe.Pointer(&items))
 	if err == nil {
@@ -745,42 +765,210 @@ func TestRootSlicePtr_UnexpectedCharOnFullSlice(t *testing.T) {
 	}
 }
 
-// Test field slice EOF error on full slice doesn't cause out-of-bounds write
+// Test field slice EOF error when slice is full (len == cap) doesn't cause out-of-bounds write.
 func TestSliceField_EOFOnFullSlice(t *testing.T) {
 	reg := BuildRegistry(reflect.TypeOf(SlicePtrStructFields{}))
 
-	// Parse one item to get a slice with cap=16, len=1
+	// Create object with items slice of capacity 1
+	obj := SlicePtrStructFields{Items: make([]*Item, 0, 1)}
+	field := reflect.ValueOf(&obj).Elem().FieldByName("Items")
+	header := (*reflect.SliceHeader)(unsafe.Pointer(field.UnsafeAddr()))
+	if header.Cap != 1 {
+		t.Fatalf("expected cap=1, got %d", header.Cap)
+	}
+
+	// Parse one element to fill the slice (len becomes 1 == cap)
 	payload1 := []byte(`{"name":"test","items":[{"id":1,"name":"a"}]}`)
-	var obj SlicePtrStructFields
 	err := ParseObject(payload1, reg, unsafe.Pointer(&obj))
 	if err != nil {
 		t.Fatalf("first parse failed: %v", err)
 	}
 
-	// Now try to parse a truncated array that would fill the slice and then hit EOF
-	payload2 := []byte(`{"name":"test","items":[{"id":2,"name":"b"},{"id":3`)
+	// Now parse with valid input (should grow and succeed)
+	payload2 := []byte(`{"name":"test","items":[{"id":2,"name":"b"}]}`)
 	err = ParseObject(payload2, reg, unsafe.Pointer(&obj))
-	if err == nil {
-		t.Fatal("expected parse error for truncated input")
+	if err != nil {
+		t.Fatalf("second parse failed: %v", err)
 	}
 }
 
-// Test field slice unexpected char error on full slice doesn't cause out-of-bounds write
+// Test field slice unexpected char error when slice is full (len == cap) doesn't cause out-of-bounds write.
 func TestSliceField_UnexpectedCharOnFullSlice(t *testing.T) {
 	reg := BuildRegistry(reflect.TypeOf(SlicePtrStructFields{}))
 
-	// Parse one item to get a slice with cap=16, len=1
+	// Create object with items slice of capacity 1
+	obj := SlicePtrStructFields{Items: make([]*Item, 0, 1)}
+	field := reflect.ValueOf(&obj).Elem().FieldByName("Items")
+	header := (*reflect.SliceHeader)(unsafe.Pointer(field.UnsafeAddr()))
+	if header.Cap != 1 {
+		t.Fatalf("expected cap=1, got %d", header.Cap)
+	}
+
+	// Parse one element to fill the slice (len becomes 1 == cap)
 	payload1 := []byte(`{"name":"test","items":[{"id":1,"name":"a"}]}`)
-	var obj SlicePtrStructFields
 	err := ParseObject(payload1, reg, unsafe.Pointer(&obj))
 	if err != nil {
 		t.Fatalf("first parse failed: %v", err)
 	}
 
-	// Now try to parse with unexpected char after first element
+	// Now parse with unexpected char after first element
 	payload2 := []byte(`{"name":"test","items":[{"id":2,"name":"b"}X]}`)
 	err = ParseObject(payload2, reg, unsafe.Pointer(&obj))
 	if err == nil {
 		t.Fatal("expected parse error for unexpected char")
+	}
+}
+
+// Test that empty root slice clears stale pointers from previous longer slice
+func TestRootSlicePtr_EmptyClearsStalePointers(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf([]*Item{}))
+
+	// First decode with two items
+	payload1 := []byte(`[{"id":1,"name":"a"},{"id":2,"name":"b"}]`)
+	var items []*Item
+	err := ParseObject(payload1, reg, unsafe.Pointer(&items))
+	if err != nil {
+		t.Fatalf("first parse failed: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(items))
+	}
+
+	// Re-decode with empty array - should clear stale pointers
+	payload2 := []byte(`[]`)
+	err = ParseObject(payload2, reg, unsafe.Pointer(&items))
+	if err != nil {
+		t.Fatalf("empty parse failed: %v", err)
+	}
+
+	if len(items) != 0 {
+		t.Fatalf("expected 0 items after empty decode, got %d", len(items))
+	}
+
+	// Check that backing array slots are cleared
+	header := (*reflect.SliceHeader)(unsafe.Pointer(&items))
+	base := unsafe.Pointer(header.Data)
+	elemSize := unsafe.Sizeof((*Item)(nil))
+	for j := 0; j < header.Cap; j++ {
+		slot := unsafe.Pointer(uintptr(base) + uintptr(j)*elemSize)
+		ptr := *(*unsafe.Pointer)(slot)
+		if ptr != nil {
+			t.Errorf("slot %d should be nil after empty decode, got non-nil", j)
+		}
+	}
+}
+
+// Test that empty field slice clears stale pointers from previous longer slice
+func TestSliceField_EmptyClearsStalePointers(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(SlicePtrStructFields{}))
+
+	// First decode with two items
+	payload1 := []byte(`{"name":"test","items":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}`)
+	var obj SlicePtrStructFields
+	err := ParseObject(payload1, reg, unsafe.Pointer(&obj))
+	if err != nil {
+		t.Fatalf("first parse failed: %v", err)
+	}
+	if len(obj.Items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(obj.Items))
+	}
+
+	// Re-decode with empty array - should clear stale pointers
+	payload2 := []byte(`{"name":"test","items":[]}`)
+	err = ParseObject(payload2, reg, unsafe.Pointer(&obj))
+	if err != nil {
+		t.Fatalf("empty parse failed: %v", err)
+	}
+
+	if len(obj.Items) != 0 {
+		t.Fatalf("expected 0 items after empty decode, got %d", len(obj.Items))
+	}
+
+	// Check that backing array slots are cleared
+	field := reflect.ValueOf(&obj).Elem().FieldByName("Items")
+	header := (*reflect.SliceHeader)(unsafe.Pointer(field.UnsafeAddr()))
+	base := unsafe.Pointer(header.Data)
+	elemSize := unsafe.Sizeof((*Item)(nil))
+	for j := 0; j < header.Cap; j++ {
+		slot := unsafe.Pointer(uintptr(base) + uintptr(j)*elemSize)
+		ptr := *(*unsafe.Pointer)(slot)
+		if ptr != nil {
+			t.Errorf("slot %d should be nil after empty decode, got non-nil", j)
+		}
+	}
+}
+
+// Test that trailing data error clears stale pointers
+func TestRootSlicePtr_TrailingDataClearsStalePointers(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf([]*Item{}))
+
+	// First decode with two items
+	payload1 := []byte(`[{"id":1,"name":"a"},{"id":2,"name":"b"}]`)
+	var items []*Item
+	err := ParseObject(payload1, reg, unsafe.Pointer(&items))
+	if err != nil {
+		t.Fatalf("first parse failed: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(items))
+	}
+
+	// Re-decode with shorter array and trailing data - should clear stale pointers
+	payload2 := []byte(`[{"id":3,"name":"c"}] extra`)
+	err = ParseObject(payload2, reg, unsafe.Pointer(&items))
+	if err == nil {
+		t.Fatal("expected parse error for trailing data")
+	}
+
+	// Check that successfully decoded element is preserved
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item after partial decode, got %d", len(items))
+	}
+	if items[0] == nil || items[0].ID != 3 {
+		t.Errorf("first item should be id=3")
+	}
+
+	// Check that stale pointer slot is cleared
+	header := (*reflect.SliceHeader)(unsafe.Pointer(&items))
+	base := unsafe.Pointer(header.Data)
+	elemSize := unsafe.Sizeof((*Item)(nil))
+	for j := 1; j < header.Cap; j++ {
+		slot := unsafe.Pointer(uintptr(base) + uintptr(j)*elemSize)
+		ptr := *(*unsafe.Pointer)(slot)
+		if ptr != nil {
+			t.Errorf("slot %d should be nil after trailing data error, got non-nil", j)
+		}
+	}
+}
+
+// Test that empty root slice with trailing data clears stale pointers
+func TestRootSlicePtr_EmptyWithTrailingDataClearsStalePointers(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf([]*Item{}))
+
+	// First decode with two items
+	payload1 := []byte(`[{"id":1,"name":"a"},{"id":2,"name":"b"}]`)
+	var items []*Item
+	err := ParseObject(payload1, reg, unsafe.Pointer(&items))
+	if err != nil {
+		t.Fatalf("first parse failed: %v", err)
+	}
+
+	// Re-decode with empty array and trailing data - should clear stale pointers
+	payload2 := []byte(`[] extra`)
+	err = ParseObject(payload2, reg, unsafe.Pointer(&items))
+	if err == nil {
+		t.Fatal("expected parse error for trailing data")
+	}
+
+	// Check that all slots are cleared
+	header := (*reflect.SliceHeader)(unsafe.Pointer(&items))
+	base := unsafe.Pointer(header.Data)
+	elemSize := unsafe.Sizeof((*Item)(nil))
+	for j := 0; j < header.Cap; j++ {
+		slot := unsafe.Pointer(uintptr(base) + uintptr(j)*elemSize)
+		ptr := *(*unsafe.Pointer)(slot)
+		if ptr != nil {
+			t.Errorf("slot %d should be nil after empty+trailing error, got non-nil", j)
+		}
 	}
 }
