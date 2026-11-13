@@ -42,6 +42,11 @@ func TestAppendStringCapacity_EscapeExpansion(t *testing.T) {
 
 		// Mixed escapes
 		{"mixed_fit", `"a\b`, 12, -1},
+
+		// Empty string: needs 2 bytes for quotes only
+		{"empty_fit", ``, 4, -1},
+		{"empty_exact", ``, 2, -1},
+		{"empty_overflow", ``, 1, -2},
 	}
 
 	for _, tt := range tests {
@@ -130,7 +135,7 @@ func TestAppendString_Correctness(t *testing.T) {
 		`has "quotes"`,
 		`has \backslash`,
 		"mixed \" and \\ together",
-		"strings.Repeat(`\"`, 5)",
+		strings.Repeat(`\"`, 5),
 		strings.Repeat(`\\`, 10),
 	}
 
@@ -207,7 +212,8 @@ func TestParseShortStringAVX2_2_Bounds(t *testing.T) {
 }
 
 // TestFindObjectBoundaries_EscapeCarry tests the escape carry fix at SIMD→scalar transition.
-// A backslash at the end of a SIMD block should escape the first byte of the scalar tail.
+// A backslash at position 31 (last byte of first SIMD block) should escape a quote
+// at position 32 (first byte of scalar tail), preventing it from ending the string.
 func TestFindObjectBoundaries_EscapeCarry(t *testing.T) {
 	if !hasAVX2 {
 		t.Skip("AVX2 not available")
@@ -215,22 +221,32 @@ func TestFindObjectBoundaries_EscapeCarry(t *testing.T) {
 
 	// Construct input where a backslash falls exactly at the 32-byte boundary
 	// and escapes a quote in the scalar tail. The escaped quote should NOT be
-	// treated as the start of a string, so the object should still be found.
-	prefix := strings.Repeat("a", 31) // 31 bytes to align backslash at position 31
-	input := prefix + `\{"key":"value"}`
+	// treated as ending the string, so the object should still be found.
+	// Layout: {"key":" + 23 'a's + \ + " + rest"}"
+	// Positions: 0-7 = {"key":" , 8-30 = 'a's, 31 = backslash, 32 = escaped quote
+	prefix := `{"key":"` + strings.Repeat("a", 23)
+	input := prefix + `\` + `"rest"}`
 
 	chunks := make([]Chunk, 10)
 	count, _ := findObjectBoundariesAVX2([]byte(input), chunks)
 	if count != 1 {
 		t.Errorf("expected 1 object boundary, got %d", count)
 	}
-	// Object starts at position 32 (after the escaped quote) and ends at 46 (inclusive)
-	// Chunk.End is exclusive, so it should be 47
-	if chunks[0].Start != 32 {
-		t.Errorf("unexpected chunk start: %d (expected 32)", chunks[0].Start)
+	// Object starts at position 0 and ends at the closing brace
+	if chunks[0].Start != 0 {
+		t.Errorf("unexpected chunk start: %d (expected 0)", chunks[0].Start)
 	}
-	if chunks[0].End != 47 {
-		t.Errorf("unexpected chunk end: %d (expected 47)", chunks[0].End)
+	expectedEnd := len(input)
+	if chunks[0].End != expectedEnd {
+		t.Errorf("unexpected chunk end: %d (expected %d)", chunks[0].End, expectedEnd)
+	}
+
+	// Verify the object can be parsed correctly
+	objJSON := input[chunks[0].Start:chunks[0].End]
+	var result map[string]interface{}
+	err := json.Unmarshal([]byte(objJSON), &result)
+	if err != nil {
+		t.Errorf("parsed object is not valid JSON: %v (input: %s)", err, objJSON)
 	}
 }
 
@@ -247,5 +263,41 @@ func TestFindObjectBoundaries_EscapeCarry_MultipleBlocks(t *testing.T) {
 	count, _ := findObjectBoundariesAVX2([]byte(input), chunks)
 	if count != 3 {
 		t.Errorf("expected 3 object boundaries, got %d", count)
+	}
+}
+
+// TestFindObjectBoundaries_EscapeCarry_Detailed tests escape carry at exact SIMD boundary.
+func TestFindObjectBoundaries_EscapeCarry_Detailed(t *testing.T) {
+	if !hasAVX2 {
+		t.Skip("AVX2 not available")
+	}
+
+	// Case 1: Backslash at position 31 escapes quote at 32 (inside string)
+	prefix := `{"key":"` + strings.Repeat("a", 23)
+	input1 := prefix + `\` + `"rest"}`
+	
+	chunks1 := make([]Chunk, 10)
+	count1, _ := findObjectBoundariesAVX2([]byte(input1), chunks1)
+	t.Logf("Case 1 (escape at boundary): found %d objects", count1)
+	if count1 != 1 {
+		t.Errorf("expected 1 object, got %d", count1)
+	}
+
+	// Case 2: No escape, string ends normally before boundary
+	input2 := `{"key":"value"}{"key2":"value2"}`
+	chunks2 := make([]Chunk, 10)
+	count2, _ := findObjectBoundariesAVX2([]byte(input2), chunks2)
+	t.Logf("Case 2 (no escape): found %d objects", count2)
+	if count2 != 2 {
+		t.Errorf("expected 2 objects, got %d", count2)
+	}
+
+	// Case 3: Escape inside string, not at boundary
+	input3 := `{"key":"val\"ue"}{"key2":"value2"}`
+	chunks3 := make([]Chunk, 10)
+	count3, _ := findObjectBoundariesAVX2([]byte(input3), chunks3)
+	t.Logf("Case 3 (escape not at boundary): found %d objects", count3)
+	if count3 != 2 {
+		t.Errorf("expected 2 objects, got %d", count3)
 	}
 }

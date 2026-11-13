@@ -6,7 +6,15 @@ import (
 	"golang.org/x/sys/cpu"
 )
 
+// CPU feature flags - exposed as variables for testability. Tests can override
+// these to verify dispatch logic selects the correct implementation for different
+// CPU feature combinations.
 var hasAVX2 = cpu.X86.HasAVX2
+// VPCLMULQDQ (VEX-encoded, XMM operands) requires CPUID leaf 1 ECX bit 1
+// (PCLMULQDQ feature) plus AVX support for the VEX prefix. There is no
+// separate CPUID bit for VPCLMULQDQ vs PCLMULQDQ - they share the same
+// feature flag. The AVX512 variant (EVEX-encoded, ZMM operands) uses a
+// different bit (leaf 7 EBX bit 30), but that's not used here.
 var hasPCLMULQDQ = cpu.X86.HasPCLMULQDQ
 
 func parseShortStringASM(src []byte) ([]byte, int64) {

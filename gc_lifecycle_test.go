@@ -113,3 +113,79 @@ func TestStreamDecoderObjectReuse(t *testing.T) {
 		t.Errorf("second name changed after GC: '%s'", names[1])
 	}
 }
+
+// TestGCReachability verifies that zero-copy strings created by the parser
+// remain valid after GC, even when the original input buffer is not directly
+// referenced. The parsed struct must keep the backing array alive.
+func TestGCReachability(t *testing.T) {
+	type Doc struct {
+		Name string `json:"name"`
+	}
+
+	reg := BuildRegistry(reflect.TypeOf(Doc{}))
+	reg.CopyStrings = false // Enable zero-copy mode
+
+	// Helper function that creates input, parses, and returns only the struct
+	parseDoc := func() Doc {
+		payload := []byte(`{"name":"persistent value"}`)
+		var doc Doc
+		err := ParseObject(payload, reg, unsafe.Pointer(&doc))
+		if err != nil {
+			panic(err)
+		}
+		return doc // payload goes out of scope here
+	}
+
+	doc := parseDoc()
+	if doc.Name != "persistent value" {
+		t.Errorf("expected 'persistent value', got '%s'", doc.Name)
+	}
+
+	// Force GC multiple times - the string should remain valid
+	for i := 0; i < 3; i++ {
+		runtime.GC()
+	}
+
+	if doc.Name != "persistent value" {
+		t.Errorf("string changed after GC: '%s'", doc.Name)
+	}
+}
+
+// TestCopyStringsIndependence verifies that when CopyStrings=true, the parsed
+// string is completely independent of the original input buffer. Modifying or
+// freeing the original buffer should not affect the parsed string.
+func TestCopyStringsIndependence(t *testing.T) {
+	type Doc struct {
+		Name string `json:"name"`
+	}
+
+	reg := BuildRegistry(reflect.TypeOf(Doc{}))
+	reg.CopyStrings = true // Disable zero-copy mode
+
+	payload := []byte(`{"name":"independent value"}`)
+	var doc Doc
+	err := ParseObject(payload, reg, unsafe.Pointer(&doc))
+	if err != nil {
+		t.Fatalf("ParseObject failed: %v", err)
+	}
+
+	if doc.Name != "independent value" {
+		t.Errorf("expected 'independent value', got '%s'", doc.Name)
+	}
+
+	// Overwrite the original payload - should not affect the parsed string
+	for i := range payload {
+		payload[i] = 0
+	}
+
+	if doc.Name != "independent value" {
+		t.Errorf("string changed after overwriting original buffer: '%s'", doc.Name)
+	}
+
+	// Force GC
+	runtime.GC()
+
+	if doc.Name != "independent value" {
+		t.Errorf("string changed after GC: '%s'", doc.Name)
+	}
+}
