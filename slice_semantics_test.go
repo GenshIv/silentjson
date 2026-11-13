@@ -65,12 +65,19 @@ func TestSlice_NullSetsNil(t *testing.T) {
 	}
 }
 
-type SliceStructFields struct {
+type Item struct {
+	ID   int    `json:"id"`
 	Name string `json:"name"`
-	Items []struct {
-		ID   int    `json:"id"`
-		Name string `json:"name"`
-	} `json:"items"`
+}
+
+type SliceStructFields struct {
+	Name  string  `json:"name"`
+	Items []Item  `json:"items"`
+}
+
+type SlicePtrStructFields struct {
+	Name  string     `json:"name"`
+	Items []*Item    `json:"items"`
 }
 
 func TestSliceStruct_NullSetsNil(t *testing.T) {
@@ -117,6 +124,117 @@ func TestSliceStruct_EmptyArrayTruncates(t *testing.T) {
 	}
 	if len(obj.Items) != 0 {
 		t.Errorf("empty items array should truncate, got len=%d cap=%d", len(obj.Items), cap(obj.Items))
+	}
+}
+
+func TestSlicePtrStruct_NullSetsNil(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(SlicePtrStructFields{}))
+
+	// First decode with values
+	payload1 := []byte(`{"name":"first","items":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}`)
+	var obj SlicePtrStructFields
+	err := ParseObject(payload1, reg, unsafe.Pointer(&obj))
+	if err != nil {
+		t.Fatalf("first parse failed: %v", err)
+	}
+	if len(obj.Items) != 2 {
+		t.Fatalf("first parse wrong length: %d", len(obj.Items))
+	}
+
+	// Reuse destination with null slice of ptr-structs
+	payload2 := []byte(`{"name":"second","items":null}`)
+	err = ParseObject(payload2, reg, unsafe.Pointer(&obj))
+	if err != nil {
+		t.Fatalf("second parse failed: %v", err)
+	}
+	if obj.Items != nil {
+		t.Errorf("null items should set slice to nil, got len=%d cap=%d", len(obj.Items), cap(obj.Items))
+	}
+}
+
+func TestSlicePtrStruct_EmptyArrayTruncates(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(SlicePtrStructFields{}))
+
+	// First decode with values
+	payload1 := []byte(`{"name":"first","items":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}`)
+	var obj SlicePtrStructFields
+	err := ParseObject(payload1, reg, unsafe.Pointer(&obj))
+	if err != nil {
+		t.Fatalf("first parse failed: %v", err)
+	}
+
+	// Reuse destination with empty array
+	payload2 := []byte(`{"name":"second","items":[]}`)
+	err = ParseObject(payload2, reg, unsafe.Pointer(&obj))
+	if err != nil {
+		t.Fatalf("second parse failed: %v", err)
+	}
+	if len(obj.Items) != 0 {
+		t.Errorf("empty items array should truncate, got len=%d cap=%d", len(obj.Items), cap(obj.Items))
+	}
+}
+
+func TestSlicePtrStruct_NullThenNonEmpty(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(SlicePtrStructFields{}))
+
+	// First decode with values
+	payload1 := []byte(`{"name":"first","items":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}`)
+	var obj SlicePtrStructFields
+	err := ParseObject(payload1, reg, unsafe.Pointer(&obj))
+	if err != nil {
+		t.Fatalf("first parse failed: %v", err)
+	}
+
+	// Decode null
+	payload2 := []byte(`{"name":"second","items":null}`)
+	err = ParseObject(payload2, reg, unsafe.Pointer(&obj))
+	if err != nil {
+		t.Fatalf("null parse failed: %v", err)
+	}
+	if obj.Items != nil {
+		t.Errorf("null should set slice to nil, got len=%d", len(obj.Items))
+	}
+
+	// Decode non-empty array again
+	payload3 := []byte(`{"name":"third","items":[{"id":3,"name":"c"}]}`)
+	err = ParseObject(payload3, reg, unsafe.Pointer(&obj))
+	if err != nil {
+		t.Fatalf("third parse failed: %v", err)
+	}
+	if len(obj.Items) != 1 || obj.Items[0].ID != 3 || obj.Items[0].Name != "c" {
+		t.Errorf("expected single item after null, got %+v", obj.Items)
+	}
+}
+
+func TestSlicePtrStruct_EmptyThenNonEmpty(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(SlicePtrStructFields{}))
+
+	// First decode with values
+	payload1 := []byte(`{"name":"first","items":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}`)
+	var obj SlicePtrStructFields
+	err := ParseObject(payload1, reg, unsafe.Pointer(&obj))
+	if err != nil {
+		t.Fatalf("first parse failed: %v", err)
+	}
+
+	// Decode empty array
+	payload2 := []byte(`{"name":"second","items":[]}`)
+	err = ParseObject(payload2, reg, unsafe.Pointer(&obj))
+	if err != nil {
+		t.Fatalf("empty parse failed: %v", err)
+	}
+	if len(obj.Items) != 0 {
+		t.Errorf("empty should truncate slice, got len=%d", len(obj.Items))
+	}
+
+	// Decode non-empty array again
+	payload3 := []byte(`{"name":"third","items":[{"id":3,"name":"c"}]}`)
+	err = ParseObject(payload3, reg, unsafe.Pointer(&obj))
+	if err != nil {
+		t.Fatalf("third parse failed: %v", err)
+	}
+	if len(obj.Items) != 1 || obj.Items[0].ID != 3 || obj.Items[0].Name != "c" {
+		t.Errorf("expected single item after empty, got %+v", obj.Items)
 	}
 }
 

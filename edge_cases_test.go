@@ -3,31 +3,55 @@ package silentjson
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"unsafe"
 )
 
 // Test deep nesting doesn't cause stack overflow
 func TestDeepNesting(t *testing.T) {
-	depth := 100
-	jsonStr := "{"
-	for i := 0; i < depth; i++ {
-		jsonStr += fmt.Sprintf(`"l%d":{`, i)
+	type Node struct {
+		Child *Node `json:"child"`
+		Value int   `json:"value"`
 	}
-	jsonStr += `"leaf":42`
-	for i := 0; i < depth; i++ {
-		jsonStr += "}"
-	}
-	jsonStr += "}"
 
-	// This should parse without stack overflow
-	err := ParseObject([]byte(jsonStr), BuildRegistry(reflect.TypeOf(map[string]interface{}{})), nil)
-	// We expect an error because map[string]interface{} isn't supported,
-	// but it shouldn't panic or crash
-	if err == nil {
-		t.Log("deep nesting parsed successfully")
-	} else {
-		t.Logf("deep nesting error (expected for unsupported type): %v", err)
+	reg := BuildRegistry(reflect.TypeOf(Node{}))
+	if reg == nil {
+		t.Fatal("failed to build registry for recursive type")
+	}
+
+	depth := 100
+	// Build JSON: {"value":1,"child":{"value":2,"child":{...}}}
+	var sb strings.Builder
+	sb.WriteString(`{"value":1`)
+	for i := 2; i <= depth; i++ {
+		sb.WriteString(fmt.Sprintf(`,"child":{"value":%d`, i))
+	}
+	sb.WriteString(`,"child":null}`)
+	for i := 0; i < depth-1; i++ {
+		sb.WriteString("}")
+	}
+	jsonStr := sb.String()
+
+	var root Node
+	err := ParseObject([]byte(jsonStr), reg, unsafe.Pointer(&root))
+	if err != nil {
+		t.Fatalf("deep nesting parse failed at depth %d: %v", depth, err)
+	}
+
+	// Verify we actually traversed to the leaf
+	current := &root
+	for i := 0; i < depth; i++ {
+		if current.Value != i+1 {
+			t.Errorf("value mismatch at depth %d: got %d, want %d", i, current.Value, i+1)
+		}
+		if i < depth-1 && current.Child == nil {
+			t.Fatalf("expected child at depth %d, got nil", i)
+		}
+		current = current.Child
+	}
+	if current != nil && current.Value != depth+1 {
+		t.Errorf("leaf value mismatch: got %d, want %d", current.Value, depth+1)
 	}
 }
 

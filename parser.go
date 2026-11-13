@@ -935,11 +935,9 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 
 			case TypeStructSlice:
 				if i+4 <= len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == nullMagic {
-					// Zero out the slice header to make it nil
-					sliceHeader := (*reflect.SliceHeader)(unsafe.Pointer(uintptr(ptr) + info.Offset))
-					sliceHeader.Data = 0
-					sliceHeader.Len = 0
-					sliceHeader.Cap = 0
+					// Typed zero-value assignment sets the slice to nil
+					fieldPtr := unsafe.Pointer(uintptr(ptr) + info.Offset)
+					reflect.NewAt(info.SliceType, fieldPtr).Elem().SetZero()
 					i += 4
 					break
 				}
