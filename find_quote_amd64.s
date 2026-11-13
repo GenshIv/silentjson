@@ -392,8 +392,6 @@ eof:
     RET
 
 
-// parseShortStringAVX2 removed - had unresolved stackmap issue when calling allocBytes.
-// The function was only used in tests, not production code paths.
 
 // func parseShortStringCopyASM(src []byte, dst []byte) int64
 TEXT ·parseShortStringCopyASM(SB), NOSPLIT, $0-56
