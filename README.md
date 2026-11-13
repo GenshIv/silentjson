@@ -626,7 +626,7 @@ SilentJSON Serial:      621 MB/s
 Easyjson:               327 MB/s
 Standard JSON:          206 MB/s
 
-Record shapes (serial): small 2169 / medium 623 / large 3895 / huge 9058 MB/s
+Record shapes (serial): small 667 / medium 623 / large 3895 / huge 9058 MB/s
 
 Streaming, 3M records (500 MB):
 NextRawBlock:         4,012 MB/s
