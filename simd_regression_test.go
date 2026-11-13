@@ -4,6 +4,7 @@ package silentjson
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -180,6 +181,171 @@ func TestAppendString_Correctness(t *testing.T) {
 	}
 }
 
+// TestAppendString_CapacityBoundaries tests exact capacity boundaries.
+func TestAppendString_CapacityBoundaries(t *testing.T) {
+	if !hasAVX2 {
+		t.Skip("AVX2 not available")
+	}
+
+	tests := []struct {
+		name     string
+		input    string
+		capacity int
+	}{
+		// Exact capacity needed for plain string (no escapes)
+		{"exact_plain", "hello", 7}, // "hello" = 5 + 2 quotes
+        
+		// One byte short of exact
+		{"one_short", "hello", 6},
+		
+		// Exact capacity with one escaped quote
+		{"exact_one_quote", `he"llo`, 9}, // he\"llo = 7 + 2 quotes
+		
+		// Exact capacity with one escaped backslash
+		{"exact_one_backslash", "he\\llo", 9}, // he\\llo = 7 + 2 quotes
+		
+		// Exact capacity with multiple escapes
+		{"exact_multiple_escapes", `a"b\c`, 11}, // a\"b\\c = 7 + 2 quotes
+		
+		// Empty string
+		{"empty_string", "", 2},
+		
+		// Very long string with no escapes
+		{"long_no_escapes", strings.Repeat("x", 100), 102},
+		
+		// Long string with high escape ratio (every other char is a quote)
+		{"high_escape_ratio", strings.Repeat(`"`, 50), 152}, // 50 quotes -> 100 escaped bytes + 2 quotes
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := make([]byte, 0, tc.capacity)
+			out, specialPos := appendStringASM(buf, tc.input)
+			
+			if specialPos == -1 {
+				// Fast path succeeded - verify output is complete and correct
+				result := string(out)
+				expected, err := json.Marshal(tc.input)
+				if err != nil {
+					t.Fatalf("json.Marshal failed: %v", err)
+				}
+				if result != string(expected) {
+					t.Errorf("fast path output mismatch:\n got: %q\nwant: %q", result, string(expected))
+				}
+			} else if specialPos >= 0 {
+				// Slow path - verify the position is reasonable and complete manually
+				if specialPos > len(tc.input) {
+					t.Errorf("specialPos (%d) exceeds input length (%d)", specialPos, len(tc.input))
+				}
+				
+				// Complete the escaping in Go and verify correctness
+				buf = out
+				for i := specialPos; i < len(tc.input); i++ {
+					c := tc.input[i]
+					switch c {
+					case '"':
+						buf = append(buf, '\\', '"')
+					case '\\':
+						buf = append(buf, '\\', '\\')
+					default:
+						buf = append(buf, c)
+					}
+				}
+				buf = append(buf, '"')
+				
+				result := string(buf)
+				expected, err := json.Marshal(tc.input)
+				if err != nil {
+					t.Fatalf("json.Marshal failed: %v", err)
+				}
+				if result != string(expected) {
+					t.Errorf("slow path output mismatch:\n got: %q\nwant: %q", result, string(expected))
+				}
+			} else if specialPos == -2 {
+				// Overflow - expected for "one_short" case
+				if tc.name != "one_short" {
+					t.Errorf("unexpected overflow for %s", tc.name)
+				}
+			} else {
+				t.Fatalf("unexpected specialPos: %d", specialPos)
+			}
+		})
+	}
+}
+
+// TestAppendString_EscapeRatios tests various escape ratios to stress capacity estimation.
+func TestAppendString_EscapeRatios(t *testing.T) {
+	if !hasAVX2 {
+		t.Skip("AVX2 not available")
+	}
+
+	ratios := []struct {
+		name   string
+		generator func(n int) string
+	}{
+		{"no_escapes", func(n int) string { return strings.Repeat("a", n) }},
+		{"all_quotes", func(n int) string { return strings.Repeat(`"`, n) }},
+		{"all_backslashes", func(n int) string { return strings.Repeat(`\`, n) }},
+		{"alternating", func(n int) string {
+			s := strings.Builder{}
+			for i := 0; i < n; i++ {
+				if i%2 == 0 {
+					s.WriteByte('"')
+				} else {
+					s.WriteByte('a')
+				}
+			}
+			return s.String()
+		}},
+	}
+
+	lengths := []int{16, 32, 64, 128}
+
+	for _, ratio := range ratios {
+		for _, length := range lengths {
+			t.Run(fmt.Sprintf("%s_%d", ratio.name, length), func(t *testing.T) {
+				input := ratio.generator(length)
+				
+				// Calculate worst-case capacity (all chars escaped)
+				worstCase := 2*length + 2
+				
+				buf := make([]byte, 0, worstCase)
+				out, specialPos := appendStringASM(buf, input)
+				
+				var result string
+				if specialPos == -1 {
+					result = string(out)
+				} else {
+					// Complete escaping in Go
+					buf = out
+					for i := specialPos; i < len(input); i++ {
+						c := input[i]
+						switch c {
+						case '"':
+							buf = append(buf, '\\', '"')
+						case '\\':
+							buf = append(buf, '\\', '\\')
+						default:
+							buf = append(buf, c)
+						}
+					}
+					buf = append(buf, '"')
+					result = string(buf)
+				}
+				
+				expected, err := json.Marshal(input)
+				if err != nil {
+					t.Fatalf("json.Marshal failed: %v", err)
+				}
+				
+				if result != string(expected) {
+					t.Errorf("output mismatch for %s_%d:\n got: %q\nwant: %q", ratio.name, length, result, string(expected))
+				}
+			})
+		}
+	}
+}
+
 func minInt(a, b int) int {
 	if a < b {
 		return a
@@ -299,5 +465,102 @@ func TestFindObjectBoundaries_EscapeCarry_Detailed(t *testing.T) {
 	t.Logf("Case 3 (escape not at boundary): found %d objects", count3)
 	if count3 != 2 {
 		t.Errorf("expected 2 objects, got %d", count3)
+	}
+}
+
+// TestFindObjectBoundaries_Comprehensive compares AVX2 and scalar implementations
+// across a comprehensive set of escape-carry scenarios at various SIMD boundaries.
+func TestFindObjectBoundaries_Comprehensive(t *testing.T) {
+	testCases := []struct {
+		name     string
+		input    string
+		expected int // expected number of objects (for AVX2)
+	}{
+		// Escape at first SIMD boundary (position 31) - backslash escapes the quote
+		{"escape_at_31", `{"key":"` + strings.Repeat("a", 23) + `\"rest"}`, 1},
+		
+		// Escape at second SIMD boundary (position 63)
+		{"escape_at_63", `{"key":"` + strings.Repeat("a", 55) + `\"rest"}`, 1},
+		
+		// Escape at third SIMD boundary (position 95)
+		{"escape_at_95", `{"key":"` + strings.Repeat("a", 87) + `\"rest"}`, 1},
+		
+		// Backslash not at boundary
+		{"escape_not_at_boundary", `{"key":"val\"ue"}`, 1},
+		
+		// Two consecutive backslashes before quote (escaped backslash, then string ends)
+		{"double_backslash", `{"key":"val\\"}`, 1},
+		
+		// Escaped backslash at end of string value
+		{"backslash_at_end", `{"key":"val\\"}`, 1},
+		
+		// Four consecutive backslashes before quote (two escaped backslashes, then string ends)
+		{"quadruple_backslash", `{"key":"val\\\\\\"}`, 1},
+		
+		// Multiple objects with escapes
+		{"multiple_objects_escapes", `{"key":"v\"a"}{"key2":"v\"b"}`, 2},
+		
+		// Short input (less than 32 bytes)
+		{"short_input", `{"key":"value"}`, 1},
+		
+		// Empty input
+		{"empty_input", ``, 0},
+		
+		// No complete objects
+		{"incomplete_object", `{"key":`, 0},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			input := []byte(tc.input)
+			
+			// Test AVX2 implementation (primary - handles concatenated objects)
+			if hasAVX2 {
+				chunksAVX2 := make([]Chunk, 20)
+				countAVX2, _ := findObjectBoundariesAVX2(input, chunksAVX2)
+				
+				// Verify expected count for AVX2
+				if countAVX2 != tc.expected {
+					t.Errorf("AVX2: expected %d objects, got %d", tc.expected, countAVX2)
+				}
+				
+				// Verify chunk boundaries are within input range
+				for i := 0; i < countAVX2; i++ {
+					if chunksAVX2[i].Start < 0 || chunksAVX2[i].End > len(input) || chunksAVX2[i].Start >= chunksAVX2[i].End {
+						t.Errorf("AVX2 chunk %d out of range: start=%d, end=%d, input_len=%d",
+							i, chunksAVX2[i].Start, chunksAVX2[i].End, len(input))
+					}
+				}
+				
+				// Test scalar implementation for comparison
+				chunksScalar := make([]Chunk, 20)
+				countScalar, _ := findObjectBoundariesScalar(input, chunksScalar)
+				
+				// Note: Scalar version has different semantics - it expects
+				// comma-separated objects or closing brackets. It may not find
+				// objects that AVX2 finds in concatenated input. We only compare
+				// when both find objects.
+				if countScalar > 0 && countAVX2 > 0 {
+					minCount := countAVX2
+					if countScalar < minCount {
+						minCount = countScalar
+					}
+					for i := 0; i < minCount; i++ {
+						if chunksAVX2[i].Start != chunksScalar[i].Start || chunksAVX2[i].End != chunksScalar[i].End {
+							t.Errorf("AVX2 vs scalar: chunk %d mismatch (AVX2: %d-%d, scalar: %d-%d)",
+								i, chunksAVX2[i].Start, chunksAVX2[i].End, chunksScalar[i].Start, chunksScalar[i].End)
+						}
+					}
+				}
+			} else {
+				// AVX2 not available - test scalar only
+				chunksScalar := make([]Chunk, 20)
+				countScalar, _ := findObjectBoundariesScalar(input, chunksScalar)
+				
+				// Scalar may not find objects in concatenated input without
+				// commas or brackets, so we don't enforce the expected count.
+				t.Logf("scalar: found %d objects", countScalar)
+			}
+		})
 	}
 }

@@ -80,6 +80,16 @@ func findArrayElementsEarlyExitASM(data []byte, chunks []Chunk) (int, int) {
 	return findArrayElementsEarlyExitScalar(data, chunks)
 }
 
+// arraySplitterPath returns the implementation path that would be selected for
+// findArrayElementsEarlyExitASM without executing it. Used by tests to verify
+// dispatch logic. Returns "avx2" or "scalar".
+func arraySplitterPath() string {
+	if hasAVX2 && hasPCLMULQDQ {
+		return "avx2"
+	}
+	return "scalar"
+}
+
 func skipValueASM(raw []byte, start int) int {
 	if hasAVX2 {
 		return skipValueAVX2(raw, start)
