@@ -15,12 +15,12 @@ func validateRegistryType[T any](reg *Registry) error {
 	if reg == nil {
 		return errors.New("registry is nil")
 	}
-	if reg.RootType == nil {
-		return errors.New("registry RootType is nil (BuildRegistry was not called with the correct type)")
+	if reg.rootType == nil {
+		return errors.New("registry rootType is nil (BuildRegistry was not called with the correct type)")
 	}
 	dstType := reflect.TypeOf((*T)(nil)).Elem()
-	if dstType != reg.RootType {
-		return fmt.Errorf("registry built for %s, but destination type is %s", reg.RootType.String(), dstType.String())
+	if dstType != reg.rootType {
+		return fmt.Errorf("registry built for %s, but destination type is %s", reg.rootType.String(), dstType.String())
 	}
 	return nil
 }
@@ -113,13 +113,13 @@ func findObjectBoundaries(data []byte, buf []Chunk) ([]Chunk, int) {
 
 // UnmarshalSlice processes a raw JSON array sequentially, invoking ParseObject for each element.
 func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
-	if len(raw) == 0 {
-		return dst[:0], nil
-	}
-
 	// Validate that the registry was built for type T using exact type identity.
 	if err := validateRegistryType[T](reg); err != nil {
 		return nil, fmt.Errorf("UnmarshalSlice: %w", err)
+	}
+
+	if len(raw) == 0 {
+		return dst[:0], nil
 	}
 
 	buf := reg.chunkPool.Get().([]Chunk)
@@ -248,13 +248,13 @@ func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 }
 
 func UnmarshalSliceTolerant[T any](raw []byte, reg *Registry, dst []T) ([]T, []Problem) {
-	if len(raw) == 0 {
-		return dst[:0], nil
-	}
-
 	// Validate that the registry was built for type T using exact type identity.
 	if err := validateRegistryType[T](reg); err != nil {
 		return nil, []Problem{{Offset: 0, Record: -1, Err: fmt.Errorf("UnmarshalSliceTolerant: %w", err)}}
+	}
+
+	if len(raw) == 0 {
+		return dst[:0], nil
 	}
 
 	buf := reg.chunkPool.Get().([]Chunk)
@@ -383,13 +383,13 @@ type parseTask struct {
 }
 
 func UnmarshalArrayParallel[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
-	if len(raw) == 0 {
-		return nil, nil
-	}
-
 	// Validate that the registry was built for type T using exact type identity.
 	if err := validateRegistryType[T](reg); err != nil {
 		return nil, fmt.Errorf("UnmarshalArrayParallel: %w", err)
+	}
+
+	if len(raw) == 0 {
+		return nil, nil
 	}
 
 	startIdx := skipSpaceASM(raw, 0)

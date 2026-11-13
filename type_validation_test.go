@@ -2,8 +2,10 @@ package silentjson
 
 import (
 	"bytes"
+	"io"
 	"reflect"
 	"testing"
+	"time"
 	"unsafe"
 )
 
@@ -203,4 +205,112 @@ func typeContainsAt(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+// Test that all three parallel.go APIs reject a mismatched Registry type
+// even when raw is empty. This validates that the type check happens before
+// the empty-input early return.
+func TestTypeValidation_EmptyInput_Mismatch(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(TypeA{}))
+
+	// UnmarshalSlice with empty input and mismatched type
+	_, err := UnmarshalSlice[TypeB]([]byte{}, reg, make([]TypeB, 0))
+	if err == nil {
+		t.Error("UnmarshalSlice should reject mismatched type even with empty input")
+	}
+
+	// UnmarshalSliceTolerant with empty input and mismatched type
+	_, problems := UnmarshalSliceTolerant[TypeB]([]byte{}, reg, make([]TypeB, 0))
+	if len(problems) == 0 {
+		t.Error("UnmarshalSliceTolerant should reject mismatched type even with empty input")
+	}
+
+	// UnmarshalArrayParallel with empty input and mismatched type
+	_, err = UnmarshalArrayParallel[TypeB]([]byte{}, reg, make([]TypeB, 0))
+	if err == nil {
+		t.Error("UnmarshalArrayParallel should reject mismatched type even with empty input")
+	}
+}
+
+// Test that matching types with empty input still work correctly.
+func TestTypeValidation_EmptyInput_Matching(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(TypeA{}))
+
+	result, err := UnmarshalSlice[TypeA]([]byte{}, reg, make([]TypeA, 0))
+	if err != nil {
+		t.Fatalf("matching types with empty input should succeed: %v", err)
+	}
+	if len(result) != 0 {
+		t.Errorf("expected empty result, got %d items", len(result))
+	}
+}
+
+// Test that NextChanParallel with an initialization error emits exactly one
+// error result and closes the channel.
+func TestTypeValidation_NextChanParallel_InitError(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(TypeA{}))
+	r := bytes.NewReader([]byte(`[{"id":1}]`))
+	dec := NewStreamDecoder[TypeB](r, reg)
+
+	ch := dec.NextChanParallel(2, 1)
+
+	// Should receive exactly one error result
+	result := <-ch
+	if result.Err == nil {
+		t.Fatal("expected initialization error")
+	}
+	if !typeContains(result.Err.Error(), "registry built for") {
+		t.Errorf("expected type mismatch error, got: %v", result.Err)
+	}
+
+	// Channel should be closed after the single error
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Error("channel should be closed after init error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("channel was not closed")
+	}
+}
+
+// Test that no parsing or input-reading work is performed when initErr is set.
+// We use a reader that blocks on read to verify this.
+func TestTypeValidation_NextChanParallel_NoWorkOnInitError(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(TypeA{}))
+
+	// Use a channel-based reader that blocks until signaled
+	readCh := make(chan struct{})
+	r := &blockingReader{ch: readCh}
+	dec := NewStreamDecoder[TypeB](r, reg)
+
+	ch := dec.NextChanParallel(1, 1)
+
+	// Should receive the init error immediately without blocking on read
+	select {
+	case result := <-ch:
+		if result.Err == nil {
+			t.Fatal("expected initialization error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked waiting for result; reader was likely called")
+	}
+
+	// Verify the reader was never called by checking that readCh is still empty
+	select {
+	case <-readCh:
+		t.Error("reader was called despite init error")
+	default:
+		// Good - reader was not called
+	}
+}
+
+// blockingReader blocks on Read until signaled.
+type blockingReader struct {
+	ch chan struct{}
+}
+
+func (r *blockingReader) Read(p []byte) (int, error) {
+	<-r.ch
+	return 0, io.EOF
 }

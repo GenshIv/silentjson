@@ -67,12 +67,12 @@ func NewStreamDecoder[T any](r io.Reader, reg *Registry) *StreamDecoder[T] {
 	var initErr error
 	if reg == nil {
 		initErr = errors.New("registry is nil")
-	} else if reg.RootType == nil {
-		initErr = errors.New("registry RootType is nil (BuildRegistry was not called with the correct type)")
+	} else if reg.rootType == nil {
+		initErr = errors.New("registry rootType is nil (BuildRegistry was not called with the correct type)")
 	} else {
 		dstType := reflect.TypeOf((*T)(nil)).Elem()
-		if dstType != reg.RootType {
-			initErr = fmt.Errorf("registry built for %s, but destination type is %s", reg.RootType.String(), dstType.String())
+		if dstType != reg.rootType {
+			initErr = fmt.Errorf("registry built for %s, but destination type is %s", reg.rootType.String(), dstType.String())
 		}
 	}
 	return &StreamDecoder[T]{
@@ -452,7 +452,14 @@ func (d *StreamDecoder[T]) NextChanParallel(workers int, bufferSize int) <-chan 
 		bufferSize = 1
 	}
 
-	ch := make(chan StreamResult[*T], bufferSize)
+	ch := make(chan StreamResult[*T], 1)
+
+	// Check for initialization error before starting any goroutines.
+	if d.initErr != nil {
+		ch <- StreamResult[*T]{Err: fmt.Errorf("NewStreamDecoder: %w", d.initErr)}
+		close(ch)
+		return ch
+	}
 
 	const batchSize = 64
 	const maxRawSize = 1024 * 1024 // 1MB max raw slice per batch
@@ -531,10 +538,6 @@ func (d *StreamDecoder[T]) NextChanParallel(workers int, bufferSize int) <-chan 
 		// Submitter
 		go func() {
 			defer close(ch)
-			if d.initErr != nil {
-				ch <- StreamResult[*T]{Err: fmt.Errorf("NewStreamDecoder: %w", d.initErr)}
-				return
-			}
 			for batch := range batchQueue {
 				err := <-batch.done
 				if err != nil {
