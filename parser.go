@@ -996,6 +996,19 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 
 						consumed, err := parseObjectAt(raw[i:], info.Sub, elemPtr, copyStrings)
 						if err != nil {
+							// Clear stale pointers before returning on error.
+							// Always clear the newly written pointer at header.Len,
+							// plus any old pointers from a previous longer slice.
+							if info.ElemType.Kind() == reflect.Ptr && header.Data != 0 {
+								// Clear the pointer we just wrote (not yet committed)
+								slot := unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)
+								*(*unsafe.Pointer)(slot) = nil
+								// Clear old stale pointers beyond this one
+								for j := header.Len + 1; j < prevLen; j++ {
+									slot = unsafe.Pointer(uintptr(base) + uintptr(j)*elemSize)
+									*(*unsafe.Pointer)(slot) = nil
+								}
+							}
 							return 0, err
 						}
 						header.Len++
@@ -1005,6 +1018,15 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 							i++
 						}
 						if i >= len(raw) {
+							// Clear stale pointers on EOF error too
+							if info.ElemType.Kind() == reflect.Ptr && header.Data != 0 {
+								slot := unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)
+								*(*unsafe.Pointer)(slot) = nil
+								for j := header.Len + 1; j < prevLen; j++ {
+									slot = unsafe.Pointer(uintptr(base) + uintptr(j)*elemSize)
+									*(*unsafe.Pointer)(slot) = nil
+								}
+							}
 							return 0, ErrUnexpectedEOF
 						}
 						if raw[i] == ',' {
@@ -1016,6 +1038,15 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 							i++
 							break
 						} else {
+							// Clear stale pointers on unexpected char error too
+							if info.ElemType.Kind() == reflect.Ptr && header.Data != 0 {
+								slot := unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)
+								*(*unsafe.Pointer)(slot) = nil
+								for j := header.Len + 1; j < prevLen; j++ {
+									slot = unsafe.Pointer(uintptr(base) + uintptr(j)*elemSize)
+									*(*unsafe.Pointer)(slot) = nil
+								}
+							}
 							return 0, fmt.Errorf("unexpected char in struct slice")
 						}
 					}

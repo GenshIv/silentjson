@@ -370,6 +370,139 @@ func TestSliceStruct_EmptyDoesNotClearValueSlots(t *testing.T) {
 	}
 }
 
+func TestSlicePtrStruct_MalformedSecondElement(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(SlicePtrStructFields{}))
+
+	// First element valid, second element truncated mid-parse
+	payload := []byte(`{"name":"test","items":[{"id":1,"name":"a"},{"id":2`)
+	var obj SlicePtrStructFields
+	err := ParseObject(payload, reg, unsafe.Pointer(&obj))
+	if err == nil {
+		t.Fatal("expected parse error for malformed second element")
+	}
+
+	// After error, slice should have 1 element (first element parsed successfully)
+	if len(obj.Items) != 1 {
+		t.Errorf("expected 1 element after parse error, got %d", len(obj.Items))
+	}
+	if obj.Items[0].ID != 1 || obj.Items[0].Name != "a" {
+		t.Errorf("first element should be preserved: %+v", obj.Items[0])
+	}
+
+	// Verify no stale pointers beyond the logical slice length
+	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&obj.Items))
+	if hdr.Cap > 1 {
+		base := unsafe.Pointer(hdr.Data)
+		for j := 1; j < hdr.Cap; j++ {
+			slot := unsafe.Pointer(uintptr(base) + uintptr(j)*8)
+			ptrVal := *(*unsafe.Pointer)(slot)
+			if ptrVal != nil {
+				t.Errorf("stale pointer at index %d after parse error", j)
+			}
+		}
+	}
+}
+
+func TestSlicePtrStruct_MalformedFirstElement(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(SlicePtrStructFields{}))
+
+	// First element truncated mid-parse
+	payload := []byte(`{"name":"test","items":[{"id":1`)
+	var obj SlicePtrStructFields
+	err := ParseObject(payload, reg, unsafe.Pointer(&obj))
+	if err == nil {
+		t.Fatal("expected parse error for malformed first element")
+	}
+
+	// After error, slice should have 0 elements (no elements parsed successfully)
+	if len(obj.Items) != 0 {
+		t.Errorf("expected 0 elements after parse error, got %d", len(obj.Items))
+	}
+
+	// Verify no stale pointers in backing array
+	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&obj.Items))
+	if hdr.Cap > 0 {
+		base := unsafe.Pointer(hdr.Data)
+		for j := 0; j < hdr.Cap; j++ {
+			slot := unsafe.Pointer(uintptr(base) + uintptr(j)*8)
+			ptrVal := *(*unsafe.Pointer)(slot)
+			if ptrVal != nil {
+				t.Errorf("stale pointer at index %d after parse error", j)
+			}
+		}
+	}
+}
+
+func TestSlicePtrStruct_MalformedInputOnReusedSlice(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(SlicePtrStructFields{}))
+
+	// First decode with valid values
+	payload1 := []byte(`{"name":"first","items":[{"id":1,"name":"a"},{"id":2,"name":"b"}]}`)
+	var obj SlicePtrStructFields
+	err := ParseObject(payload1, reg, unsafe.Pointer(&obj))
+	if err != nil {
+		t.Fatalf("first parse failed: %v", err)
+	}
+
+	// Now decode malformed input into the same destination (truncated mid-parse)
+	payload2 := []byte(`{"name":"second","items":[{"id":3`)
+	err = ParseObject(payload2, reg, unsafe.Pointer(&obj))
+	if err == nil {
+		t.Fatal("expected parse error for malformed input")
+	}
+
+	// After error, slice should have 0 elements (no elements parsed successfully in second decode)
+	if len(obj.Items) != 0 {
+		t.Errorf("expected 0 elements after parse error, got %d", len(obj.Items))
+	}
+
+	// Verify no stale pointers in backing array (old values from first decode cleared)
+	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&obj.Items))
+	if hdr.Cap > 0 {
+		base := unsafe.Pointer(hdr.Data)
+		for j := 0; j < hdr.Cap; j++ {
+			slot := unsafe.Pointer(uintptr(base) + uintptr(j)*8)
+			ptrVal := *(*unsafe.Pointer)(slot)
+			if ptrVal != nil {
+				t.Errorf("stale pointer at index %d after parse error on reused slice", j)
+			}
+		}
+	}
+}
+
+func TestSlicePtrStruct_TruncatedInput(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(SlicePtrStructFields{}))
+
+	// Truncated input (unexpected EOF) - first element valid, no closing bracket
+	payload := []byte(`{"name":"test","items":[{"id":1,"name":"a"}`)
+	var obj SlicePtrStructFields
+	err := ParseObject(payload, reg, unsafe.Pointer(&obj))
+	if err == nil {
+		t.Fatal("expected parse error for truncated input")
+	}
+
+	// After error, slice should have 1 element (first element parsed successfully)
+	if len(obj.Items) != 1 {
+		t.Errorf("expected 1 element after parse error, got %d", len(obj.Items))
+	}
+	if obj.Items[0].ID != 1 || obj.Items[0].Name != "a" {
+		t.Errorf("first element should be preserved: %+v", obj.Items[0])
+	}
+
+	// Verify no stale pointers beyond the logical slice length
+	hdr := (*reflect.SliceHeader)(unsafe.Pointer(&obj.Items))
+	if hdr.Cap > 1 {
+		base := unsafe.Pointer(hdr.Data)
+		for j := 1; j < hdr.Cap; j++ {
+			slot := unsafe.Pointer(uintptr(base) + uintptr(j)*8)
+			ptrVal := *(*unsafe.Pointer)(slot)
+			if ptrVal != nil {
+				t.Errorf("stale pointer at index %d after truncated input", j)
+			}
+		}
+	}
+}
+
 func TestSlice_MissingFieldPreserves(t *testing.T) {
 	reg := BuildRegistry(reflect.TypeOf(SliceFields{}))
 
