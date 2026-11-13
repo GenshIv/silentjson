@@ -553,3 +553,153 @@ func TestSlice_NonEmptyReplaces(t *testing.T) {
 		t.Errorf("strs should be replaced, got %v", obj.Strs)
 	}
 }
+
+// Test null elements within []*Struct arrays (field context)
+func TestSlicePtrStruct_NullElementsInArray(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(SlicePtrStructFields{}))
+
+	payload := []byte(`{"name":"test","items":[{"id":1,"name":"a"},null,{"id":3,"name":"c"}]}`)
+	var obj SlicePtrStructFields
+	err := ParseObject(payload, reg, unsafe.Pointer(&obj))
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+
+	if len(obj.Items) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(obj.Items))
+	}
+	if obj.Items[0] == nil || obj.Items[0].ID != 1 {
+		t.Errorf("first item should be non-nil with id=1")
+	}
+	if obj.Items[1] != nil {
+		t.Errorf("second item should be nil, got %+v", obj.Items[1])
+	}
+	if obj.Items[2] == nil || obj.Items[2].ID != 3 {
+		t.Errorf("third item should be non-nil with id=3")
+	}
+}
+
+// Test null elements within root slice parsing
+func TestRootSlicePtr_NullElementsInArray(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf([]*Item{}))
+
+	payload := []byte(`[{"id":1,"name":"a"},null,{"id":3,"name":"c"}]`)
+	var items []*Item
+	err := ParseObject(payload, reg, unsafe.Pointer(&items))
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+
+	if len(items) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(items))
+	}
+	if items[0] == nil || items[0].ID != 1 {
+		t.Errorf("first item should be non-nil with id=1")
+	}
+	if items[1] != nil {
+		t.Errorf("second item should be nil, got %+v", items[1])
+	}
+	if items[2] == nil || items[2].ID != 3 {
+		t.Errorf("third item should be non-nil with id=3")
+	}
+}
+
+// Test that re-decoding with shorter array clears stale pointers (root slice context)
+func TestRootSlicePtr_ShorterArrayClearsStale(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf([]*Item{}))
+
+	// First decode with two items
+	payload1 := []byte(`[{"id":1,"name":"a"},{"id":2,"name":"b"}]`)
+	var items []*Item
+	err := ParseObject(payload1, reg, unsafe.Pointer(&items))
+	if err != nil {
+		t.Fatalf("first parse failed: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 items, got %d", len(items))
+	}
+
+	// Re-decode with shorter array (one item)
+	payload2 := []byte(`[{"id":3,"name":"c"}]`)
+	err = ParseObject(payload2, reg, unsafe.Pointer(&items))
+	if err != nil {
+		t.Fatalf("second parse failed: %v", err)
+	}
+
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item after shorter decode, got %d", len(items))
+	}
+	if items[0] == nil || items[0].ID != 3 {
+		t.Errorf("first item should be id=3")
+	}
+
+	// Check that the second slot is cleared (stale pointer removed)
+	inspectSlicePtr := func(slice []*Item) {
+		header := (*reflect.SliceHeader)(unsafe.Pointer(&slice))
+		base := unsafe.Pointer(header.Data)
+		elemSize := unsafe.Sizeof((*Item)(nil))
+		for j := 0; j < header.Cap; j++ {
+			slot := unsafe.Pointer(uintptr(base) + uintptr(j)*elemSize)
+			ptr := *(*unsafe.Pointer)(slot)
+			if j == 0 && ptr == nil {
+				t.Errorf("slot %d should be non-nil", j)
+			}
+			if j >= header.Len && ptr != nil {
+				t.Errorf("slot %d (beyond len) should be nil, got non-nil stale pointer", j)
+			}
+		}
+	}
+	inspectSlicePtr(items)
+}
+
+// Test root null sets slice to nil
+func TestRootSlice_NullSetsNil(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf([]*Item{}))
+
+	// First decode with items
+	payload1 := []byte(`[{"id":1,"name":"a"}]`)
+	var items []*Item
+	err := ParseObject(payload1, reg, unsafe.Pointer(&items))
+	if err != nil {
+		t.Fatalf("first parse failed: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+
+	// Decode null - should set slice to nil
+	payload2 := []byte(`null`)
+	err = ParseObject(payload2, reg, unsafe.Pointer(&items))
+	if err != nil {
+		t.Fatalf("null parse failed: %v", err)
+	}
+	if items != nil {
+		t.Errorf("slice should be nil after null decode, got len=%d", len(items))
+	}
+}
+
+// Test root null sets object slice field to nil
+func TestSliceField_NullSetsNil(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(SlicePtrStructFields{}))
+
+	// First decode with items
+	payload1 := []byte(`{"name":"test","items":[{"id":1,"name":"a"}]}`)
+	var obj SlicePtrStructFields
+	err := ParseObject(payload1, reg, unsafe.Pointer(&obj))
+	if err != nil {
+		t.Fatalf("first parse failed: %v", err)
+	}
+	if len(obj.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(obj.Items))
+	}
+
+	// Decode null for items field - should set slice to nil
+	payload2 := []byte(`{"name":"test","items":null}`)
+	err = ParseObject(payload2, reg, unsafe.Pointer(&obj))
+	if err != nil {
+		t.Fatalf("null parse failed: %v", err)
+	}
+	if obj.Items != nil {
+		t.Errorf("items slice should be nil after null decode, got len=%d", len(obj.Items))
+	}
+}

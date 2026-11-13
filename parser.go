@@ -229,6 +229,7 @@ func parseRootSlice(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings b
 
 	// Логика аналогична TypeStructSlice из parseObjectAt:
 	header := (*reflect.SliceHeader)(ptr)
+	prevLen := header.Len
 	if header.Data == 0 || header.Cap == 0 {
 		newSlice := reflect.MakeSlice(reg.SliceType, 0, 16)
 		// Typed Set keeps the backing array alive for the GC
@@ -262,40 +263,57 @@ func parseRootSlice(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings b
 			oldSlice.Set(newSlice)
 		}
 
-		// Convert the backing-array start (an object start, so the
-		// conversion is checkptr-safe) BEFORE doing pointer arithmetic:
-		// deriving an element address from a raw uintptr fails checkptr
-		// because the runtime cannot prove the result stays inside the
-		// allocation.
 		base := unsafe.Pointer(header.Data)
-		var elemPtr unsafe.Pointer
-		if reg.ElemType.Kind() == reflect.Ptr {
-			// Для слайса указателей (например, []*Struct)
-			// Выделяем память под саму структуру
-			nv := reflect.New(reg.ElemType.Elem())
-			elemPtr = nv.UnsafePointer()
-			// Записываем этот указатель в массив слайса
-			*(*unsafe.Pointer)(unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)) = elemPtr
-		} else {
-			elemPtr = unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)
-			// Очистка памяти элемента
-			b := unsafe.Slice((*byte)(elemPtr), elemSize)
-			for j := range b {
-				b[j] = 0
-			}
-		}
+		slotPtr := unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)
 
-		consumed, err := parseObjectAt(raw[i:], reg.ElemSub, elemPtr, copyStrings)
-		if err != nil {
-			return err
-		}
-		header.Len++
-		i += consumed
+		// Handle null elements in pointer-bearing slices
+		if reg.ElemType.Kind() == reflect.Ptr && i+4 <= len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == nullMagic {
+			*(*unsafe.Pointer)(slotPtr) = nil
+			header.Len++
+			i += 4
+		} else {
+			var elemPtr unsafe.Pointer
+			if reg.ElemType.Kind() == reflect.Ptr {
+				nv := reflect.New(reg.ElemType.Elem())
+				elemPtr = nv.UnsafePointer()
+				*(*unsafe.Pointer)(slotPtr) = elemPtr
+			} else {
+				elemPtr = slotPtr
+				b := unsafe.Slice((*byte)(elemPtr), elemSize)
+				for j := range b {
+					b[j] = 0
+				}
+			}
+
+			consumed, err := parseObjectAt(raw[i:], reg.ElemSub, elemPtr, copyStrings)
+				if err != nil {
+					// Clear uncommitted pointer and stale tail on error
+					if reg.ElemType.Kind() == reflect.Ptr && header.Data != 0 {
+						*(*unsafe.Pointer)(slotPtr) = nil
+						for j := header.Len + 1; j < prevLen; j++ {
+							staleSlot := unsafe.Pointer(uintptr(base) + uintptr(j)*elemSize)
+							*(*unsafe.Pointer)(staleSlot) = nil
+						}
+					}
+					return err
+				}
+				header.Len++
+				i += consumed
+			}
 
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
 			i++
 		}
 		if i >= len(raw) {
+			// Clear uncommitted pointer and stale tail on EOF error
+			if reg.ElemType.Kind() == reflect.Ptr && header.Data != 0 {
+				slotPtr := unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)
+				*(*unsafe.Pointer)(slotPtr) = nil
+				for j := header.Len + 1; j < prevLen; j++ {
+					staleSlot := unsafe.Pointer(uintptr(base) + uintptr(j)*elemSize)
+					*(*unsafe.Pointer)(staleSlot) = nil
+				}
+			}
 			return ErrUnexpectedEOF
 		}
 		if raw[i] == ',' {
@@ -303,18 +321,35 @@ func parseRootSlice(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings b
 			for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
 				i++
 			}
-		} else if raw[i] == ']' {
-			i++
-			for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+			} else if raw[i] == ']' {
 				i++
+				for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
+					i++
+				}
+				if i != len(raw) {
+					return fmt.Errorf("%w: trailing data after root array at %d", ErrTypeMismatch, i)
+				}
+				// Clear stale pointers in reused backing array for pointer-bearing slices
+				if reg.ElemType.Kind() == reflect.Ptr && header.Len < prevLen {
+					base := unsafe.Pointer(header.Data)
+					for j := header.Len; j < prevLen; j++ {
+						slot := unsafe.Pointer(uintptr(base) + uintptr(j)*elemSize)
+						*(*unsafe.Pointer)(slot) = nil
+					}
+				}
+				return nil
+			} else {
+				// Clear uncommitted pointer and stale tail on unexpected char error
+				if reg.ElemType.Kind() == reflect.Ptr && header.Data != 0 {
+					slotPtr := unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)
+					*(*unsafe.Pointer)(slotPtr) = nil
+					for j := header.Len + 1; j < prevLen; j++ {
+						staleSlot := unsafe.Pointer(uintptr(base) + uintptr(j)*elemSize)
+						*(*unsafe.Pointer)(staleSlot) = nil
+					}
+				}
+				return fmt.Errorf("unexpected char in root slice parsing")
 			}
-			if i != len(raw) {
-				return fmt.Errorf("%w: trailing data after root array at %d", ErrTypeMismatch, i)
-			}
-			return nil
-		} else {
-			return fmt.Errorf("unexpected char in root slice parsing")
-		}
 	}
 }
 
@@ -335,13 +370,17 @@ func parseObjectStrict(raw []byte, reg *Registry, ptr unsafe.Pointer, copyString
 	}
 
 	if i+4 <= len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == nullMagic {
-		// Root null is a no-op on the destination, like encoding/json.
+		// Root null: for slices, set to nil; for objects, no-op like encoding/json.
 		i += 4
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
 			i++
 		}
 		if i != len(raw) {
 			return fmt.Errorf("%w: trailing data after root null at %d", ErrTypeMismatch, i)
+		}
+		if reg.SliceType != nil && reg.ElemType != nil {
+			// Slice parse: set the slice to nil
+			reflect.NewAt(reg.SliceType, ptr).Elem().SetZero()
 		}
 		return nil
 	}
@@ -959,42 +998,46 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 				header.Len = 0
 				elemSize := info.ElemType.Size()
 
-				if i < len(raw) && raw[i] == ']' {
-					// Empty array: truncate the slice
-					i++
-				} else {
-					for {
-						if header.Len >= header.Cap {
-							newCap := header.Cap * 2
-							if newCap == 0 {
-								newCap = 16
+					if i < len(raw) && raw[i] == ']' {
+						// Empty array: truncate the slice
+						i++
+					} else {
+						for {
+							if header.Len >= header.Cap {
+								newCap := header.Cap * 2
+								if newCap == 0 {
+									newCap = 16
+								}
+								oldSlice := reflect.NewAt(info.SliceType, unsafe.Pointer(header)).Elem()
+								newSlice := reflect.MakeSlice(info.SliceType, header.Len, newCap)
+								reflect.Copy(newSlice, oldSlice)
+								// Typed Set keeps the backing array alive for the GC
+								oldSlice.Set(newSlice)
 							}
-							oldSlice := reflect.NewAt(info.SliceType, unsafe.Pointer(header)).Elem()
-							newSlice := reflect.MakeSlice(info.SliceType, header.Len, newCap)
-							reflect.Copy(newSlice, oldSlice)
-							// Typed Set keeps the backing array alive for the GC
-							oldSlice.Set(newSlice)
-						}
 
-						// Convert the array start first: arithmetic from a raw
-						// uintptr fails checkptr (see the comment in
-						// parseRootSlice).
-						base := unsafe.Pointer(header.Data)
-						var elemPtr unsafe.Pointer
-						if info.ElemType.Kind() == reflect.Ptr {
-							nv := reflect.New(info.ElemType.Elem())
-							elemPtr = nv.UnsafePointer()
-							*(*unsafe.Pointer)(unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)) = elemPtr
-						} else {
-							elemPtr = unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)
-							// Zero the memory quickly using Go's optimized memclr
-							b := unsafe.Slice((*byte)(elemPtr), elemSize)
-							for j := range b {
-								b[j] = 0
-							}
-						}
+							base := unsafe.Pointer(header.Data)
+							slotPtr := unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)
 
-						consumed, err := parseObjectAt(raw[i:], info.Sub, elemPtr, copyStrings)
+							// Handle null elements in pointer-bearing slices
+							if info.ElemType.Kind() == reflect.Ptr && i+4 <= len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == nullMagic {
+								*(*unsafe.Pointer)(slotPtr) = nil
+								header.Len++
+								i += 4
+							} else {
+								var elemPtr unsafe.Pointer
+								if info.ElemType.Kind() == reflect.Ptr {
+									nv := reflect.New(info.ElemType.Elem())
+									elemPtr = nv.UnsafePointer()
+									*(*unsafe.Pointer)(slotPtr) = elemPtr
+								} else {
+									elemPtr = slotPtr
+									b := unsafe.Slice((*byte)(elemPtr), elemSize)
+									for j := range b {
+										b[j] = 0
+									}
+								}
+
+								consumed, err := parseObjectAt(raw[i:], info.Sub, elemPtr, copyStrings)
 						if err != nil {
 							// Clear stale pointers before returning on error.
 							// Always clear the newly written pointer at header.Len,
@@ -1011,8 +1054,9 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 							}
 							return 0, err
 						}
-						header.Len++
-						i += consumed
+							header.Len++
+							i += consumed
+						}
 
 						for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
 							i++
