@@ -504,6 +504,8 @@ escaped_copy:
     MOVQ R14, BX
     DECQ BX
     MOVQ BX, 0(SP)
+    MOVQ R12, 8(SP)
+    MOVQ R14, 16(SP)
     CALL ·allocBytes(SB)
     MOVQ src_base+0(FP), R12
     // Recompute end position from allocation size (slice len at 16(SP))
