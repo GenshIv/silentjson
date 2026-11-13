@@ -293,15 +293,14 @@ func parseRootSlice(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings b
 				nv := reflect.New(reg.ElemType.Elem())
 				elemPtr = nv.UnsafePointer()
 				*(*unsafe.Pointer)(slotPtr) = elemPtr
-			} else {
-				elemPtr = slotPtr
-				b := unsafe.Slice((*byte)(elemPtr), elemSize)
-				for j := range b {
-					b[j] = 0
+				} else {
+					elemPtr = slotPtr
+					// Use typed zeroing instead of byte-wise to properly handle
+					// pointer-bearing structs (strings, slices, etc.) and GC barriers.
+					reflect.NewAt(reg.ElemType, elemPtr).Elem().SetZero()
 				}
-			}
 
-			consumed, err := parseObjectAt(raw[i:], reg.ElemSub, elemPtr, copyStrings)
+				consumed, err := parseObjectAt(raw[i:], reg.ElemSub, elemPtr, copyStrings)
 				if err != nil {
 					// Clear uncommitted pointer and stale tail on error.
 					// Only clear the slot if it's within bounds (header.Len < header.Cap).
@@ -1070,13 +1069,12 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 									*(*unsafe.Pointer)(slotPtr) = elemPtr
 								} else {
 									elemPtr = slotPtr
-									b := unsafe.Slice((*byte)(elemPtr), elemSize)
-									for j := range b {
-										b[j] = 0
-									}
+									// Use typed zeroing instead of byte-wise to properly handle
+									// pointer-bearing structs (strings, slices, etc.) and GC barriers.
+									reflect.NewAt(info.ElemType, elemPtr).Elem().SetZero()
 								}
 
-						consumed, err := parseObjectAt(raw[i:], info.Sub, elemPtr, copyStrings)
+							consumed, err := parseObjectAt(raw[i:], info.Sub, elemPtr, copyStrings)
 							if err != nil {
 								// Clear stale pointers before returning on error.
 								// Only clear the slot if it's within bounds (header.Len < header.Cap).

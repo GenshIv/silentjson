@@ -100,6 +100,14 @@ func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 		return dst[:0], nil
 	}
 
+	// Validate that the registry element type matches the destination type.
+	// This prevents memory corruption from incompatible registry/destination pairs.
+	tSize := unsafe.Sizeof(*new(T))
+	if reg.ElemType != nil && reg.ElemType.Size() != tSize {
+		return nil, fmt.Errorf("registry element type size (%d) does not match destination type size (%d)",
+			reg.ElemType.Size(), tSize)
+	}
+
 	buf := reg.chunkPool.Get().([]Chunk)
 	need := estimateChunkCapacity(raw)
 	if cap(buf) < need {
@@ -230,6 +238,13 @@ func UnmarshalSliceTolerant[T any](raw []byte, reg *Registry, dst []T) ([]T, []P
 		return dst[:0], nil
 	}
 
+	// Validate that the registry element type matches the destination type.
+	tSize := unsafe.Sizeof(*new(T))
+	if reg.ElemType != nil && reg.ElemType.Size() != tSize {
+		return nil, []Problem{{Offset: 0, Record: -1, Err: fmt.Errorf("registry element type size (%d) does not match destination type size (%d)",
+			reg.ElemType.Size(), tSize)}}
+	}
+
 	buf := reg.chunkPool.Get().([]Chunk)
 	need := estimateChunkCapacity(raw)
 	if cap(buf) < need {
@@ -358,6 +373,13 @@ type parseTask struct {
 func UnmarshalArrayParallel[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 	if len(raw) == 0 {
 		return nil, nil
+	}
+
+	// Validate that the registry element type matches the destination type.
+	tSize := unsafe.Sizeof(*new(T))
+	if reg.ElemType != nil && reg.ElemType.Size() != tSize {
+		return nil, fmt.Errorf("registry element type size (%d) does not match destination type size (%d)",
+			reg.ElemType.Size(), tSize)
 	}
 
 	startIdx := skipSpaceASM(raw, 0)

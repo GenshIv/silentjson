@@ -410,6 +410,8 @@ type streamBatch[T any] struct {
 // NextChanParallel launches a worker pool to parse the JSON stream concurrently.
 // It uses double buffering for raw IO data, eliminating pauses between disk reads and CPU parsing.
 // The objects are guaranteed to be returned in the original JSON array order.
+// WARNING: Like NextChan, returned pointers are from an internal ring buffer that is reused.
+// You must not retain references to them beyond processing the current channel value.
 func (d *StreamDecoder[T]) NextChanParallel(workers int, bufferSize int) <-chan StreamResult[*T] {
 	if workers < 1 {
 		workers = 1
