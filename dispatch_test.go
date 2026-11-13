@@ -43,12 +43,6 @@ func TestCPUFeatureDispatch(t *testing.T) {
 	if quoteIdx != expectedQuoteIdx {
 		t.Errorf("findQuoteAsm failed, got %d, expected %d", quoteIdx, expectedQuoteIdx)
 	}
-
-	// Test parseShortStringASM (no escapes, should return full string up to quote)
-	result, consumed := parseShortStringASM([]byte(`hello"`))
-	if string(result) != "hello" || consumed != 6 {
-		t.Errorf("parseShortStringASM failed: %q (consumed=%d)", string(result), consumed)
-	}
 }
 
 // TestVPCLMULQDQDispatch documents the CPUID requirements for VPCLMULQDQ.

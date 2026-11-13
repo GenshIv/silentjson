@@ -3,9 +3,6 @@
 package silentjson
 
 //go:noescape
-func parseShortStringAVX2(src []byte) ([]byte, int64)
-
-//go:noescape
 func parseShortStringAVX2_2(src []byte) (int64, int64)
 
 //go:noescape

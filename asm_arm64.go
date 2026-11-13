@@ -20,14 +20,6 @@ func scanJSONStringASM(src []byte) (int, bool) {
 	return -1, hasEscape
 }
 
-func parseShortStringASM(src []byte) ([]byte, int64) {
-	w, c := parseShortStringASM2(src)
-	if c < 0 {
-		return nil, -1
-	}
-	return src[:w], c
-}
-
 func parseShortStringASM2(src []byte) (int64, int64) {
 	end, hasEscape := scanJSONStringASM(src)
 	if end < 0 {

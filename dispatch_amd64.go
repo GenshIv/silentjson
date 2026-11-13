@@ -17,13 +17,6 @@ var hasAVX2 = cpu.X86.HasAVX2
 // different bit (leaf 7 EBX bit 30), but that's not used here.
 var hasPCLMULQDQ = cpu.X86.HasPCLMULQDQ
 
-func parseShortStringASM(src []byte) ([]byte, int64) {
-	if hasAVX2 {
-		return parseShortStringAVX2(src)
-	}
-	return parseShortStringScalar(src)
-}
-
 func parseShortStringASM2(src []byte) (int64, int64) {
 	if hasAVX2 {
 		return parseShortStringAVX2_2(src)
