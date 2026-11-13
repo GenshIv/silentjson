@@ -787,8 +787,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 
 			case TypeStringSlice:
 				if i+4 <= len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == nullMagic {
-					// null leaves the field as-is (nil on a fresh object),
-					// like encoding/json
+					*(*[]string)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = nil
 					i += 4
 					break
 				}
@@ -805,8 +804,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 
 			case TypeIntSlice:
 				if i+4 <= len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == nullMagic {
-					// null leaves the field as-is (nil on a fresh object),
-					// like encoding/json
+					*(*[]int)(unsafe.Pointer(uintptr(ptr) + info.Offset)) = nil
 					i += 4
 					break
 				}
@@ -936,6 +934,15 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 				}
 
 			case TypeStructSlice:
+				if i+4 <= len(raw) && *(*uint32)(unsafe.Pointer(&raw[i])) == nullMagic {
+					// Zero out the slice header to make it nil
+					sliceHeader := (*reflect.SliceHeader)(unsafe.Pointer(uintptr(ptr) + info.Offset))
+					sliceHeader.Data = 0
+					sliceHeader.Len = 0
+					sliceHeader.Cap = 0
+					i += 4
+					break
+				}
 				if (charTable[raw[i]] & charOpenBracket) == 0 {
 					return 0, fmt.Errorf("%w: expected struct slice value", ErrTypeMismatch)
 				}
@@ -944,6 +951,13 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 					i++
 				}
 				if i < len(raw) && raw[i] == ']' {
+					// Empty array: truncate the slice
+					header := (*reflect.SliceHeader)(unsafe.Pointer(uintptr(ptr) + info.Offset))
+					if header.Data == 0 || header.Cap == 0 {
+						newSlice := reflect.MakeSlice(info.SliceType, 0, 16)
+						reflect.NewAt(info.SliceType, unsafe.Pointer(header)).Elem().Set(newSlice)
+					}
+					header.Len = 0
 					i++
 					break
 				}
