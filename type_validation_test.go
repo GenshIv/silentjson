@@ -2,6 +2,7 @@ package silentjson
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"reflect"
@@ -234,12 +235,13 @@ func TestTypeValidation_EmptyInput_Mismatch(t *testing.T) {
 }
 
 // Test that matching types with empty input still work correctly.
+// Empty input is not a valid JSON document, so it must return ErrUnexpectedEOF.
 func TestTypeValidation_EmptyInput_Matching(t *testing.T) {
 	reg := BuildRegistry(reflect.TypeOf(TypeA{}))
 
 	result, err := UnmarshalSlice[TypeA]([]byte{}, reg, make([]TypeA, 0))
-	if err != nil {
-		t.Fatalf("matching types with empty input should succeed: %v", err)
+	if !errors.Is(err, ErrUnexpectedEOF) {
+		t.Fatalf("matching types with empty input should return ErrUnexpectedEOF: got %v", err)
 	}
 	if len(result) != 0 {
 		t.Errorf("expected empty result, got %d items", len(result))

@@ -118,10 +118,6 @@ func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 		return nil, fmt.Errorf("UnmarshalSlice: %w", err)
 	}
 
-	if len(raw) == 0 {
-		return dst[:0], nil
-	}
-
 	buf := reg.chunkPool.Get().([]Chunk)
 	need := estimateChunkCapacity(raw)
 	if cap(buf) < need {
@@ -129,7 +125,11 @@ func UnmarshalSlice[T any](raw []byte, reg *Registry, dst []T) ([]T, error) {
 	}
 
 	startIdx := skipSpaceASM(raw, 0)
-	if startIdx < 0 || startIdx >= len(raw) || raw[startIdx] != '[' {
+	if startIdx < 0 || startIdx >= len(raw) {
+		reg.chunkPool.Put(buf[:cap(buf)])
+		return dst[:0], ErrUnexpectedEOF
+	}
+	if raw[startIdx] != '[' {
 		reg.chunkPool.Put(buf[:cap(buf)])
 		return nil, errors.New("expected '[' at the beginning of array")
 	}
@@ -253,10 +253,6 @@ func UnmarshalSliceTolerant[T any](raw []byte, reg *Registry, dst []T) ([]T, []P
 		return nil, []Problem{{Offset: 0, Record: -1, Err: fmt.Errorf("UnmarshalSliceTolerant: %w", err)}}
 	}
 
-	if len(raw) == 0 {
-		return dst[:0], nil
-	}
-
 	buf := reg.chunkPool.Get().([]Chunk)
 	need := estimateChunkCapacity(raw)
 	if cap(buf) < need {
@@ -264,7 +260,11 @@ func UnmarshalSliceTolerant[T any](raw []byte, reg *Registry, dst []T) ([]T, []P
 	}
 
 	startIdx := skipSpaceASM(raw, 0)
-	if startIdx < 0 || startIdx >= len(raw) || raw[startIdx] != '[' {
+	if startIdx < 0 || startIdx >= len(raw) {
+		reg.chunkPool.Put(buf[:cap(buf)])
+		return dst[:0], []Problem{{Offset: 0, Record: -1, Err: fmt.Errorf("%w", ErrUnexpectedEOF)}}
+	}
+	if raw[startIdx] != '[' {
 		reg.chunkPool.Put(buf[:cap(buf)])
 		return nil, []Problem{{Offset: 0, Record: -1, Err: errors.New("expected '[' at the beginning of array")}}
 	}
@@ -388,12 +388,11 @@ func UnmarshalArrayParallel[T any](raw []byte, reg *Registry, dst []T) ([]T, err
 		return nil, fmt.Errorf("UnmarshalArrayParallel: %w", err)
 	}
 
-	if len(raw) == 0 {
-		return nil, nil
-	}
-
 	startIdx := skipSpaceASM(raw, 0)
-	if startIdx < 0 || startIdx >= len(raw) || raw[startIdx] != '[' {
+	if startIdx < 0 || startIdx >= len(raw) {
+		return nil, ErrUnexpectedEOF
+	}
+	if raw[startIdx] != '[' {
 		return nil, errors.New("expected '[' at the beginning of array")
 	}
 	startIdx++
