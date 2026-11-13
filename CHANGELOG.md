@@ -1,6 +1,52 @@
 # Changelog
 
-## [Unreleased] — empty destination panic fix + JSON spec conformance tests
+## [2.1.5] - 2026-11-13 — correctness and safety fixes: type validation, slice semantics, pointer cleanup
+
+Comprehensive release addressing memory safety, type validation, and edge-case correctness issues identified through a systematic audit of the unsafe code paths.
+
+### Fixed — Registry/destination type mismatch now detected at runtime
+Exact reflect.Type identity validation added at all public generic API boundaries (UnmarshalSlice, UnmarshalSliceTolerant, UnmarshalArrayParallel, StreamDecoder, Marshal, MarshalSlice). Previously, passing a Registry built for one struct type with a destination of another struct type of identical size would silently corrupt memory via incorrect field offsets. The mismatch now produces a clear error or panic before any unsafe pointer arithmetic occurs.
+
+### Fixed — slice semantics for null and empty array handling
+- `null` JSON values for string, int, and struct slice fields now set the destination to nil (previously preserved existing values).
+- Empty arrays (`[]`) now truncate existing slice contents (previously skipped without change).
+- Struct slice null handling added (previously caused a type mismatch error).
+
+### Fixed — pointer cleanup on decode errors
+Stale pointers in reused struct slice backing arrays are now cleared when decoding fails, preventing dangling references. Bounds checks added before clearing uncommitted pointer slots to prevent out-of-bounds writes on partial failures. Error paths are now checkptr-safe.
+
+### Fixed — null elements in []*Struct arrays
+Arrays of struct pointers now correctly handle null elements (set pointer to nil) instead of failing with a type mismatch error. Root-level null for slice types is handled consistently.
+
+### Fixed — VPCLMULQDQ CPU feature dispatch
+Added VPCLMULQDQ CPU feature check before using findArrayElementsEarlyExitAVX2. Previously, only AVX2 was checked, causing illegal instruction crashes on AVX2 CPUs without PCLMULQDQ support.
+
+### Fixed — appendString capacity bounds
+Added capacity checks before bulk copy and per-byte writes in appendStringAVX2 to prevent out-of-bounds writes when escape sequences expand the output. Returns original buffer length on overflow so Go fallback re-serializes correctly.
+
+### Fixed — object splitter capacity check
+Capacity check added before scalar-tail write in the object splitter to prevent writing beyond allocated bounds.
+
+### Fixed — parseShortStringAVX2 register corruption (then removed)
+Fixed escaped_copy source register corruption where allocBytes return values overwrote saved registers, causing null bytes for any escaped string. Subsequently removed the function entirely due to unresolved stackmap issues when calling allocBytes from assembly under high GC pressure.
+
+### Fixed — stream decoder init error handling
+Restored NextChanParallel channel capacity and fixed initialization error propagation in stream APIs. Validation now occurs before empty-input returns, ensuring type mismatches are detected early.
+
+### Removed — parseShortStringAVX2 implementation
+Removed the unused parseShortStringAVX2 assembly function (210 lines) due to stackmap issues with allocBytes calls under high GC pressure. The function was only reachable through dedicated tests, not production code paths. All other SIMD implementations preserved.
+
+### Tests and reliability
+- Added comprehensive regression tests for slice semantics (null, empty, reuse, deep nesting, large arrays).
+- Added pointer-bearing slice regression tests to verify stale pointer cleanup.
+- Added parseShortString escaped-string ABI regression tests.
+- Added canary-based regression tests for object splitter capacity bounds.
+- Strengthened CPU dispatch, escape-carry, and appendString capacity tests.
+- Hardened SIMD boundary and GC lifecycle test coverage.
+
+### Docs
+- Corrected small serial record benchmark values.
+- Updated stream ownership documentation.
 
 ### Fixed — UnmarshalSlice and UnmarshalSliceTolerant panicked on empty destination
 Taking `&dst[0]` on an empty slice panicked before the capacity check could run. Both functions now defer basePtr computation until after the first window is scanned; if dst is empty but the array has elements, a clear `"insufficient capacity: need N, have 0"` error is returned instead of a panic. Empty arrays with empty destinations succeed as expected.
