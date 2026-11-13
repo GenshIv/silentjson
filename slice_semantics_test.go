@@ -703,3 +703,84 @@ func TestSliceField_NullSetsNil(t *testing.T) {
 		t.Errorf("items slice should be nil after null decode, got len=%d", len(obj.Items))
 	}
 }
+
+// Test EOF error on full slice doesn't cause out-of-bounds write
+func TestRootSlicePtr_EOFOnFullSlice(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf([]*Item{}))
+
+	// Parse one item to get a slice with cap=16, len=1
+	payload1 := []byte(`[{"id":1,"name":"a"}]`)
+	var items []*Item
+	err := ParseObject(payload1, reg, unsafe.Pointer(&items))
+	if err != nil {
+		t.Fatalf("first parse failed: %v", err)
+	}
+
+	// Now try to parse a truncated array that would fill the slice and then hit EOF
+	// The error path should not write beyond the slice bounds
+	payload2 := []byte(`[{"id":2,"name":"b"},{"id":3`)
+	err = ParseObject(payload2, reg, unsafe.Pointer(&items))
+	if err == nil {
+		t.Fatal("expected parse error for truncated input")
+	}
+}
+
+// Test unexpected char error on full slice doesn't cause out-of-bounds write
+func TestRootSlicePtr_UnexpectedCharOnFullSlice(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf([]*Item{}))
+
+	// Parse one item to get a slice with cap=16, len=1
+	payload1 := []byte(`[{"id":1,"name":"a"}]`)
+	var items []*Item
+	err := ParseObject(payload1, reg, unsafe.Pointer(&items))
+	if err != nil {
+		t.Fatalf("first parse failed: %v", err)
+	}
+
+	// Now try to parse with unexpected char after first element
+	payload2 := []byte(`[{"id":2,"name":"b"}X]`)
+	err = ParseObject(payload2, reg, unsafe.Pointer(&items))
+	if err == nil {
+		t.Fatal("expected parse error for unexpected char")
+	}
+}
+
+// Test field slice EOF error on full slice doesn't cause out-of-bounds write
+func TestSliceField_EOFOnFullSlice(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(SlicePtrStructFields{}))
+
+	// Parse one item to get a slice with cap=16, len=1
+	payload1 := []byte(`{"name":"test","items":[{"id":1,"name":"a"}]}`)
+	var obj SlicePtrStructFields
+	err := ParseObject(payload1, reg, unsafe.Pointer(&obj))
+	if err != nil {
+		t.Fatalf("first parse failed: %v", err)
+	}
+
+	// Now try to parse a truncated array that would fill the slice and then hit EOF
+	payload2 := []byte(`{"name":"test","items":[{"id":2,"name":"b"},{"id":3`)
+	err = ParseObject(payload2, reg, unsafe.Pointer(&obj))
+	if err == nil {
+		t.Fatal("expected parse error for truncated input")
+	}
+}
+
+// Test field slice unexpected char error on full slice doesn't cause out-of-bounds write
+func TestSliceField_UnexpectedCharOnFullSlice(t *testing.T) {
+	reg := BuildRegistry(reflect.TypeOf(SlicePtrStructFields{}))
+
+	// Parse one item to get a slice with cap=16, len=1
+	payload1 := []byte(`{"name":"test","items":[{"id":1,"name":"a"}]}`)
+	var obj SlicePtrStructFields
+	err := ParseObject(payload1, reg, unsafe.Pointer(&obj))
+	if err != nil {
+		t.Fatalf("first parse failed: %v", err)
+	}
+
+	// Now try to parse with unexpected char after first element
+	payload2 := []byte(`{"name":"test","items":[{"id":2,"name":"b"}X]}`)
+	err = ParseObject(payload2, reg, unsafe.Pointer(&obj))
+	if err == nil {
+		t.Fatal("expected parse error for unexpected char")
+	}
+}

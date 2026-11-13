@@ -287,9 +287,12 @@ func parseRootSlice(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings b
 
 			consumed, err := parseObjectAt(raw[i:], reg.ElemSub, elemPtr, copyStrings)
 				if err != nil {
-					// Clear uncommitted pointer and stale tail on error
+					// Clear uncommitted pointer and stale tail on error.
+					// Only clear the slot if it's within bounds (header.Len < header.Cap).
 					if reg.ElemType.Kind() == reflect.Ptr && header.Data != 0 {
-						*(*unsafe.Pointer)(slotPtr) = nil
+						if header.Len < header.Cap {
+							*(*unsafe.Pointer)(slotPtr) = nil
+						}
 						for j := header.Len + 1; j < prevLen; j++ {
 							staleSlot := unsafe.Pointer(uintptr(base) + uintptr(j)*elemSize)
 							*(*unsafe.Pointer)(staleSlot) = nil
@@ -305,10 +308,13 @@ func parseRootSlice(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings b
 			i++
 		}
 		if i >= len(raw) {
-			// Clear uncommitted pointer and stale tail on EOF error
+			// Clear uncommitted pointer and stale tail on EOF error.
+			// Only clear the slot if it's within bounds (header.Len < header.Cap).
 			if reg.ElemType.Kind() == reflect.Ptr && header.Data != 0 {
 				slotPtr := unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)
-				*(*unsafe.Pointer)(slotPtr) = nil
+				if header.Len < header.Cap {
+					*(*unsafe.Pointer)(slotPtr) = nil
+				}
 				for j := header.Len + 1; j < prevLen; j++ {
 					staleSlot := unsafe.Pointer(uintptr(base) + uintptr(j)*elemSize)
 					*(*unsafe.Pointer)(staleSlot) = nil
@@ -339,10 +345,13 @@ func parseRootSlice(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings b
 				}
 				return nil
 			} else {
-				// Clear uncommitted pointer and stale tail on unexpected char error
+				// Clear uncommitted pointer and stale tail on unexpected char error.
+				// Only clear the slot if it's within bounds (header.Len < header.Cap).
 				if reg.ElemType.Kind() == reflect.Ptr && header.Data != 0 {
 					slotPtr := unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)
-					*(*unsafe.Pointer)(slotPtr) = nil
+					if header.Len < header.Cap {
+						*(*unsafe.Pointer)(slotPtr) = nil
+					}
 					for j := header.Len + 1; j < prevLen; j++ {
 						staleSlot := unsafe.Pointer(uintptr(base) + uintptr(j)*elemSize)
 						*(*unsafe.Pointer)(staleSlot) = nil
@@ -1037,23 +1046,24 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 									}
 								}
 
-								consumed, err := parseObjectAt(raw[i:], info.Sub, elemPtr, copyStrings)
-						if err != nil {
-							// Clear stale pointers before returning on error.
-							// Always clear the newly written pointer at header.Len,
-							// plus any old pointers from a previous longer slice.
-							if info.ElemType.Kind() == reflect.Ptr && header.Data != 0 {
-								// Clear the pointer we just wrote (not yet committed)
-								slot := unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)
-								*(*unsafe.Pointer)(slot) = nil
-								// Clear old stale pointers beyond this one
-								for j := header.Len + 1; j < prevLen; j++ {
-									slot = unsafe.Pointer(uintptr(base) + uintptr(j)*elemSize)
-									*(*unsafe.Pointer)(slot) = nil
+						consumed, err := parseObjectAt(raw[i:], info.Sub, elemPtr, copyStrings)
+							if err != nil {
+								// Clear stale pointers before returning on error.
+								// Only clear the slot if it's within bounds (header.Len < header.Cap).
+								if info.ElemType.Kind() == reflect.Ptr && header.Data != 0 {
+									// Clear the pointer we just wrote (not yet committed)
+									slot := unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)
+									if header.Len < header.Cap {
+										*(*unsafe.Pointer)(slot) = nil
+									}
+									// Clear old stale pointers beyond this one
+									for j := header.Len + 1; j < prevLen; j++ {
+										slot = unsafe.Pointer(uintptr(base) + uintptr(j)*elemSize)
+										*(*unsafe.Pointer)(slot) = nil
+									}
 								}
+								return 0, err
 							}
-							return 0, err
-						}
 							header.Len++
 							i += consumed
 						}
@@ -1062,10 +1072,13 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 							i++
 						}
 						if i >= len(raw) {
-							// Clear stale pointers on EOF error too
+							// Clear stale pointers on EOF error too.
+							// Only clear the slot if it's within bounds (header.Len < header.Cap).
 							if info.ElemType.Kind() == reflect.Ptr && header.Data != 0 {
 								slot := unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)
-								*(*unsafe.Pointer)(slot) = nil
+								if header.Len < header.Cap {
+									*(*unsafe.Pointer)(slot) = nil
+								}
 								for j := header.Len + 1; j < prevLen; j++ {
 									slot = unsafe.Pointer(uintptr(base) + uintptr(j)*elemSize)
 									*(*unsafe.Pointer)(slot) = nil
@@ -1081,18 +1094,21 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 						} else if raw[i] == ']' {
 							i++
 							break
-						} else {
-							// Clear stale pointers on unexpected char error too
-							if info.ElemType.Kind() == reflect.Ptr && header.Data != 0 {
-								slot := unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)
-								*(*unsafe.Pointer)(slot) = nil
-								for j := header.Len + 1; j < prevLen; j++ {
-									slot = unsafe.Pointer(uintptr(base) + uintptr(j)*elemSize)
-									*(*unsafe.Pointer)(slot) = nil
+							} else {
+								// Clear stale pointers on unexpected char error too.
+								// Only clear the slot if it's within bounds (header.Len < header.Cap).
+								if info.ElemType.Kind() == reflect.Ptr && header.Data != 0 {
+									slot := unsafe.Pointer(uintptr(base) + uintptr(header.Len)*elemSize)
+									if header.Len < header.Cap {
+										*(*unsafe.Pointer)(slot) = nil
+									}
+									for j := header.Len + 1; j < prevLen; j++ {
+										slot = unsafe.Pointer(uintptr(base) + uintptr(j)*elemSize)
+										*(*unsafe.Pointer)(slot) = nil
+									}
 								}
+								return 0, fmt.Errorf("unexpected char in struct slice")
 							}
-							return 0, fmt.Errorf("unexpected char in struct slice")
-						}
 					}
 				}
 
