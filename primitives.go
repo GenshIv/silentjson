@@ -701,13 +701,61 @@ func readJSONString(src []byte, copyStrings bool) (s string, content []byte, con
 			buf = append(buf, src[i:escapePos]...)
 		}
 
-		// Process escapes from this point using byte-by-byte loop
-		s, content, relConsumed, err := processEscapesFrom(src[escapePos:], buf, copyStrings)
-		if err != nil {
-			return "", nil, 0, err
+		// Process this single escape sequence inline, then continue with next block
+		if escapePos+1 >= len(src) {
+			return "", nil, 0, ErrUnexpectedEOF
 		}
-		consumed = int64(escapePos) + relConsumed
-		return s, content, consumed, nil
+
+		switch src[escapePos+1] {
+		case '"':
+			buf = append(buf, '"')
+		case '\\':
+			buf = append(buf, '\\')
+		case '/':
+			buf = append(buf, '/')
+		case 'n':
+			buf = append(buf, '\n')
+		case 't':
+			buf = append(buf, '\t')
+		case 'r':
+			buf = append(buf, '\r')
+		case 'b':
+			buf = append(buf, '\b')
+		case 'f':
+			buf = append(buf, '\f')
+		case 'u':
+			if escapePos+6 >= len(src) {
+				return "", nil, 0, ErrUnexpectedEOF
+			}
+			cp, ok := parseHex4(src[escapePos+2 : escapePos+6])
+			if !ok {
+				return "", nil, 0, fmt.Errorf("%w: invalid \\u escape", ErrTypeMismatch)
+			}
+			r := cp
+			surrogateDecoded := false
+			if utf16.IsSurrogate(r) && escapePos+12 <= len(src) && src[escapePos+6] == '\\' && src[escapePos+7] == 'u' {
+				if cp2, ok2 := parseHex4(src[escapePos+8 : escapePos+12]); ok2 {
+					if dec := utf16.DecodeRune(r, cp2); dec != unicode.ReplacementChar {
+						buf = utf8.AppendRune(buf, dec)
+						i = escapePos + 12
+						surrogateDecoded = true
+					}
+				}
+			}
+			if !surrogateDecoded {
+				if utf16.IsSurrogate(r) {
+					r = utf8.RuneError
+				}
+				buf = utf8.AppendRune(buf, r)
+				i = escapePos + 6
+			}
+			continue
+		default:
+			return "", nil, 0, fmt.Errorf("%w: invalid escape sequence \\%c", ErrTypeMismatch, src[escapePos+1])
+		}
+
+		// Continue with next block after processing this escape
+		i = escapePos + 2
 	}
 }
 
