@@ -645,8 +645,6 @@ func readJSONString(src []byte, copyStrings bool) (s string, content []byte, con
 	// so src starts with the closing quote.
 	if len(src) > 0 && src[0] == '"' {
 		// Check if this is a closing quote (empty string) or opening quote.
-		// If there's content after this quote that isn't another quote, it's an opening quote.
-		// If the next char is also a quote or we're at end of meaningful content, it's closing.
 		isClosing := true
 		if len(src) > 1 {
 			if src[1] != '"' && src[1] != '}' && src[1] != ',' && src[1] != ']' {
@@ -664,34 +662,8 @@ func readJSONString(src []byte, copyStrings bool) (s string, content []byte, con
 		src = src[1:]
 	}
 
-	// Fast path: check if there are any escape sequences or closing quote
-	// If not, we can return a slice of the original buffer without copying
-	hasEscapes := false
-	end := -1
-	for i, b := range src {
-		if b == '\\' {
-			hasEscapes = true
-			break
-		}
-		if b == '"' {
-			end = i
-			break
-		}
-	}
-
-	if !hasEscapes && end >= 0 {
-		// No escapes - zero-copy path
-		content = src[:end]
-		consumed = int64(end) + 1
-		if copyStrings {
-			s = string(content)
-		} else {
-			s = unsafe.String(unsafe.SliceData(content), len(content))
-		}
-		return s, content, consumed, nil
-	}
-
-	// Slow path: use AVX2 assembly for full decoding
+	// Always use AVX2 assembly for full decoding with proper copying.
+	// No zero-copy optimization - strings are always copied to owned memory.
 	buf := make([]byte, len(src))
 	written, c := parseJSONStringCompleteASM(src, buf)
 	if written < 0 {

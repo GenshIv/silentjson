@@ -82,7 +82,7 @@ func TestParseObject_Valid(t *testing.T) {
 	}
 }
 
-func TestZeroCopy_String(t *testing.T) {
+func TestStringParsing(t *testing.T) {
 	reg := BuildRegistry(reflect.TypeOf(TestUser{}))
 
 	payload := []byte(`{"name":"ZeroCopyString"}`)
@@ -93,18 +93,9 @@ func TestZeroCopy_String(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Get a pointer to the start of the original byte array
-	payloadPtr := unsafe.Pointer(unsafe.SliceData(payload))
-
-	// Get a pointer to the start of the data of the parsed string
-	stringPtr := unsafe.Pointer(unsafe.StringData(actual.Name))
-
-	// Calculate the offset. If the string refers to the payload,
-	// its address must be within the payload's address range.
-	diff := uintptr(stringPtr) - uintptr(payloadPtr)
-
-	if diff >= uintptr(len(payload)) {
-		t.Errorf("Zero-copy failed: string is allocated outside the original payload memory! diff: %d", diff)
+	// Verify the string is correctly parsed (no longer checking zero-copy)
+	if actual.Name != "ZeroCopyString" {
+		t.Errorf("got %q, want %q", actual.Name, "ZeroCopyString")
 	}
 }
 

@@ -134,28 +134,20 @@ func TestReadJSONStringErrors(t *testing.T) {
 	}
 }
 
-// TestReadJSONStringZeroCopy pins the phase-1 guarantee: an escape-free string
-// is returned as an alias of the input, with nothing copied.
-func TestReadJSONStringZeroCopy(t *testing.T) {
+// TestReadJSONStringAlwaysCopies pins the requirement that strings are always
+// copied to owned result memory, never returned as an alias of the input.
+func TestReadJSONStringAlwaysCopies(t *testing.T) {
 	for _, n := range []int{0, 1, 31, 32, 33, 1000} {
 		src := []byte(`"` + strings.Repeat("a", n) + `"`)
 		body := src[1:]
-
-		allocs := testing.AllocsPerRun(100, func() {
-			if _, _, _, err := readJSONString(body, false); err != nil {
-				t.Fatal(err)
-			}
-		})
-		if allocs != 0 {
-			t.Errorf("len=%d: readJSONString allocated %v times, want 0 (zero-copy fast path)", n, allocs)
-		}
 
 		s, content, consumed, err := readJSONString(body, false)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if n > 0 && &content[0] != &body[0] {
-			t.Errorf("len=%d: content is a copy, want an alias of the input", n)
+		// Content must be a copy, not an alias of the input
+		if n > 0 && &content[0] == &body[0] {
+			t.Errorf("len=%d: content is an alias of input, want a copy", n)
 		}
 		if s != strings.Repeat("a", n) || consumed != int64(n+1) {
 			t.Errorf("len=%d: got %q consumed=%d", n, s, consumed)
