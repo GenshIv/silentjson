@@ -719,54 +719,25 @@ func decodeKeyIntoBuf(src []byte, dst []byte) (written int64, consumed int64, er
 
 // readJSONString decodes a JSON string starting just after the opening quote.
 // The caller (ParseObject) is responsible for skipping the opening quote before calling.
-// Uses single-pass parsing with no preliminary scanning - finds closing quote,
-// decodes all escapes, and copies to owned memory in one operation.
+// Uses zero-copy for strings without escapes; decodeEscapedString for escaped strings.
 // Returns the decoded string, content bytes, number of bytes consumed (including closing quote), and error.
 func readJSONString(src []byte, copyStrings bool) (s string, content []byte, consumed int64, err error) {
-	// Empty string: src starts with the closing quote
-	if len(src) > 0 && src[0] == '"' {
-		content = nil
-		consumed = 1
-		s = ""
-		return s, content, consumed, nil
+	idx, isEsc := findQuoteOrEscapeASM(src)
+	if idx < 0 {
+		return "", nil, 0, ErrUnexpectedEOF
 	}
-
-	// Determine upper bound length via quote/escape scan to allocate exact buffer size.
-	// This avoids allocating len(src) for short strings embedded in large JSON documents.
-	quoteIdx, hasEscape := findQuoteOrEscapeASM(src)
-	var buf []byte
-	if !hasEscape && quoteIdx >= 0 {
-		// No escapes — decoded length equals raw length minus closing quote
-		buf = make([]byte, quoteIdx+1) // +1 for safety margin
-	} else {
-		// Has escapes or quote not found — allocate full src length (safe fallback)
-		buf = make([]byte, len(src))
-	}
-
-	written, c := parseJSONStringCompleteASM(src, buf)
-	if written < 0 {
-		switch written {
-		case -1:
-			return "", nil, -1, ErrUnexpectedEOF
-		case -2:
-			return "", nil, -1, fmt.Errorf("%w: invalid escape sequence", ErrTypeMismatch)
-		case -3:
-			return "", nil, -1, fmt.Errorf("%w: invalid hex digit in unicode escape", ErrTypeMismatch)
-		default:
-			return "", nil, -1, ErrUnexpectedEOF
+	if !isEsc {
+		content = src[:idx]
+		if copyStrings {
+			return string(content), content, int64(idx + 1), nil
 		}
+		return unsafe.String(unsafe.SliceData(content), idx), content, int64(idx + 1), nil
 	}
-
-	content = buf[:written]
-	consumed = c
-
-	if copyStrings {
-		s = string(content)
-	} else {
-		s = unsafe.String(unsafe.SliceData(content), len(content))
+	buf, consumed, err := decodeEscapedString(src)
+	if err != nil {
+		return "", nil, 0, err
 	}
-
-	return s, content, consumed, nil
+	return unsafe.String(unsafe.SliceData(buf), len(buf)), buf, consumed, nil
 }
 
 // validateJSONString checks for invalid escape sequences and hex digits.
