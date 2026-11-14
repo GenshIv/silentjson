@@ -649,11 +649,6 @@ func readJSONString(src []byte, copyStrings bool) (s string, content []byte, con
 
 	contentSrc := src[start:]
 
-	// Validate escape sequences and hex digits before parsing
-	if err := validateJSONString(contentSrc); err != nil {
-		return "", nil, -1, err
-	}
-
 	// Allocate destination buffer (worst case: same size as input)
 	buf := make([]byte, len(contentSrc))
 
