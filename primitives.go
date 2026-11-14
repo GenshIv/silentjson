@@ -637,29 +637,16 @@ func decodeEscapedString(src []byte) ([]byte, int64, error) {
 //   - content: the decoded bytes s points to (useful for key matching)
 //   - consumed: number of input bytes read, including the closing quote
 //
-// readJSONString decodes a JSON string. Input may start with the opening quote
-// or just after it; both forms are accepted for compatibility with existing callers.
-// Uses single-pass AVX2 assembly implementation for optimal performance.
+// readJSONString decodes a JSON string starting just after the opening quote.
+// The caller (ParseObject) is responsible for skipping the opening quote before calling.
+// Returns the decoded string, content bytes, number of bytes consumed (including closing quote), and error.
 func readJSONString(src []byte, copyStrings bool) (s string, content []byte, consumed int64, err error) {
-	// Handle empty string case: caller already skipped opening quote,
-	// so src starts with the closing quote.
+	// Empty string: src starts with the closing quote
 	if len(src) > 0 && src[0] == '"' {
-		// Check if this is a closing quote (empty string) or opening quote.
-		isClosing := true
-		if len(src) > 1 {
-			if src[1] != '"' && src[1] != '}' && src[1] != ',' && src[1] != ']' {
-				isClosing = false
-			}
-		}
-		if isClosing {
-			// Empty string: just the closing quote
-			content = []byte{}
-			consumed = 1
-			s = ""
-			return s, content, consumed, nil
-		}
-		// Opening quote - strip it
-		src = src[1:]
+		content = []byte{}
+		consumed = 1
+		s = ""
+		return s, content, consumed, nil
 	}
 
 	// Always use AVX2 assembly for full decoding with proper copying.
