@@ -187,6 +187,140 @@ decode_at_escape:
     JE  emit_bs2
     CMPB AL, $0x2F                // '/' -> slash
     JE  emit_slash
+
+    // Check for \uXXXX unicode escape
+    CMPB AL, $0x75                // 'u'
+    JNE  emit_unknown_escape      // Unknown escape - emit as-is
+
+    // Parse 4 hex digits into R14 (codepoint)
+    XORQ R14, R14
+    MOVQ $4, R15                  // digit counter
+
+parse_hex_digits:
+    MOVB (SI)(CX*1), AL
+    INCQ CX
+
+    CMPB AL, $0x39                // '9'
+    JBE parse_digit_0_9           // 0-9
+    CMPB AL, $0x66                // 'f'
+    JA  parse_hex_invalid         // Not a hex digit
+
+    CMPB AL, $0x41                // 'A'
+    JL  parse_hex_invalid
+
+    SUBB $0x37, AL                // Convert A-F to 10-15 (uppercase)
+    JMP parse_digit_done
+
+parse_digit_0_9:
+    CMPB AL, $0x30                // '0'
+    JB  parse_hex_invalid
+    SUBB $0x30, AL                // Convert 0-9 to 0-9
+
+parse_digit_done:
+    SHLQ $4, R14                  // Shift codepoint left by 4 bits
+    MOVBLZX AL, R10               // Zero-extend AL to 64-bit
+    ORQ R10, R14                  // OR in the new digit
+    DECQ R15
+    JNZ parse_hex_digits
+
+    // Convert codepoint to UTF-8 and emit
+    CMPQ R14, $0x7F
+    JBE emit_utf8_1byte           // U+0000 to U+007F
+
+    CMPQ R14, $0x7FF
+    JBE emit_utf8_2bytes          // U+0080 to U+07FF
+
+    CMPQ R14, $0xFFFF
+    JBE emit_utf8_3bytes          // U+0800 to U+FFFF
+
+emit_utf8_4bytes:                 // U+10000 to U+10FFFF
+    // First byte: 11110xxx = F0 | (codepoint >> 18)
+    MOVQ R14, R10
+    SHRQ $18, R10
+    ANDQ $0x7, R10
+    ORQ $0xF0, R10
+    MOVB R10, (DI)(DX*1)
+    INCQ DX
+
+    // Second byte: 10xxxxxx = 80 | ((codepoint >> 12) & 0x3F)
+    MOVQ R14, R10
+    SHRQ $12, R10
+    ANDQ $0x3F, R10
+    ORQ $0x80, R10
+    MOVB R10, (DI)(DX*1)
+    INCQ DX
+
+    // Third byte: 10xxxxxx = 80 | ((codepoint >> 6) & 0x3F)
+    MOVQ R14, R10
+    SHRQ $6, R10
+    ANDQ $0x3F, R10
+    ORQ $0x80, R10
+    MOVB R10, (DI)(DX*1)
+    INCQ DX
+
+    // Fourth byte: 10xxxxxx = 80 | (codepoint & 0x3F)
+    MOVQ R14, R10
+    ANDQ $0x3F, R10
+    ORQ $0x80, R10
+    MOVB R10, (DI)(DX*1)
+    INCQ DX
+    JMP decode_loop
+
+emit_utf8_3bytes:                 // U+0800 to U+FFFF
+    // First byte: 1110xxxx = E0 | (codepoint >> 12)
+    MOVQ R14, R10
+    SHRQ $12, R10
+    ANDQ $0xF, R10
+    ORQ $0xE0, R10
+    MOVB R10, (DI)(DX*1)
+    INCQ DX
+
+    // Second byte: 10xxxxxx = 80 | ((codepoint >> 6) & 0x3F)
+    MOVQ R14, R10
+    SHRQ $6, R10
+    ANDQ $0x3F, R10
+    ORQ $0x80, R10
+    MOVB R10, (DI)(DX*1)
+    INCQ DX
+
+    // Third byte: 10xxxxxx = 80 | (codepoint & 0x3F)
+    MOVQ R14, R10
+    ANDQ $0x3F, R10
+    ORQ $0x80, R10
+    MOVB R10, (DI)(DX*1)
+    INCQ DX
+    JMP decode_loop
+
+emit_utf8_2bytes:                 // U+0080 to U+07FF
+    // First byte: 110xxxxx = C0 | (codepoint >> 6)
+    MOVQ R14, R10
+    SHRQ $6, R10
+    ANDQ $0x1F, R10
+    ORQ $0xC0, R10
+    MOVB R10, (DI)(DX*1)
+    INCQ DX
+
+    // Second byte: 10xxxxxx = 80 | (codepoint & 0x3F)
+    MOVQ R14, R10
+    ANDQ $0x3F, R10
+    ORQ $0x80, R10
+    MOVB R10, (DI)(DX*1)
+    INCQ DX
+    JMP decode_loop
+
+emit_utf8_1byte:                  // U+0000 to U+007F
+    MOVQ R14, R10
+    ANDQ $0x7F, R10
+    MOVB R10, (DI)(DX*1)
+    INCQ DX
+    JMP decode_loop
+
+parse_hex_invalid:
+    // Invalid hex digit - emit replacement character U+FFFD
+    MOVQ $0xFFFD, R14
+    JMP emit_utf8_3bytes
+
+emit_unknown_escape:
     MOVB AL, (DI)(DX*1)           // Unknown escape - emit as-is
     INCQ DX
     JMP decode_loop
@@ -222,6 +356,59 @@ handle_escape_scalar:
     JE  emit_bs2
     CMPB AL, $0x2F
     JE  emit_slash
+
+    // Check for \uXXXX unicode escape
+    CMPB AL, $0x75                // 'u'
+    JNE  emit_unknown_escape_scalar
+
+    // Parse 4 hex digits into R14 (codepoint)
+    XORQ R14, R14
+    MOVQ $4, R15                  // digit counter
+
+parse_hex_digits_scalar:
+    MOVB (SI)(CX*1), AL
+    INCQ CX
+
+    CMPB AL, $0x39                // '9'
+    JBE parse_digit_0_9_scalar    // 0-9
+    CMPB AL, $0x66                // 'f'
+    JA  parse_hex_invalid_scalar  // Not a hex digit
+
+    CMPB AL, $0x41                // 'A'
+    JL  parse_hex_invalid_scalar
+
+    SUBB $0x37, AL                // Convert A-F to 10-15 (uppercase)
+    JMP parse_digit_done_scalar
+
+parse_digit_0_9_scalar:
+    CMPB AL, $0x30                // '0'
+    JB  parse_hex_invalid_scalar
+    SUBB $0x30, AL                // Convert 0-9 to 0-9
+
+parse_digit_done_scalar:
+    SHLQ $4, R14                  // Shift codepoint left by 4 bits
+    MOVBLZX AL, R10               // Zero-extend AL to 64-bit
+    ORQ R10, R14                  // OR in the new digit
+    DECQ R15
+    JNZ parse_hex_digits_scalar
+
+    // Convert codepoint to UTF-8 and emit (reuse existing code)
+    CMPQ R14, $0x7F
+    JBE emit_utf8_1byte           // U+0000 to U+007F
+
+    CMPQ R14, $0x7FF
+    JBE emit_utf8_2bytes          // U+0080 to U+07FF
+
+    CMPQ R14, $0xFFFF
+    JBE emit_utf8_3bytes          // U+0800 to U+FFFF
+
+    JMP emit_utf8_4bytes          // U+10000 to U+10FFFF
+
+parse_hex_invalid_scalar:
+    MOVQ $0xFFFD, R14
+    JMP emit_utf8_3bytes
+
+emit_unknown_escape_scalar:
     MOVB AL, (DI)(DX*1)
     INCQ DX
     JMP decode_scalar

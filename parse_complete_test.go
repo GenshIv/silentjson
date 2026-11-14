@@ -18,6 +18,9 @@ func TestParseJSONStringComplete(t *testing.T) {
 		{"tab", `"a\tb"`, "a\tb"},
 		{"quote", `"say \"hi\""`, `say "hi"`},
 		{"backslash", `"path\\to\\file"`, "path\\to\\file"},
+		{"unicode ascii", `"\u0041"`, "A"},
+		{"unicode emoji", `"\u2764"`, "❤"},
+		{"mixed", `"Hello \u0041\u0042\u0043!"`, "Hello ABC!"},
 	}
 
 	for _, tc := range tests {
