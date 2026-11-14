@@ -636,22 +636,113 @@ func decodeEscapedString(src []byte) ([]byte, int64, error) {
 //   - content: the decoded bytes s points to (useful for key matching)
 //   - consumed: number of input bytes read, including the closing quote
 func readJSONString(src []byte, copyStrings bool) (s string, content []byte, consumed int64, err error) {
+	// Unified scanner: use SIMD to find first structural character.
+	// If it's a quote with no preceding escapes, fast zero-copy path.
+	// If it's a backslash, we know escapes exist — copy the clean prefix
+	// directly (no re-examination) and decode escapes inline from that point.
 	idx, isEsc := findQuoteOrEscapeASM(src)
 	if idx < 0 {
 		return "", nil, 0, ErrUnexpectedEOF
 	}
+
 	if !isEsc {
+		// No escapes: fast path, zero-copy slice of input
 		content = src[:idx]
 		if copyStrings {
 			return string(content), content, int64(idx + 1), nil
 		}
 		return unsafe.String(unsafe.SliceData(content), idx), content, int64(idx + 1), nil
 	}
-	buf, consumed, err := decodeEscapedString(src)
-	if err != nil {
-		return "", nil, 0, err
+
+	// Escapes present: decode starting from first escape position.
+	// The prefix src[:idx] has no escapes (SIMD confirmed), so copy it
+	// directly without re-examination — this is the key optimization that
+	// eliminates the redundant scan of already-processed bytes.
+	prefix := src[:idx]
+	buf := make([]byte, 0, len(src))
+	buf = append(buf, prefix...)
+
+	// Process escapes starting from idx (first backslash position)
+	i := idx
+	for {
+		if i >= len(src) {
+			return "", nil, 0, ErrUnexpectedEOF
+		}
+		c := src[i]
+		if c == '"' {
+			// Unescaped closing quote — end of string
+			break
+		}
+		if c == '\\' {
+			// Escape sequence: decode it
+			if i+1 >= len(src) {
+				return "", nil, 0, ErrUnexpectedEOF
+			}
+			e := src[i+1]
+			i += 2
+			switch e {
+			case '"':
+				buf = append(buf, '"')
+			case '\\':
+				buf = append(buf, '\\')
+			case '/':
+				buf = append(buf, '/')
+			case 'n':
+				buf = append(buf, '\n')
+			case 't':
+				buf = append(buf, '\t')
+			case 'r':
+				buf = append(buf, '\r')
+			case 'b':
+				buf = append(buf, '\b')
+			case 'f':
+				buf = append(buf, '\f')
+			case 'u':
+				if i+4 > len(src) {
+					return "", nil, 0, fmt.Errorf("%w: truncated \\u escape", ErrTypeMismatch)
+				}
+				cp, ok := parseHex4(src[i : i+4])
+				if !ok {
+					return "", nil, 0, fmt.Errorf("%w: invalid \\u escape", ErrTypeMismatch)
+				}
+				i += 4
+				r := cp
+				if utf16.IsSurrogate(r) {
+					if i+6 <= len(src) && src[i] == '\\' && src[i+1] == 'u' {
+						if cp2, ok2 := parseHex4(src[i+2 : i+6]); ok2 {
+							if dec := utf16.DecodeRune(r, cp2); dec != unicode.ReplacementChar {
+								buf = utf8.AppendRune(buf, dec)
+								i += 6
+								continue
+							}
+						}
+					}
+					r = utf8.RuneError // unpaired surrogate -> U+FFFD
+				}
+				buf = utf8.AppendRune(buf, r)
+			default:
+				return "", nil, 0, fmt.Errorf("%w: invalid escape sequence \\%c", ErrTypeMismatch, e)
+			}
+			continue
+		}
+		// Regular byte — use SIMD to find next structural character
+		// instead of scanning byte-by-byte
+		nextIdx, nextIsEsc := findQuoteOrEscapeASM(src[i:])
+		if nextIdx < 0 {
+			return "", nil, 0, ErrUnexpectedEOF
+		}
+		if !nextIsEsc {
+			// Found unescaped closing quote — copy prefix and exit
+			buf = append(buf, src[i:i+nextIdx]...)
+			i = i + nextIdx
+			break
+		}
+		// Found backslash — copy prefix up to it, then process escape
+		buf = append(buf, src[i:i+nextIdx]...)
+		i = i + nextIdx
 	}
-	return unsafe.String(unsafe.SliceData(buf), len(buf)), buf, consumed, nil
+
+	return unsafe.String(unsafe.SliceData(buf), len(buf)), buf, int64(i + 1), nil
 }
 
 // loadUint16 loads a uint16 from an arbitrary byte offset (safe on all architectures).
