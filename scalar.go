@@ -1,6 +1,9 @@
 package silentjson
 
-import "bytes"
+import (
+	"bytes"
+	"unsafe"
+)
 
 func scanJSONStringScalar(src []byte) (int, bool) {
 	hasEscape := false
@@ -287,4 +290,74 @@ func findArrayElementsEarlyExitScalar(data []byte, chunks []Chunk) (int, int) {
 
 func skipValueScalar(raw []byte, start int) int {
 	return skipValue(raw, start)
+}
+
+// ---------- JSON string block parsing ----------
+
+// Status values returned by parseStringBlockScalar / parseStringBlockAVX2.
+const (
+	// blockEOB: the 32-byte block was consumed without hitting a terminator.
+	// consumed == 32 and the caller continues with the next block.
+	blockEOB = 0
+	// blockQuote: the closing quote was found. consumed includes the quote
+	// byte, written does not.
+	blockQuote = 1
+	// blockDefer: src[consumed] holds a '\' that the block procedure refuses
+	// to decode - a \uXXXX escape, an unknown escape, or a backslash sitting
+	// on the last byte of the block (its partner lives in the next block).
+	// The caller decodes it in Go and resumes.
+	blockDefer = 2
+)
+
+// escTable maps the byte following a backslash to its decoded value for the
+// simple (single-byte) JSON escapes. Zero means "not a simple escape": either
+// \u, which expands to UTF-8 and may consume a surrogate pair, or an invalid
+// sequence. Zero is an unambiguous marker because no valid simple escape
+// decodes to 0x00. parse_string_block_amd64.s carries a byte-identical copy.
+var escTable = [256]byte{
+	'"':  '"',
+	'\\': '\\',
+	'/':  '/',
+	'b':  '\b',
+	'f':  '\f',
+	'n':  '\n',
+	'r':  '\r',
+	't':  '\t',
+}
+
+// parseStringBlockScalar is the reference implementation of the block
+// procedure described on parseStringBlockAVX2: it copies plain bytes and
+// decodes simple escapes from one 32-byte block of JSON string content,
+// stopping at the closing quote or at an escape only Go can handle.
+//
+// src must address at least 32 readable bytes and dst at least 64 writable
+// bytes - the AVX2 version writes whole 32-byte vectors from a cursor that
+// can sit at offset 31, so bytes past `written` are left undefined by both
+// implementations and only dst[:written] is meaningful.
+func parseStringBlockScalar(src *byte, dst *byte) (consumed int, written int, status int) {
+	s := unsafe.Slice(src, 32)
+	d := unsafe.Slice(dst, 64)
+	o := 0
+	for i := 0; i < 32; i++ {
+		c := s[i]
+		if c == '"' {
+			return i + 1, o, blockQuote
+		}
+		if c == '\\' {
+			if i+1 == 32 {
+				return i, o, blockDefer
+			}
+			e := escTable[s[i+1]]
+			if e == 0 {
+				return i, o, blockDefer
+			}
+			d[o] = e
+			o++
+			i++ // consume the escaped byte; the loop consumes the backslash
+			continue
+		}
+		d[o] = c
+		o++
+	}
+	return 32, o, blockEOB
 }

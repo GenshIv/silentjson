@@ -636,126 +636,127 @@ func decodeEscapedString(src []byte) ([]byte, int64, error) {
 //     escaped strings — the input buffer is never modified)
 //   - content: the decoded bytes s points to (useful for key matching)
 //   - consumed: number of input bytes read, including the closing quote
+//
+// The scan runs in two phases. Phase 1 only looks: 32-byte blocks go through
+// findBlockMasksASM and a block with neither '"' nor '\\' is skipped whole, so
+// an escape-free string reaches its closing quote without a byte being copied
+// and is returned as a slice of the input. Phase 1 ends at the first backslash;
+// from there phase 2 decodes into a fresh buffer, driving parseStringBlockASM
+// a block at a time (plain runs and simple escapes stay in assembly) and
+// falling back to Go only for \uXXXX, surrogate pairs and invalid escapes.
 func readJSONString(src []byte, copyStrings bool) (s string, content []byte, consumed int64, err error) {
-	// Block-by-block processing using SIMD masks.
-	// For each 32-byte block, compute quote and backslash masks in one pass.
-	// If no special characters, skip the block (fast path).
-	// When an escape is found, switch to byte-by-byte processing from that point.
-	
-	var buf []byte
+	// ---------- Phase 1: scan, no copying ----------
 	i := 0
-
+	escapePos := -1
 	for {
-		remaining := len(src) - i
-		if remaining == 0 {
-			return "", nil, 0, ErrUnexpectedEOF
+		if len(src)-i < 32 {
+			// Sub-block tail (also the len(src)==i case, which is EOF).
+			return readJSONStringTail(src, i, nil, copyStrings)
 		}
 
-		if remaining < 32 {
-			// Tail: less than a full block — use scalar scan
-			// Pass the offset where skipped blocks ended so the tail can
-			// return a zero-copy string of the entire content if no escapes
-			// were encountered.
-			return readJSONStringTail(src, i, buf, copyStrings)
-		}
-
-		// Compute masks for this 32-byte block
-		blockPtr := unsafe.SliceData(src[i:])
-		quoteMask, slashMask := findBlockMasksASM(blockPtr)
-
+		quoteMask, slashMask := findBlockMasksASM(unsafe.SliceData(src[i:]))
 		if quoteMask == 0 && slashMask == 0 {
-			// No special characters in this block — skip it (fast path)
 			i += 32
 			continue
 		}
 
-		// Special character(s) found. Find the first one.
-		firstQuote := trailingZeroBits(quoteMask)
-		firstSlash := trailingZeroBits(slashMask)
-
-		if quoteMask != 0 && (slashMask == 0 || firstQuote < firstSlash) {
-			// Quote comes first — this is the closing quote
-			end := i + firstQuote
-			consumed = int64(end + 1) // include the quote byte, from start of string
-			if buf != nil {
-				// Copy remaining bytes before the quote
-				buf = append(buf, src[i:end]...)
-				return unsafe.String(unsafe.SliceData(buf), len(buf)), buf, consumed, nil
-			}
-			// No escapes encountered — zero-copy fast path for the entire string
+		if trailingZeroBits(quoteMask) < trailingZeroBits(slashMask) {
+			// Closing quote before any escape: the whole string is literal.
+			end := i + trailingZeroBits(quoteMask)
 			content = src[:end]
 			if copyStrings {
-				return string(content), content, consumed, nil
+				return string(content), content, int64(end + 1), nil
 			}
-			return unsafe.String(unsafe.SliceData(content), end), content, consumed, nil
+			return unsafe.String(unsafe.SliceData(content), end), content, int64(end + 1), nil
 		}
 
-		// Backslash comes first — escape found at position i + firstSlash
-		escapePos := i + firstSlash
+		escapePos = i + trailingZeroBits(slashMask)
+		break
+	}
 
-		if buf == nil {
-			buf = make([]byte, 0, len(src))
-			// Copy all bytes before the escape (including skipped blocks)
-			buf = append(buf, src[:escapePos]...)
-		} else {
-			buf = append(buf, src[i:escapePos]...)
+	// ---------- Phase 2: decode into a buffer ----------
+	// Decoding never expands: a simple escape is 2 bytes in and 1 out, \uXXXX
+	// is 6 in and at most 3 out, a surrogate pair 12 in and 4 out. So
+	// len(buf) <= i at all times, and the +64 slack guarantees the 64 writable
+	// bytes parseStringBlockASM requires for its overlapping vector stores.
+	buf := make([]byte, 0, len(src)+64)
+	buf = append(buf, src[:escapePos]...)
+	i = escapePos
+
+	for {
+		if len(src)-i < 32 {
+			return readJSONStringTail(src, i, buf, copyStrings)
 		}
 
-		// Process this single escape sequence inline, then continue with next block
-		if escapePos+1 >= len(src) {
+		free := buf[len(buf):cap(buf)]
+		nIn, nOut, status := parseStringBlockASM(unsafe.SliceData(src[i:]), unsafe.SliceData(free))
+		buf = buf[:len(buf)+nOut]
+		i += nIn
+
+		switch status {
+		case blockQuote:
+			// nIn already includes the closing quote.
+			return unsafe.String(unsafe.SliceData(buf), len(buf)), buf, int64(i), nil
+
+		case blockEOB:
+			if nOut != 32 {
+				// The block held escapes; expect more of the same next.
+				continue
+			}
+			// The block was pure literal text. A single escape early in a long
+			// string is the common shape, so from here scan with the cheap
+			// mask probe and copy the whole literal run with one memmove
+			// instead of a vector store per block.
+			runStart := i
+			for len(src)-i >= 32 {
+				quoteMask, slashMask := findBlockMasksASM(unsafe.SliceData(src[i:]))
+				if quoteMask != 0 || slashMask != 0 {
+					break
+				}
+				i += 32
+			}
+			buf = append(buf, src[runStart:i]...)
+			continue
+		}
+
+		// blockDefer: src[i] is a backslash the block procedure left for us —
+		// a \u escape, an unknown escape, or one split across the block edge.
+		if i+1 >= len(src) {
 			return "", nil, 0, ErrUnexpectedEOF
 		}
+		e := src[i+1]
+		if e != 'u' {
+			d := escTable[e]
+			if d == 0 {
+				return "", nil, 0, fmt.Errorf("%w: invalid escape sequence \\%c", ErrTypeMismatch, e)
+			}
+			buf = append(buf, d)
+			i += 2
+			continue
+		}
 
-		switch src[escapePos+1] {
-		case '"':
-			buf = append(buf, '"')
-		case '\\':
-			buf = append(buf, '\\')
-		case '/':
-			buf = append(buf, '/')
-		case 'n':
-			buf = append(buf, '\n')
-		case 't':
-			buf = append(buf, '\t')
-		case 'r':
-			buf = append(buf, '\r')
-		case 'b':
-			buf = append(buf, '\b')
-		case 'f':
-			buf = append(buf, '\f')
-		case 'u':
-			if escapePos+6 >= len(src) {
-				return "", nil, 0, ErrUnexpectedEOF
-			}
-			cp, ok := parseHex4(src[escapePos+2 : escapePos+6])
-			if !ok {
-				return "", nil, 0, fmt.Errorf("%w: invalid \\u escape", ErrTypeMismatch)
-			}
-			r := cp
-			surrogateDecoded := false
-			if utf16.IsSurrogate(r) && escapePos+12 <= len(src) && src[escapePos+6] == '\\' && src[escapePos+7] == 'u' {
-				if cp2, ok2 := parseHex4(src[escapePos+8 : escapePos+12]); ok2 {
+		if i+6 >= len(src) {
+			return "", nil, 0, ErrUnexpectedEOF
+		}
+		cp, ok := parseHex4(src[i+2 : i+6])
+		if !ok {
+			return "", nil, 0, fmt.Errorf("%w: invalid \\u escape", ErrTypeMismatch)
+		}
+		r := cp
+		i += 6
+		if utf16.IsSurrogate(r) {
+			if i+6 <= len(src) && src[i] == '\\' && src[i+1] == 'u' {
+				if cp2, ok2 := parseHex4(src[i+2 : i+6]); ok2 {
 					if dec := utf16.DecodeRune(r, cp2); dec != unicode.ReplacementChar {
 						buf = utf8.AppendRune(buf, dec)
-						i = escapePos + 12
-						surrogateDecoded = true
+						i += 6
+						continue
 					}
 				}
 			}
-			if !surrogateDecoded {
-				if utf16.IsSurrogate(r) {
-					r = utf8.RuneError
-				}
-				buf = utf8.AppendRune(buf, r)
-				i = escapePos + 6
-			}
-			continue
-		default:
-			return "", nil, 0, fmt.Errorf("%w: invalid escape sequence \\%c", ErrTypeMismatch, src[escapePos+1])
+			r = utf8.RuneError // unpaired surrogate -> U+FFFD, like encoding/json
 		}
-
-		// Continue with next block after processing this escape
-		i = escapePos + 2
+		buf = utf8.AppendRune(buf, r)
 	}
 }
 

@@ -49,3 +49,20 @@ func findQuoteOrEscapeAVX2(b []byte) (idx int, isEscape bool)
 //
 //go:noescape
 func findBlockMasksAVX2(src *byte) (quoteMask uint32, slashMask uint32)
+
+// parseStringBlockAVX2 decodes one 32-byte block of JSON string content
+// (src points just past the opening quote or at any later position inside
+// the string body), copying plain bytes and folding simple escapes into dst.
+//
+// src must address at least 32 readable bytes and dst at least 64 writable
+// bytes: the routine emits whole 32-byte vector stores from a write cursor
+// that can sit at offset 31, advancing the cursor only by the length of the
+// real run. Bytes in dst past the returned written count are undefined.
+//
+// Returns the number of input bytes consumed, the number of output bytes
+// produced, and one of blockEOB / blockQuote / blockDefer. parseStringBlockScalar
+// in scalar.go is the reference implementation; TestParseStringBlockSweep pins
+// the two together.
+//
+//go:noescape
+func parseStringBlockAVX2(src *byte, dst *byte) (consumed int, written int, status int)

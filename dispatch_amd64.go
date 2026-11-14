@@ -11,6 +11,7 @@ import (
 // these to verify dispatch logic selects the correct implementation for different
 // CPU feature combinations.
 var hasAVX2 = cpu.X86.HasAVX2
+
 // VPCLMULQDQ (VEX-encoded, XMM operands) requires CPUID leaf 1 ECX bit 1
 // (PCLMULQDQ feature) plus AVX support for the VEX prefix. There is no
 // separate CPUID bit for VPCLMULQDQ vs PCLMULQDQ - they share the same
@@ -115,4 +116,14 @@ func findBlockMasksASM(src *byte) (quoteMask uint32, slashMask uint32) {
 	var block [32]byte
 	copy(block[:], unsafe.Slice(src, 32))
 	return findBlockMasksScalar(block[:])
+}
+
+// parseStringBlockASM decodes one 32-byte block of JSON string content.
+// Caller must ensure src has at least 32 readable bytes and dst at least
+// 64 writable bytes.
+func parseStringBlockASM(src *byte, dst *byte) (consumed int, written int, status int) {
+	if hasAVX2 {
+		return parseStringBlockAVX2(src, dst)
+	}
+	return parseStringBlockScalar(src, dst)
 }
