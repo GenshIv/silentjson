@@ -675,6 +675,33 @@ func readJSONStringWithBuf(src []byte, copyStrings bool, dst []byte) (s string, 
 	return s, content, consumed, nil
 }
 
+// decodeKeyIntoBuf decodes a JSON string key into the provided dst buffer.
+// Returns the decoded length and number of bytes consumed. The caller is
+// responsible for ensuring dst is large enough. This function does not
+// return a string or slice, so it cannot cause the buffer to escape.
+func decodeKeyIntoBuf(src []byte, dst []byte) (written int64, consumed int64, err error) {
+	// Empty string: src starts with the closing quote
+	if len(src) > 0 && src[0] == '"' {
+		return 0, 1, nil
+	}
+
+	written, c := parseJSONStringCompleteASM(src, dst)
+	if written < 0 {
+		switch written {
+		case -1:
+			return 0, -1, ErrUnexpectedEOF
+		case -2:
+			return 0, -1, fmt.Errorf("%w: invalid escape sequence", ErrTypeMismatch)
+		case -3:
+			return 0, -1, fmt.Errorf("%w: invalid hex digit in unicode escape", ErrTypeMismatch)
+		default:
+			return 0, -1, ErrUnexpectedEOF
+		}
+	}
+
+	return written, c, nil
+}
+
 // readJSONString decodes a JSON string starting just after the opening quote.
 // The caller (ParseObject) is responsible for skipping the opening quote before calling.
 // Uses single-pass parsing with no preliminary scanning - finds closing quote,

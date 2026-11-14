@@ -655,7 +655,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 		// stored in the destination. Use shared stack buffer for short keys
 		// to avoid heap allocation per key. Long keys fall back to heap.
 		srcKey := raw[i:]
-		var keySlice string
+		var decoded []byte
 		var consumed int64
 		var err error
 
@@ -665,22 +665,35 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 			// No escapes — decoded length equals raw length minus closing quote
 			keyLen := quoteIdx
 			if keyLen <= len(keyBuf) {
-				keySlice, _, consumed, err = readJSONStringWithBuf(srcKey, false, keyBuf[:])
+				written, c, err := decodeKeyIntoBuf(srcKey, keyBuf[:])
+				if err != nil {
+					return 0, err
+				}
+				consumed = c
+				i += int(consumed)
+
+				// Use decoded bytes directly for lookup (no string conversion)
+				decoded = keyBuf[:written]
 			} else {
 				// Long key without escapes — heap allocation needed
+				var keySlice string
 				keySlice, _, consumed, err = readJSONString(srcKey, false)
+				if err != nil {
+					return 0, err
+				}
+				i += int(consumed)
+				decoded = []byte(keySlice)
 			}
 		} else {
 			// Has escapes or quote not found — use safe path with heap
+			var keySlice string
 			keySlice, _, consumed, err = readJSONString(srcKey, false)
+			if err != nil {
+				return 0, err
+			}
+			i += int(consumed)
+			decoded = []byte(keySlice)
 		}
-		if err != nil {
-			return 0, err
-		}
-		i += int(consumed)
-
-		// decoded is now the key string itself (zero-copy from buffer or heap)
-		decoded := []byte(keySlice)
 
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
 			i++
@@ -731,7 +744,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 						break
 					}
 				} else {
-					if reg.Fields[idx].Key == keySlice {
+					if reg.Fields[idx].Key == string(decoded) {
 						info = reg.Fields[idx]
 						ok = true
 						break
@@ -766,7 +779,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 					}
 				} else {
 					strVal := *(*string)(unsafe.Pointer(uintptr(keysStrPtr) + uintptr(idx)*16))
-					if strVal == keySlice {
+					if strVal == string(decoded) {
 						valIdx := *(*int16)(unsafe.Pointer(uintptr(valsPtr) + uintptr(idx)*2))
 						info = reg.Fields[valIdx]
 						ok = true
@@ -778,7 +791,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 		}
 		if !ok && len(reg.lowerMap) > 0 {
 			// encoding/json compat: case-insensitive key fallback (P2-2)
-			if ciIdx, ciOk := reg.lowerMap[strings.ToLower(keySlice)]; ciOk {
+			if ciIdx, ciOk := reg.lowerMap[strings.ToLower(string(decoded))]; ciOk {
 				info = reg.Fields[ciIdx]
 				ok = true
 			}
@@ -1218,7 +1231,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 				i = end
 
 			default:
-				return 0, fmt.Errorf("%w: unsupported field kind for key %q", ErrTypeMismatch, keySlice)
+				return 0, fmt.Errorf("%w: unsupported field kind for key %q", ErrTypeMismatch, string(decoded))
 			}
 		} else {
 			if !jsonValueStart(raw[i]) {
