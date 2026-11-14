@@ -57,10 +57,10 @@ Every parser decodes the identical ~16 MB payload: 100,000 `Employee` records in
 
 | Library | Objects/sec | Throughput (MB/s) | Latency (ms/op) | Allocated | Allocs/op |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **SilentJSON** (Parallel) | **21.7M** 👑 | **2101** 👑 | **4.7** 👑 | **~0.2 MB** 👑 | ~1150 (fewest: goccy, ~2, at 17 MB) |
+| **SilentJSON** (Parallel) | **26.0M** 👑 | **2559** 👑 | **3.8** 👑 | **~0.1 MB** 👑 | ~760 (fewest: goccy, ~2, at 17 MB) |
 | Goccy | 4.2M | 664 | 23.9 | 17.0 MB | 2 |
 | Jsoniter | 3.1M | 512 | 39.1 | 3.1 MB | 431k |
-| **SilentJSON** (Serial) | 2.2M | 327 | 24.5 | **~130 KB** 👑 | ~1030 |
+| **SilentJSON** (Serial) | 2.4M | 399 | 20.1 | **~60 KB** 👑 | ~760 |
 | Easyjson (codegen) | 2.0M | 311 | 50.7 | 15.4 MB | 534k |
 | Standard (`encoding/json`) | 1.3M | 205 | 77.9 | 1.6 MB | 108k |
 | simdjson-go (AST + manual extraction) | 1.0M | 162 | 95.6 | 306 MB | 1.4M |
@@ -85,8 +85,8 @@ On a clean payload (`BenchmarkLargeScaleComparison`, 100k records): **SilentJSON
 xychart-beta
     title "Parsing Speed: 100k Chaos Objects (MB/s, Higher is Better)"
     x-axis ["SilentJSON Par", "Goccy", "Jsoniter", "Easyjson", "SilentJSON", "Standard", "simdjson", "Sonic*"]
-    y-axis "MB/s" 0 --> 2300
-    bar [2101, 664, 512, 311, 327, 205, 162, 155]
+    y-axis "MB/s" 0 --> 2800
+    bar [2559, 664, 512, 311, 399, 205, 162, 155]
 ```
 
 #### Payload flavors: what do escapes and UTF-8 actually cost?
