@@ -41,3 +41,11 @@ func skipSpaceAVX2(data []byte, start int) int
 //
 //go:noescape
 func findQuoteOrEscapeAVX2(b []byte) (idx int, isEscape bool)
+
+// findBlockMasksAVX2 computes quote and backslash masks for a 32-byte block.
+// Returns (quoteMask, slashMask) as two uint32 values where bit i is set if
+// byte i matches the respective character. Caller must guarantee src points
+// to at least 32 bytes. Implemented in find_block_masks_amd64.s.
+//
+//go:noescape
+func findBlockMasksAVX2(src *byte) (quoteMask uint32, slashMask uint32)

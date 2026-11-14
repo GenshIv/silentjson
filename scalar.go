@@ -128,6 +128,20 @@ func findQuoteOrEscapeScalar(b []byte) (int, bool) {
 	}
 }
 
+// findBlockMasksScalar computes quote and backslash masks for a block.
+// blockLen must be <= 32. Returns (quoteMask, slashMask).
+func findBlockMasksScalar(src []byte) (quoteMask uint32, slashMask uint32) {
+	for i := 0; i < len(src) && i < 32; i++ {
+		if src[i] == '"' {
+			quoteMask |= 1 << i
+		}
+		if src[i] == '\\' {
+			slashMask |= 1 << i
+		}
+	}
+	return quoteMask, slashMask
+}
+
 func skipSpaceScalar(data []byte, start int) int {
 	for i := start; i < len(data); i++ {
 		if (charTable[data[i]] & charSpace) == 0 {

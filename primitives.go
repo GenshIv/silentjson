@@ -636,22 +636,98 @@ func decodeEscapedString(src []byte) ([]byte, int64, error) {
 //   - content: the decoded bytes s points to (useful for key matching)
 //   - consumed: number of input bytes read, including the closing quote
 func readJSONString(src []byte, copyStrings bool) (s string, content []byte, consumed int64, err error) {
+	// Fast path: scan entire string for any special characters
 	idx, isEsc := findQuoteOrEscapeASM(src)
 	if idx < 0 {
 		return "", nil, 0, ErrUnexpectedEOF
 	}
 	if !isEsc {
+		// No escapes before closing quote — zero-copy fast path
 		content = src[:idx]
 		if copyStrings {
 			return string(content), content, int64(idx + 1), nil
 		}
 		return unsafe.String(unsafe.SliceData(content), idx), content, int64(idx + 1), nil
 	}
-	buf, consumed, err := decodeEscapedString(src)
-	if err != nil {
-		return "", nil, 0, err
+
+	// Slow path: string contains escapes — find each escape and process it
+	buf := make([]byte, 0, len(src))
+	i := 0
+
+	for {
+		// Find next special character (escape or closing quote)
+		idx, isEsc := findQuoteOrEscapeASM(src[i:])
+		if idx < 0 {
+			return "", nil, 0, ErrUnexpectedEOF
+		}
+
+		// Copy bytes before the special character
+		buf = append(buf, src[i:i+idx]...)
+		i += idx
+
+		if !isEsc {
+			// Closing quote found — end of string
+			consumed = int64(i + 1)
+			return unsafe.String(unsafe.SliceData(buf), len(buf)), buf, consumed, nil
+		}
+
+		// Process escape sequence
+		if i+1 >= len(src) {
+			return "", nil, 0, ErrUnexpectedEOF
+		}
+		e := src[i+1]
+		switch e {
+		case '"':
+			buf = append(buf, '"')
+			i += 2
+		case '\\':
+			buf = append(buf, '\\')
+			i += 2
+		case '/':
+			buf = append(buf, '/')
+			i += 2
+		case 'n':
+			buf = append(buf, '\n')
+			i += 2
+		case 't':
+			buf = append(buf, '\t')
+			i += 2
+		case 'r':
+			buf = append(buf, '\r')
+			i += 2
+		case 'b':
+			buf = append(buf, '\b')
+			i += 2
+		case 'f':
+			buf = append(buf, '\f')
+			i += 2
+		case 'u':
+			if i+6 > len(src) {
+				return "", nil, 0, fmt.Errorf("%w: truncated \\u escape", ErrTypeMismatch)
+			}
+			cp, ok := parseHex4(src[i+2 : i+6])
+			if !ok {
+				return "", nil, 0, fmt.Errorf("%w: invalid \\u escape", ErrTypeMismatch)
+			}
+			r := cp
+			if utf16.IsSurrogate(r) && i+12 <= len(src) && src[i+6] == '\\' && src[i+7] == 'u' {
+				if cp2, ok2 := parseHex4(src[i+8 : i+12]); ok2 {
+					if dec := utf16.DecodeRune(r, cp2); dec != unicode.ReplacementChar {
+						buf = utf8.AppendRune(buf, dec)
+						i += 12
+						continue
+					}
+				}
+			}
+			if utf16.IsSurrogate(r) {
+				r = utf8.RuneError
+			}
+			buf = utf8.AppendRune(buf, r)
+			i += 6
+		default:
+			return "", nil, 0, fmt.Errorf("%w: invalid escape sequence \\%c", ErrTypeMismatch, e)
+		}
 	}
-	return unsafe.String(unsafe.SliceData(buf), len(buf)), buf, consumed, nil
 }
 
 // loadUint16 loads a uint16 from an arbitrary byte offset (safe on all architectures).
