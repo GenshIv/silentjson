@@ -30,14 +30,13 @@ func parseStringBlockASM(src *byte, dst *byte) (consumed int, written int, statu
 // parseJSONStringCompleteASM finds the closing quote, decodes all escapes,
 // and writes the complete decoded string to dst in one call. Returns (written, consumed).
 func parseJSONStringCompleteASM(src []byte, dst []byte) (int64, int64) {
-	// Scalar implementation for non-amd64 architectures
-	end, _ := scanJSONStringScalar(src)
-	if end < 0 {
-		return -1, -1
-	}
+	// Single-pass scalar implementation: find closing quote and decode escapes simultaneously
 	written := 0
-	for i := 0; i < end; i++ {
-		if src[i] == '\\' && i+1 < end {
+	for i := 0; i < len(src); i++ {
+		if src[i] == '"' {
+			return int64(written), int64(i + 1)
+		}
+		if src[i] == '\\' && i+1 < len(src) {
 			i++
 			switch src[i] {
 			case 'n':
@@ -66,17 +65,17 @@ func parseJSONStringCompleteASM(src []byte, dst []byte) (int64, int64) {
 				written++
 			case 'u':
 				// Unicode escape: \uXXXX
-				if i+6 > end {
+				if i+6 > len(src) {
 					return -1, -1 // Truncated unicode escape
 				}
 				codepoint, ok := parseHex4(src[i+1 : i+5])
 				if !ok {
 					return -3, -1 // Invalid hex digit
 				}
-				if codepoint >= 0xD800 && codepoint <= 0xDBFF && i+12 <= end {
+				if codepoint >= 0xD800 && codepoint <= 0xDBFF && i+12 <= len(src) {
 					// High surrogate - check for low surrogate
-					if src[i+7] == '\\' && src[i+8] == 'u' {
-						lowCodepoint, ok := parseHex4(src[i+9 : i+13])
+					if src[i+6] == '\\' && src[i+7] == 'u' {
+						lowCodepoint, ok := parseHex4(src[i+8 : i+12])
 						if ok && lowCodepoint >= 0xDC00 && lowCodepoint <= 0xDFFF {
 							// Valid surrogate pair - combine
 							codepoint = 0x10000 + ((codepoint-0xD800)<<10) + (lowCodepoint - 0xDC00)
@@ -102,7 +101,7 @@ func parseJSONStringCompleteASM(src []byte, dst []byte) (int64, int64) {
 			written++
 		}
 	}
-	return int64(written), int64(end + 1)
+	return -1, -1 // No closing quote found
 }
 
 // writeUTF8 encodes a codepoint as UTF-8 and writes it to dst, updating written.

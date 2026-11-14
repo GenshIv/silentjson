@@ -639,6 +639,8 @@ func decodeEscapedString(src []byte) ([]byte, int64, error) {
 //
 // readJSONString decodes a JSON string starting just after the opening quote.
 // The caller (ParseObject) is responsible for skipping the opening quote before calling.
+// Uses single-pass parsing with no preliminary scanning - finds closing quote,
+// decodes all escapes, and copies to owned memory in one operation.
 // Returns the decoded string, content bytes, number of bytes consumed (including closing quote), and error.
 func readJSONString(src []byte, copyStrings bool) (s string, content []byte, consumed int64, err error) {
 	// Empty string: src starts with the closing quote
