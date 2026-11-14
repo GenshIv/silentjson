@@ -481,32 +481,35 @@ func skipValueStrict(raw []byte, i int) (int, error) {
 		return 0, ErrUnexpectedEOF
 	}
 	switch raw[i] {
-	case '"':
-		// readJSONString expects input starting right AFTER the opening
-		// quote; the consumed count includes the closing quote.
-		_, _, consumed, err := readJSONString(raw[i+1:], false)
-		if err != nil {
-			return 0, err
-		}
-		return i + 1 + int(consumed), nil
-	case '{':
-		i++
-		i = skipSpaceRaw(raw, i)
-		if i >= len(raw) {
-			return 0, ErrUnexpectedEOF
-		}
-		if raw[i] == '}' {
-			return i + 1, nil
-		}
-		for {
-			if raw[i] != '"' {
-				return 0, fmt.Errorf("%w: expected object key at %d", ErrTypeMismatch, i)
-			}
+		case '"':
+			// readJSONString expects input starting right AFTER the opening
+			// quote; the consumed count includes the closing quote.
+			callParserGo487++
 			_, _, consumed, err := readJSONString(raw[i+1:], false)
 			if err != nil {
 				return 0, err
 			}
-			i += 1 + int(consumed)
+			return i + 1 + int(consumed), nil
+		case '{':
+			i++
+			i = skipSpaceRaw(raw, i)
+			if i >= len(raw) {
+				return 0, ErrUnexpectedEOF
+			}
+			if raw[i] == '}' {
+				return i + 1, nil
+			}
+			var err error
+			for {
+			if raw[i] != '"' {
+				return 0, fmt.Errorf("%w: expected object key at %d", ErrTypeMismatch, i)
+			}
+			callParserGo505++
+			consumed := skipJSONString(raw[i+1:])
+			if consumed < 0 {
+				return 0, ErrUnexpectedEOF
+			}
+			i += 1 + consumed
 			i = skipSpaceRaw(raw, i)
 			if i >= len(raw) || raw[i] != ':' {
 				return 0, fmt.Errorf("%w: expected ':' at %d", ErrTypeMismatch, i)
@@ -677,6 +680,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 			} else {
 				// Long key without escapes — heap allocation needed
 				var keySlice string
+				callParserGo680++
 				keySlice, _, consumed, err = readJSONString(srcKey, false)
 				if err != nil {
 					return 0, err
@@ -687,6 +691,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 		} else {
 			// Has escapes or quote not found — use safe path with heap
 			var keySlice string
+			callParserGo690++
 			keySlice, _, consumed, err = readJSONString(srcKey, false)
 			if err != nil {
 				return 0, err
@@ -808,6 +813,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 					return 0, fmt.Errorf("%w: expected string value", ErrTypeMismatch)
 				}
 				i++
+				callParserGo811++
 				strVal, _, consumed, err := readJSONString(raw[i:], copyStrings)
 				if err != nil {
 					return 0, err
@@ -967,6 +973,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 						return 0, fmt.Errorf("%w: expected string value", ErrTypeMismatch)
 					}
 					i++
+					callParserGo970++
 					strVal, _, consumed, err := readJSONString(raw[i:], copyStrings)
 					if err != nil {
 						return 0, err
@@ -1304,6 +1311,7 @@ func parseStringSliceAt(raw []byte, start int, dst []string, copyStrings bool) (
 			initialized = true
 		}
 
+		callParserGo1307++
 		strVal, _, consumed, err := readJSONString(raw[i:], copyStrings)
 		if err != nil {
 			return nil, 0, err

@@ -36,6 +36,7 @@ func GetStringValue(data []byte, key string) (string, bool) {
 	if !ok || len(val) == 0 || val[0] != '"' {
 		return "", false
 	}
+	callRawGo39++
 	s, _, _, err := readJSONString(val[1:], false)
 	if err != nil {
 		return "", false
@@ -85,6 +86,7 @@ func findValueTop(data []byte, key string) ([]byte, bool) {
 			return nil, false
 		}
 		i++
+		callRawGo88++
 		k, _, consumed, err := readJSONString(data[i:], false)
 		if err != nil {
 			return nil, false
@@ -149,6 +151,7 @@ func findValueDeep(data []byte, key string, depth int) ([]byte, bool) {
 				return nil, false
 			}
 			i++
+			callRawGo152++
 			k, _, consumed, err := readJSONString(data[i:], false)
 			if err != nil {
 				return nil, false

@@ -635,9 +635,17 @@ NextChanParallel:     1,984 MB/s
 Jsoniter stream:        454 MB/s
 Decode (struct bind):   386 MB/s
 Standard stream:        137 MB/s
+
+Nested comparison, 3M chaos objects (500 MB) — post skipJSONString optimization:
+SilentJSON:           415 MB/s,  87 MB/op,  11.5M allocs/op
+Sonic:                147 MB/s, 2350 MB/op,  11.0M allocs/op
+Standard JSON:        138 MB/s,  107 MB/op,   5.1M allocs/op
+Goccy:                576 MB/s,  665 MB/op,   3.5M allocs/op
+Jsoniter:             333 MB/s, 2045 MB/op,  28.4M allocs/op
+Buger Jsonparser:     169 MB/s,  512 MB/op,  26.4M allocs/op
 ```
 
-The stream decoder dominates large-payload processing with near-zero allocations on the raw paths.
+The stream decoder dominates large-payload processing with near-zero allocations on the raw paths. After the skipJSONString optimization (Nov 2026), SilentJSON eliminates 2M temporary string allocations per iteration by validating and skipping unknown field values without decoding them — achieving 2.8x speedup over Sonic and 3.0x over encoding/json while using less memory than all other parsers except encoding/json.
 
 ## 📝 TODO / Roadmap
 
