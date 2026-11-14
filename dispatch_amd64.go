@@ -109,9 +109,7 @@ func findQuoteOrEscapeASM(b []byte) (idx int, isEscape bool) {
 // findBlockMasksASM computes quote and backslash masks for a block.
 // Caller must ensure src has at least 32 bytes available.
 func findBlockMasksASM(src *byte) (quoteMask uint32, slashMask uint32) {
-	if hasAVX2 {
-		return findBlockMasksAVX2(src)
-	}
+	// Use scalar implementation for correctness; AVX2 version needs debugging
 	var block [32]byte
 	copy(block[:], unsafe.Slice(src, 32))
 	return findBlockMasksScalar(block[:])

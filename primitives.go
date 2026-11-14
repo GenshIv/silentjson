@@ -636,100 +636,102 @@ func decodeEscapedString(src []byte) ([]byte, int64, error) {
 //   - content: the decoded bytes s points to (useful for key matching)
 //   - consumed: number of input bytes read, including the closing quote
 func readJSONString(src []byte, copyStrings bool) (s string, content []byte, consumed int64, err error) {
-	// Single unified implementation: use SIMD to efficiently find the next
-	// special character (escape or closing quote), process it, and continue.
-	// No pre-checking of the entire string — discover escapes as we encounter them.
-	var buf []byte
-	i := 0
+	// Use AVX2 to find the first quote or escape in one pass
+	idx, isEscape := findQuoteOrEscapeAVX2(src)
+	if idx < 0 {
+		return "", nil, 0, ErrUnexpectedEOF
+	}
 
+	if !isEscape {
+		// No escapes — closing quote found. Zero-copy fast path.
+		consumed = int64(idx + 1)
+		content = src[:idx]
+		if copyStrings {
+			return string(content), content, consumed, nil
+		}
+		return unsafe.String(unsafe.SliceData(content), idx), content, consumed, nil
+	}
+
+	// Escape found at src[idx]. Process all escapes from here using byte-by-byte loop.
+	buf := make([]byte, 0, len(src)/4)
+	// Copy bytes before the first escape
+	buf = append(buf, src[:idx]...)
+
+	j := idx
 	for {
-		// Use SIMD to find the next escape or closing quote from current position
-		idx, isEsc := findQuoteOrEscapeASM(src[i:])
-		if idx < 0 {
+		if j >= len(src) {
 			return "", nil, 0, ErrUnexpectedEOF
 		}
 
-		if !isEsc {
-			// Closing quote found — end of string
-			consumed = int64(i + idx + 1)
-			if buf == nil {
-				// No escapes encountered — zero-copy fast path
-				content = src[:i+idx]
-				if copyStrings {
-					return string(content), content, consumed, nil
-				}
-				return unsafe.String(unsafe.SliceData(content), i+idx), content, consumed, nil
-			}
-			// Copy remaining bytes before closing quote
-			buf = append(buf, src[i:i+idx]...)
+		c := src[j]
+		if c == '"' {
+			consumed = int64(j + 1)
 			return unsafe.String(unsafe.SliceData(buf), len(buf)), buf, consumed, nil
 		}
-
-		// Escape found — allocate buffer if needed and process
-		if buf == nil {
-			buf = make([]byte, 0, len(src))
-			// Copy bytes before the escape
-			buf = append(buf, src[i:i+idx]...)
-		} else {
-			buf = append(buf, src[i:i+idx]...)
+		if c != '\\' {
+			buf = append(buf, c)
+			j++
+			continue
 		}
-		i += idx
 
-		// Process escape sequence
-		if i+1 >= len(src) {
+		// Process escape sequence at src[j] (backslash)
+		if j+1 >= len(src) {
 			return "", nil, 0, ErrUnexpectedEOF
 		}
-		e := src[i+1]
-		switch e {
+
+		switch src[j+1] {
 		case '"':
 			buf = append(buf, '"')
-			i += 2
+			j += 2
 		case '\\':
 			buf = append(buf, '\\')
-			i += 2
+			j += 2
 		case '/':
 			buf = append(buf, '/')
-			i += 2
+			j += 2
 		case 'n':
 			buf = append(buf, '\n')
-			i += 2
+			j += 2
 		case 't':
 			buf = append(buf, '\t')
-			i += 2
+			j += 2
 		case 'r':
 			buf = append(buf, '\r')
-			i += 2
+			j += 2
 		case 'b':
 			buf = append(buf, '\b')
-			i += 2
+			j += 2
 		case 'f':
 			buf = append(buf, '\f')
-			i += 2
+			j += 2
 		case 'u':
-			if i+6 > len(src) {
-				return "", nil, 0, fmt.Errorf("%w: truncated \\u escape", ErrTypeMismatch)
+			if j+6 >= len(src) {
+				return "", nil, 0, ErrUnexpectedEOF
 			}
-			cp, ok := parseHex4(src[i+2 : i+6])
+			cp, ok := parseHex4(src[j+2 : j+6])
 			if !ok {
 				return "", nil, 0, fmt.Errorf("%w: invalid \\u escape", ErrTypeMismatch)
 			}
 			r := cp
-			if utf16.IsSurrogate(r) && i+12 <= len(src) && src[i+6] == '\\' && src[i+7] == 'u' {
-				if cp2, ok2 := parseHex4(src[i+8 : i+12]); ok2 {
+			surrogateDecoded := false
+			if utf16.IsSurrogate(r) && j+12 <= len(src) && src[j+6] == '\\' && src[j+7] == 'u' {
+				if cp2, ok2 := parseHex4(src[j+8 : j+12]); ok2 {
 					if dec := utf16.DecodeRune(r, cp2); dec != unicode.ReplacementChar {
 						buf = utf8.AppendRune(buf, dec)
-						i += 12
-						continue
+						j += 12
+						surrogateDecoded = true
 					}
 				}
 			}
-			if utf16.IsSurrogate(r) {
-				r = utf8.RuneError
+			if !surrogateDecoded {
+				if utf16.IsSurrogate(r) {
+					r = utf8.RuneError
+				}
+				buf = utf8.AppendRune(buf, r)
+				j += 6
 			}
-			buf = utf8.AppendRune(buf, r)
-			i += 6
 		default:
-			return "", nil, 0, fmt.Errorf("%w: invalid escape sequence \\%c", ErrTypeMismatch, e)
+			return "", nil, 0, fmt.Errorf("%w: invalid escape sequence \\%c", ErrTypeMismatch, src[j+1])
 		}
 	}
 }
