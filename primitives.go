@@ -12,21 +12,6 @@ import (
 	"unsafe"
 )
 
-// Temporary counters for analyzing readJSONString call patterns by location
-var (
-	callRawGo39      int64 // raw.go:39 - RawValue.GetString
-	callRawGo88      int64 // raw.go:88 - ParseObject keys
-	callRawGo152     int64 // raw.go:152 - ParseObject nested
-	callParserGo487  int64 // parser.go:487 - Skip strings during parsing
-	callParserGo505  int64 // parser.go:505 - Skip strings during parsing
-	callParserGo680  int64 // parser.go:680 - Long keys (heap path)
-	callParserGo690  int64 // parser.go:690 - Keys with escapes (heap path)
-	callParserGo811  int64 // parser.go:811 - String field values
-	callParserGo970  int64 // parser.go:970 - String field values (nested)
-	callParserGo1307 int64 // parser.go:1307 - parseStringSliceAt
-	callPrimitives954 int64 // primitives.go:954 - parseJSONString wrapper
-)
-
 type FieldType int
 
 type Chunk struct {
@@ -937,7 +922,7 @@ func loadUint64(b []byte, offset int) uint64 {
 }
 
 func parseJSONString(raw []byte, start int, copyStrings bool) (string, int, error) {
-	callPrimitives954++
+	
 	s, _, consumed, err := readJSONString(raw[start:], copyStrings)
 	return s, int(consumed), err
 }

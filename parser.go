@@ -484,7 +484,7 @@ func skipValueStrict(raw []byte, i int) (int, error) {
 		case '"':
 			// readJSONString expects input starting right AFTER the opening
 			// quote; the consumed count includes the closing quote.
-			callParserGo487++
+			
 			_, _, consumed, err := readJSONString(raw[i+1:], false)
 			if err != nil {
 				return 0, err
@@ -504,7 +504,7 @@ func skipValueStrict(raw []byte, i int) (int, error) {
 			if raw[i] != '"' {
 				return 0, fmt.Errorf("%w: expected object key at %d", ErrTypeMismatch, i)
 			}
-			callParserGo505++
+			
 			consumed := skipJSONString(raw[i+1:])
 			if consumed < 0 {
 				return 0, ErrUnexpectedEOF
@@ -625,11 +625,6 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 	}
 	i++
 
-	// Shared stack buffer for transient key strings. Most JSON keys are short;
-	// this avoids a heap allocation per key. Long keys (>256 bytes) fall back
-	// to heap allocation via readJSONString.
-	var keyBuf [256]byte
-
 	afterComma := false
 	for {
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
@@ -655,50 +650,13 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 		i++
 		// Keys are parsed with copyStrings=false ALWAYS: the key string is
 		// transient (hash lookup, case fallback, error text) and never
-		// stored in the destination. Use shared stack buffer for short keys
-		// to avoid heap allocation per key. Long keys fall back to heap.
-		srcKey := raw[i:]
-		var decoded []byte
-		var consumed int64
-		var err error
-
-		// Determine upper bound length via quote/escape scan (no decoding)
-		quoteIdx, isEscape := findQuoteOrEscapeASM(srcKey)
-		if !isEscape && quoteIdx >= 0 {
-			// No escapes — decoded length equals raw length minus closing quote
-			keyLen := quoteIdx
-			if keyLen <= len(keyBuf) {
-				written, c, err := decodeKeyIntoBuf(srcKey, keyBuf[:])
-				if err != nil {
-					return 0, err
-				}
-				consumed = c
-				i += int(consumed)
-
-				// Use decoded bytes directly for lookup (no string conversion)
-				decoded = keyBuf[:written]
-			} else {
-				// Long key without escapes — heap allocation needed
-				var keySlice string
-				callParserGo680++
-				keySlice, _, consumed, err = readJSONString(srcKey, false)
-				if err != nil {
-					return 0, err
-				}
-				i += int(consumed)
-				decoded = []byte(keySlice)
-			}
-		} else {
-			// Has escapes or quote not found — use safe path with heap
-			var keySlice string
-			callParserGo690++
-			keySlice, _, consumed, err = readJSONString(srcKey, false)
-			if err != nil {
-				return 0, err
-			}
-			i += int(consumed)
-			decoded = []byte(keySlice)
+		// stored in the destination, so the zero-copy alias into the input
+		// buffer is safe and saves an allocation per key.
+		_, decoded, consumed, err := readJSONString(raw[i:], false)
+		if err != nil {
+			return 0, err
 		}
+		i += int(consumed)
 
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
 			i++
@@ -813,7 +771,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 					return 0, fmt.Errorf("%w: expected string value", ErrTypeMismatch)
 				}
 				i++
-				callParserGo811++
+				
 				strVal, _, consumed, err := readJSONString(raw[i:], copyStrings)
 				if err != nil {
 					return 0, err
@@ -973,7 +931,7 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 						return 0, fmt.Errorf("%w: expected string value", ErrTypeMismatch)
 					}
 					i++
-					callParserGo970++
+					
 					strVal, _, consumed, err := readJSONString(raw[i:], copyStrings)
 					if err != nil {
 						return 0, err
@@ -1311,7 +1269,7 @@ func parseStringSliceAt(raw []byte, start int, dst []string, copyStrings bool) (
 			initialized = true
 		}
 
-		callParserGo1307++
+		
 		strVal, _, consumed, err := readJSONString(raw[i:], copyStrings)
 		if err != nil {
 			return nil, 0, err
