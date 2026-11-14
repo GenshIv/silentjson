@@ -637,6 +637,44 @@ func decodeEscapedString(src []byte) ([]byte, int64, error) {
 //   - content: the decoded bytes s points to (useful for key matching)
 //   - consumed: number of input bytes read, including the closing quote
 //
+// readJSONStringWithBuf decodes a JSON string into the provided dst buffer.
+// The caller must ensure dst is large enough to hold the decoded string.
+// Returns the decoded string, content bytes slice of dst, number of bytes consumed, and error.
+func readJSONStringWithBuf(src []byte, copyStrings bool, dst []byte) (s string, content []byte, consumed int64, err error) {
+	// Empty string: src starts with the closing quote
+	if len(src) > 0 && src[0] == '"' {
+		content = nil
+		consumed = 1
+		s = ""
+		return s, content, consumed, nil
+	}
+
+	written, c := parseJSONStringCompleteASM(src, dst)
+	if written < 0 {
+		switch written {
+		case -1:
+			return "", nil, -1, ErrUnexpectedEOF
+		case -2:
+			return "", nil, -1, fmt.Errorf("%w: invalid escape sequence", ErrTypeMismatch)
+		case -3:
+			return "", nil, -1, fmt.Errorf("%w: invalid hex digit in unicode escape", ErrTypeMismatch)
+		default:
+			return "", nil, -1, ErrUnexpectedEOF
+		}
+	}
+
+	content = dst[:written]
+	consumed = c
+
+	if copyStrings {
+		s = string(content)
+	} else {
+		s = unsafe.String(unsafe.SliceData(content), len(content))
+	}
+
+	return s, content, consumed, nil
+}
+
 // readJSONString decodes a JSON string starting just after the opening quote.
 // The caller (ParseObject) is responsible for skipping the opening quote before calling.
 // Uses single-pass parsing with no preliminary scanning - finds closing quote,

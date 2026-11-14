@@ -622,6 +622,11 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 	}
 	i++
 
+	// Shared stack buffer for transient key strings. Most JSON keys are short;
+	// this avoids a heap allocation per key. Long keys (>256 bytes) fall back
+	// to heap allocation via readJSONString.
+	var keyBuf [256]byte
+
 	afterComma := false
 	for {
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
@@ -647,16 +652,35 @@ func parseObjectAt(raw []byte, reg *Registry, ptr unsafe.Pointer, copyStrings bo
 		i++
 		// Keys are parsed with copyStrings=false ALWAYS: the key string is
 		// transient (hash lookup, case fallback, error text) and never
-		// stored in the destination, so the zero-copy alias into the input
-		// buffer is safe and saves an allocation per key — in stream mode
-		// that is ~9 of the ~12.5 per-record allocations. Values keep the
-		// caller's copyStrings semantics.
-		keySlice, keyBytes, consumed, err := readJSONString(raw[i:], false)
+		// stored in the destination. Use shared stack buffer for short keys
+		// to avoid heap allocation per key. Long keys fall back to heap.
+		srcKey := raw[i:]
+		var keySlice string
+		var consumed int64
+		var err error
+
+		// Determine upper bound length via quote/escape scan (no decoding)
+		quoteIdx, isEscape := findQuoteOrEscapeASM(srcKey)
+		if !isEscape && quoteIdx >= 0 {
+			// No escapes — decoded length equals raw length minus closing quote
+			keyLen := quoteIdx
+			if keyLen <= len(keyBuf) {
+				keySlice, _, consumed, err = readJSONStringWithBuf(srcKey, false, keyBuf[:])
+			} else {
+				// Long key without escapes — heap allocation needed
+				keySlice, _, consumed, err = readJSONString(srcKey, false)
+			}
+		} else {
+			// Has escapes or quote not found — use safe path with heap
+			keySlice, _, consumed, err = readJSONString(srcKey, false)
+		}
 		if err != nil {
 			return 0, err
 		}
-		decoded := keyBytes
 		i += int(consumed)
+
+		// decoded is now the key string itself (zero-copy from buffer or heap)
+		decoded := []byte(keySlice)
 
 		for i < len(raw) && (charTable[raw[i]]&charSpace) != 0 {
 			i++
