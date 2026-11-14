@@ -66,3 +66,12 @@ func findBlockMasksAVX2(src *byte) (quoteMask uint32, slashMask uint32)
 //
 //go:noescape
 func parseStringBlockAVX2(src *byte, dst *byte) (consumed int, written int, status int)
+
+// parseJSONStringCompleteAVX2 takes a JSON string starting just after the
+// opening quote, finds the closing quote using AVX2 scanning, decodes all
+// escape sequences, and writes the complete decoded string to dst. Returns
+// the number of bytes written to dst and the number of input bytes consumed
+// (including the closing quote).
+//
+//go:noescape
+func parseJSONStringCompleteAVX2(src []byte, dst []byte) (written int64, consumed int64)

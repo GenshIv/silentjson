@@ -26,6 +26,50 @@ func parseShortStringASM2(src []byte) (int64, int64) {
 	return parseShortStringScalar2(src)
 }
 
+// parseJSONStringCompleteASM finds the closing quote, decodes all escapes,
+// and writes the complete decoded string to dst in one call. Returns (written, consumed).
+func parseJSONStringCompleteASM(src []byte, dst []byte) (int64, int64) {
+	if hasAVX2 {
+		return parseJSONStringCompleteAVX2(src, dst)
+	}
+	// Scalar fallback: find quote, then decode
+	end, _ := scanJSONStringScalar(src)
+	if end < 0 {
+		return -1, -1
+	}
+	written := 0
+	for i := 0; i < end; i++ {
+		if src[i] == '\\' && i+1 < end {
+			i++
+			switch src[i] {
+			case 'n':
+				dst[written] = '\n'
+			case '"':
+				dst[written] = '"'
+			case '\\':
+				dst[written] = '\\'
+			case 'r':
+				dst[written] = '\r'
+			case 't':
+				dst[written] = '\t'
+			case '/':
+				dst[written] = '/'
+			case 'b':
+				dst[written] = '\b'
+			case 'f':
+				dst[written] = '\f'
+			default:
+				dst[written] = src[i]
+			}
+			written++
+		} else {
+			dst[written] = src[i]
+			written++
+		}
+	}
+	return int64(written), int64(end + 1)
+}
+
 func findQuoteAsm(data []byte) (index int) {
 	if hasAVX2 {
 		return findQuoteAVX2(data)
