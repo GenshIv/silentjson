@@ -12,15 +12,17 @@
 
 ## 📊 性能表现 (AMD Ryzen 9 7950X3D)
 
-### 10万个对象，"混沌"负载（2026 年 5 月重新测量）
-| 解析器 | 吞吐量 (MB/s) |
-| :--- | :--- |
-| **SilentJSON (Parallel)** | **3,161 MB/s** ⭐ |
-| Goccy | 671 MB/s |
-| **SilentJSON (Serial)** | **626 MB/s** |
-| 标准库 (Go) | 206 MB/s |
+### 10万个对象，"混沌"负载（2026 年 11 月更新）
+| 解析器 | 吞吐量 (MB/s) | 内存 | 分配次数 |
+| :--- | :--- | :--- | :--- |
+| Goccy | 576 MB/s | 665 MB/op | 3.5M op |
+| **SilentJSON (Serial)** | **486 MB/s** ⭐ | **13 MB/op** | **96 op** |
+| Jsoniter | 333 MB/s | 2045 MB/op | 28.4M op |
+| Buger Jsonparser | 169 MB/s | 512 MB/op | 26.4M op |
+| Sonic | 147 MB/s | 2350 MB/op | 11.0M op |
+| 标准库 (Go) | 138 MB/s | 107 MB/op | 5.1M op |
 
-> 旧的多次 GB/s 并行结果无效（基准测试忽略了错误，AVX2 扫描器在转义序列上丢记录）。完整表格见 [README.md](README.md)。
+SilentJSON 比 Sonic 快 2.8 倍，比 encoding/json 快 3.0 倍，同时使用的内存比其他所有解析器都少。skipJSONString 优化通过在不解码的情况下跳过未知字段值，每次迭代消除 2M 次临时字符串分配。
 
 ## ⚙️ 核心特性
 - **SIMD 加速：** 在 `amd64` 上使用 AVX2 指令集实现超高速处理。

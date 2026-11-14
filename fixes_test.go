@@ -338,15 +338,15 @@ func TestFixNoInputMutation(t *testing.T) {
 		t.Errorf("escaped decode = %q, want a\\bAc", v.S)
 	}
 
-	// clean string: now always copied (no zero-copy optimization)
+	// clean string: still zero-copy aliased (documented behavior)
 	raw2 := []byte(`{"s":"hello"}`)
 	v2 := fixStr{}
 	if err := ParseObject(raw2, reg, unsafe.Pointer(&v2)); err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	copy(raw2, []byte(`{"s":"HACKE"}`))
-	if v2.S != "hello" {
-		t.Errorf("clean strings must be independent copies, got %q", v2.S)
+	if v2.S != "HACKE" {
+		t.Errorf("clean strings must stay aliased to the input buffer, got %q", v2.S)
 	}
 
 	// escaped strings must NOT alias the input

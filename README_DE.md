@@ -12,13 +12,7 @@
 
 ## 📊 Performance (AMD Ryzen 9 7950X3D)
 
-### 100k Objekte, "Chaos"-Payload (neu gemessen Mai 2026)
-| Parser | Durchsatz (MB/s) |
-| :--- | :--- |
-| **SilentJSON (Parallel)** | **3.161 MB/s** ⭐ |
-| Goccy | 671 MB/s |
-| **SilentJSON (Serial)** | **626 MB/s** |
-| Standard (Go) | 206 MB/s |
+### 100k Objekte, "Chaos"-Payload (aktualisiert November 2026)
 
 > Die alten Multi-GB/s-Parallelwerte waren ungültig (Benchmarks ignorierten Fehler; der AVX2-Splitter verlor Datensätze bei Escape-Sequenzen). Vollständige Tabellen in [README.md](README.md).
 

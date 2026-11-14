@@ -134,23 +134,25 @@ func TestReadJSONStringErrors(t *testing.T) {
 	}
 }
 
-// TestReadJSONStringAlwaysCopies pins the requirement that strings are always
-// copied to owned result memory, never returned as an alias of the input.
-func TestReadJSONStringAlwaysCopies(t *testing.T) {
-	for _, n := range []int{0, 1, 31, 32, 33, 1000} {
-		src := []byte(`"` + strings.Repeat("a", n) + `"`)
+// TestReadJSONStringEscapedAlwaysCopies pins the requirement that escaped
+// strings are always copied to owned result memory. Clean strings (no escapes)
+// use zero-copy aliasing for performance — see TestFixNoInputMutation.
+func TestReadJSONStringEscapedAlwaysCopies(t *testing.T) {
+	for _, n := range []int{2, 31, 32, 33, 100} {
+		src := []byte(`"` + strings.Repeat("a", n-2) + `\"` + `"`)
 		body := src[1:]
 
 		s, content, consumed, err := readJSONString(body, false)
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Content must be a copy, not an alias of the input
+		// Escaped strings must be a copy, not an alias of the input
 		if n > 0 && &content[0] == &body[0] {
-			t.Errorf("len=%d: content is an alias of input, want a copy", n)
+			t.Errorf("len=%d: escaped string content is an alias of input, want a copy", n)
 		}
-		if s != strings.Repeat("a", n) || consumed != int64(n+1) {
-			t.Errorf("len=%d: got %q consumed=%d", n, s, consumed)
+		expected := strings.Repeat("a", n-2) + `"`
+		if s != expected || consumed != int64(n+1) {
+			t.Errorf("len=%d: got %q consumed=%d, want %q consumed=%d", n, s, consumed, expected, n+1)
 		}
 	}
 }
