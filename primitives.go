@@ -641,9 +641,10 @@ func decodeEscapedString(src []byte) ([]byte, int64, error) {
 // or just after it; both forms are accepted for compatibility with existing callers.
 // Uses single-pass AVX2 assembly implementation for optimal performance.
 func readJSONString(src []byte, copyStrings bool) (s string, content []byte, consumed int64, err error) {
-	// Handle both calling conventions: input starting with '"' or after it
+	// The AVX2 assembly expects input starting just after the opening quote.
+	// If the caller passed the full JSON string including the opening quote, strip it.
 	start := 0
-	if len(src) > 0 && src[0] == '"' {
+	if len(src) > 1 && src[0] == '"' {
 		start = 1
 	}
 

@@ -159,26 +159,47 @@ parse_digit_done:
     DECQ R15
     JNZ parse_hex_digits
 
+    // Check for lone low surrogate (U+DC00 to U+DFFF) - invalid without preceding high surrogate
+    MOVQ $0xDC00, R12
+    CMPQ R14, R12
+    JAE check_low_surrogate_upper    // R14 >= 0xDC00: might be low surrogate
+    JMP not_lone_low_surrogate       // R14 < 0xDC00: below range
+
+check_low_surrogate_upper:
+    MOVQ $0xDFFF, R12
+    CMPQ R14, R12
+    JBE emit_replacement_char        // R14 <= 0xDFFF: lone low surrogate
+    JMP not_lone_low_surrogate       // R14 > 0xDFFF: above range
+
+not_lone_low_surrogate:
     // Check for surrogate pair (high surrogate: U+D800 to U+DBFF)
-    CMPQ R14, $0xD800
-    JB  emit_unicode_char         // Not a high surrogate
-    CMPQ R14, $0xDBFF
-    JA  emit_unicode_char         // Not in high surrogate range
+    MOVQ $0xD800, R12
+    CMPQ R14, R12
+    JAE check_high_surrogate_upper   // R14 >= 0xD800: might be high surrogate
+    JMP emit_unicode_char            // R14 < 0xD800: not a high surrogate
+
+check_high_surrogate_upper:
+    MOVQ $0xDBFF, R12
+    CMPQ R14, R12
+    JBE handle_high_surrogate        // R14 <= 0xDBFF: high surrogate found
+    JMP emit_unicode_char            // R14 > 0xDBFF: not in high surrogate range
+
+handle_high_surrogate:
 
     // High surrogate found - check for low surrogate
     MOVQ BX, R8
     SUBQ CX, R8
     CMPQ R8, $6                    // Need at least 6 bytes: \uXXXX
-    JL  parse_hex_invalid          // Not enough for surrogate pair
+    JL  emit_high_surrogate_replacement  // Not enough for surrogate pair
 
     MOVB (SI)(CX*1), AL
     CMPB AL, $0x5C                 // '\'?
-    JNE  parse_hex_invalid         // No backslash - invalid surrogate pair
+    JNE  emit_high_surrogate_replacement  // No backslash - invalid surrogate pair
     INCQ CX
 
     MOVB (SI)(CX*1), AL
     CMPB AL, $0x75                 // 'u'?
-    JNE  parse_hex_invalid         // Not \u - invalid surrogate pair
+    JNE  emit_high_surrogate_replacement  // Not \u - invalid surrogate pair
     INCQ CX
 
     // Parse low surrogate hex digits into R10
@@ -223,9 +244,9 @@ parse_low_digit_done:
 
     // Validate low surrogate range (U+DC00 to U+DFFF)
     CMPQ R10, $0xDC00
-    JB  parse_hex_invalid
+    JB  emit_high_surrogate_replacement_then_char
     CMPQ R10, $0xDFFF
-    JA  parse_hex_invalid
+    JA  emit_high_surrogate_replacement_then_char
 
     // Combine surrogates: codepoint = 0x10000 + ((high-0xD800)<<10) + (low-0xDC00)
     MOVQ R14, R12
@@ -236,6 +257,29 @@ parse_low_digit_done:
     ADDQ R12, R13
     ADDQ $0x10000, R13
     MOVQ R13, R14
+    JMP emit_unicode_char
+
+emit_high_surrogate_replacement:
+    // Emit U+FFFD for unpaired high surrogate, then continue processing
+    MOVB $0xEF, (DI)(DX*1)
+    INCQ DX
+    MOVB $0xBF, (DI)(DX*1)
+    INCQ DX
+    MOVB $0xBD, (DI)(DX*1)
+    INCQ DX
+    JMP main_loop
+
+emit_high_surrogate_replacement_then_char:
+    // Emit U+FFFD for unpaired high surrogate, then process the parsed value as a regular char
+    MOVB $0xEF, (DI)(DX*1)
+    INCQ DX
+    MOVB $0xBF, (DI)(DX*1)
+    INCQ DX
+    MOVB $0xBD, (DI)(DX*1)
+    INCQ DX
+    // Move parsed value to R14 and emit it as a unicode character
+    MOVQ R10, R14
+    JMP emit_unicode_char
 
 emit_unicode_char:
     // Convert codepoint to UTF-8 and emit
@@ -320,6 +364,12 @@ emit_utf8_1byte:                  // U+0000 to U+007F
     MOVB R10, (DI)(DX*1)
     INCQ DX
     JMP main_loop
+
+emit_replacement_char:
+    // Emit U+FFFD for invalid surrogate or other errors
+    MOVQ $0xFFFD, R14
+    JMP emit_unicode_char
+
 
 parse_hex_invalid:
     // Invalid hex digit - emit replacement character U+FFFD
@@ -477,26 +527,47 @@ parse_digit_done_scalar:
     DECQ R15
     JNZ parse_hex_digits_scalar
 
+    // Check for lone low surrogate (U+DC00 to U+DFFF) - invalid without preceding high surrogate
+    MOVQ $0xDC00, R12
+    CMPQ R14, R12
+    JAE check_low_surrogate_upper_scalar    // R14 >= 0xDC00: might be low surrogate
+    JMP not_lone_low_surrogate_scalar       // R14 < 0xDC00: below range
+
+check_low_surrogate_upper_scalar:
+    MOVQ $0xDFFF, R12
+    CMPQ R14, R12
+    JBE emit_replacement_char_scalar        // R14 <= 0xDFFF: lone low surrogate
+    JMP not_lone_low_surrogate_scalar       // R14 > 0xDFFF: above range
+
+not_lone_low_surrogate_scalar:
     // Check for surrogate pair (high surrogate: U+D800 to U+DBFF)
-    CMPQ R14, $0xD800
-    JB  emit_unicode_char_scalar  // Not a high surrogate
-    CMPQ R14, $0xDBFF
-    JA  emit_unicode_char_scalar  // Not in high surrogate range
+    MOVQ $0xD800, R12
+    CMPQ R14, R12
+    JAE check_high_surrogate_upper_scalar  // R14 >= 0xD800: might be high surrogate
+    JMP emit_unicode_char_scalar           // R14 < 0xD800: not a high surrogate
+
+check_high_surrogate_upper_scalar:
+    MOVQ $0xDBFF, R12
+    CMPQ R14, R12
+    JBE handle_high_surrogate_scalar       // R14 <= 0xDBFF: high surrogate found
+    JMP emit_unicode_char_scalar           // R14 > 0xDBFF: not in high surrogate range
+
+handle_high_surrogate_scalar:
 
     // High surrogate found - check for low surrogate
     MOVQ BX, R8
     SUBQ CX, R8
     CMPQ R8, $6                    // Need at least 6 bytes: \uXXXX
-    JL  parse_hex_invalid_scalar   // Not enough for surrogate pair
+    JL  emit_high_surrogate_replacement_scalar   // Not enough for surrogate pair
 
     MOVB (SI)(CX*1), AL
     CMPB AL, $0x5C                 // '\'?
-    JNE  parse_hex_invalid_scalar  // No backslash - invalid surrogate pair
+    JNE  emit_high_surrogate_replacement_scalar  // No backslash - invalid surrogate pair
     INCQ CX
 
     MOVB (SI)(CX*1), AL
     CMPB AL, $0x75                 // 'u'?
-    JNE  parse_hex_invalid_scalar  // Not \u - invalid surrogate pair
+    JNE  emit_high_surrogate_replacement_scalar  // Not \u - invalid surrogate pair
     INCQ CX
 
     // Parse low surrogate hex digits into R10
@@ -541,9 +612,9 @@ parse_low_digit_done_scalar:
 
     // Validate low surrogate range (U+DC00 to U+DFFF)
     CMPQ R10, $0xDC00
-    JB  parse_hex_invalid_scalar
+    JB  emit_high_surrogate_replacement_then_char_scalar
     CMPQ R10, $0xDFFF
-    JA  parse_hex_invalid_scalar
+    JA  emit_high_surrogate_replacement_then_char_scalar
 
     // Combine surrogates: codepoint = 0x10000 + ((high-0xD800)<<10) + (low-0xDC00)
     MOVQ R14, R12
@@ -554,6 +625,32 @@ parse_low_digit_done_scalar:
     ADDQ R12, R13
     ADDQ $0x10000, R13
     MOVQ R13, R14
+    JMP emit_unicode_char_scalar
+
+emit_high_surrogate_replacement_scalar:
+    // Emit U+FFFD for unpaired high surrogate, then continue processing
+    MOVB $0xEF, (DI)(DX*1)
+    INCQ DX
+    MOVB $0xBF, (DI)(DX*1)
+    INCQ DX
+    MOVB $0xBD, (DI)(DX*1)
+    INCQ DX
+    JMP main_scalar_tail
+
+emit_high_surrogate_replacement_then_char_scalar:
+    // Emit U+FFFD for unpaired high surrogate, then process the parsed value as a regular char
+    MOVB $0xEF, (DI)(DX*1)
+    INCQ DX
+    MOVB $0xBF, (DI)(DX*1)
+    INCQ DX
+    MOVB $0xBD, (DI)(DX*1)
+    INCQ DX
+    MOVQ R10, R14
+    JMP emit_unicode_char_scalar
+
+emit_replacement_char_scalar:
+    // Emit U+FFFD for lone low surrogate or other errors
+    MOVQ $0xFFFD, R14
 
 emit_unicode_char_scalar:
     // Convert codepoint to UTF-8 and emit (reuse existing code)
