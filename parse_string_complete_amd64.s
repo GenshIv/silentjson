@@ -64,15 +64,13 @@ main_no_quotes:
     
     CMPQ R10, R13
     JL  main_quote_first          // Quote bit is lower -> quote comes first
+    JMP main_slash_first          // Slash comes first or same position
 
 check_quotes_only:
     // No slashes, but there might be quotes
     TESTL AX, AX
     JZ  main_block_done           // No quotes either -> plain run
     JMP main_quote_first          // Quote exists -> handle it
-
-    CMPQ R10, R13
-    JL  main_quote_first          // Quote bit is lower -> quote comes first
 
 main_slash_first:
     MOVQ CX, R11

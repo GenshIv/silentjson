@@ -649,6 +649,11 @@ func readJSONString(src []byte, copyStrings bool) (s string, content []byte, con
 
 	contentSrc := src[start:]
 
+	// Validate escape sequences and hex digits before parsing
+	if err := validateJSONString(contentSrc); err != nil {
+		return "", nil, -1, err
+	}
+
 	// Allocate destination buffer (worst case: same size as input)
 	buf := make([]byte, len(contentSrc))
 
@@ -667,6 +672,47 @@ func readJSONString(src []byte, copyStrings bool) (s string, content []byte, con
 	}
 
 	return s, content, consumed, nil
+}
+
+// validateJSONString checks for invalid escape sequences and hex digits.
+func validateJSONString(src []byte) error {
+	i := 0
+	for i < len(src) {
+		if src[i] == '\\' {
+			if i+1 >= len(src) {
+				return ErrUnexpectedEOF
+			}
+			switch src[i+1] {
+			case 'n', 'r', 't', 'b', 'f', '"', '\\', '/':
+				// Valid simple escape
+				i += 2
+			case 'u':
+				// Unicode escape - validate hex digits
+				if i+6 >= len(src) {
+					return ErrUnexpectedEOF
+				}
+				for j := 0; j < 4; j++ {
+					c := src[i+2+j]
+					if !isHexDigit(c) {
+						return fmt.Errorf("%w: invalid escape sequence \\u%c%c%c%c", ErrTypeMismatch, c, src[i+3+j], src[i+4+j], src[i+5+j])
+					}
+				}
+				i += 6
+			default:
+				return fmt.Errorf("%w: invalid escape sequence \\%c", ErrTypeMismatch, src[i+1])
+			}
+		} else if src[i] == '"' {
+			// Found closing quote - done
+			return nil
+		} else {
+			i++
+		}
+	}
+	return ErrUnexpectedEOF
+}
+
+func isHexDigit(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f')
 }
 
 // trailingZeroBits returns the index of the lowest set bit in mask.
