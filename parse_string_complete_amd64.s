@@ -37,39 +37,45 @@ scan_loop:
     MOVQ R9, X1
     VPBROADCASTQ X1, Y1
     VPCMPEQB Y1, Y0, Y2
-    VPMOVMSKB Y2, AX              // quote mask
+    VPMOVMSKB Y2, AX              // quote mask in AX
 
     MOVQ $0x5c5c5c5c5c5c5c5c, R9
     MOVQ R9, X2
     VPBROADCASTQ X2, Y3
     VPCMPEQB Y3, Y0, Y4
-    VPMOVMSKB Y4, DX              // slash mask
+    VPMOVMSKB Y4, DX              // slash mask in DX
 
-    ORL AX, DX
     TESTL AX, AX
-    JZ  scan_block_done           // No specials in this block
+    JZ  scan_no_quotes            // No quotes in this block
 
-    BSFL AX, R10                  // First special byte bit index
-    MOVQ CX, R11
-    ADDQ R10, R11                 // Absolute position of first special byte
+    // Quotes exist - find the first one
+    BSFL AX, R10                  // R10 = bit index of first quote
 
-    // Check if it's a backslash (escape) or quote
+scan_no_quotes:
     TESTL DX, DX
-    JZ  found_quote_simd          // Only quotes -> must be quote
+    JZ  scan_block_done           // No slashes either -> no specials at all
 
-    BSFL DX, R12
+    // Slashes exist - find the first one
+    BSFL DX, R12                  // R12 = bit index of first slash
+
+    // Compare positions: quote vs slash
+    TESTL AX, AX
+    JZ  scan_slash_first          // No quotes -> slash comes first
+
     CMPQ R10, R12
-    JL  found_quote_simd          // Quote comes first
+    JL  scan_quote_first          // Quote bit is lower -> quote comes first
 
-    // Backslash comes first - skip the escape sequence
-found_slash_simd:
+scan_slash_first:
+    MOVQ CX, R11
+    ADDQ R12, R11                 // Absolute position of first backslash
     MOVQ R11, CX                  // Move to backslash position
     INCQ CX                       // Skip backslash
     INCQ CX                       // Skip escaped character
     JMP scan_loop
 
-found_quote_simd:
-    MOVQ R11, R13                 // Position of closing quote
+scan_quote_first:
+    MOVQ CX, R13
+    ADDQ R10, R13                 // Absolute position of first quote
     JMP start_decode
 
 scan_block_done:
