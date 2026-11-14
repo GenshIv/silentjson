@@ -72,8 +72,11 @@ func parseJSONStringCompleteASM(src []byte, dst []byte) (int64, int64) {
 				if !ok {
 					return -3, -1 // Invalid hex digit
 				}
-				if codepoint >= 0xD800 && codepoint <= 0xDBFF && i+12 <= len(src) {
-					// High surrogate - check for low surrogate
+				if codepoint >= 0xD800 && codepoint <= 0xDBFF {
+					// High surrogate - must be followed by low surrogate
+					if i+12 > len(src) {
+						return -2, -1 // Truncated surrogate pair
+					}
 					if src[i+5] == '\\' && src[i+6] == 'u' {
 						lowCodepoint, ok := parseHex4(src[i+7 : i+11])
 						if !ok {
