@@ -69,57 +69,35 @@ func parseJSONStringCompleteASM(src []byte, dst []byte) (int64, int64) {
 			case 'u':
 				// Unicode escape: \uXXXX
 				if i+6 > end {
-					// Not enough bytes - emit replacement char
-					dst[written] = 0xEF
-					dst[written+1] = 0xBF
-					dst[written+2] = 0xBD
-					written += 3
-				} else {
-					codepoint, ok := parseHex4(src[i+1 : i+5])
-					if !ok {
-						// Invalid hex - emit replacement char
-						dst[written] = 0xEF
-						dst[written+1] = 0xBF
-						dst[written+2] = 0xBD
-						written += 3
-					} else if codepoint >= 0xD800 && codepoint <= 0xDBFF && i+12 <= end {
-						// High surrogate - check for low surrogate
-						if src[i+7] == '\\' && src[i+8] == 'u' {
-							lowCodepoint, ok := parseHex4(src[i+9 : i+13])
-							if ok && lowCodepoint >= 0xDC00 && lowCodepoint <= 0xDFFF {
-								// Valid surrogate pair - combine
-								codepoint = 0x10000 + ((codepoint-0xD800)<<10) + (lowCodepoint - 0xDC00)
-								i += 6 // Skip the low surrogate escape
-								writeUTF8(dst, &written, codepoint)
-							} else {
-								// Invalid low surrogate - emit replacement char
-								dst[written] = 0xEF
-								dst[written+1] = 0xBF
-								dst[written+2] = 0xBD
-								written += 3
-							}
+					return -1, -1 // Truncated unicode escape
+				}
+				codepoint, ok := parseHex4(src[i+1 : i+5])
+				if !ok {
+					return -3, -1 // Invalid hex digit
+				}
+				if codepoint >= 0xD800 && codepoint <= 0xDBFF && i+12 <= end {
+					// High surrogate - check for low surrogate
+					if src[i+7] == '\\' && src[i+8] == 'u' {
+						lowCodepoint, ok := parseHex4(src[i+9 : i+13])
+						if ok && lowCodepoint >= 0xDC00 && lowCodepoint <= 0xDFFF {
+							// Valid surrogate pair - combine
+							codepoint = 0x10000 + ((codepoint-0xD800)<<10) + (lowCodepoint - 0xDC00)
+							i += 6 // Skip the low surrogate escape
+							writeUTF8(dst, &written, codepoint)
 						} else {
-							// No low surrogate - emit replacement char
-							dst[written] = 0xEF
-							dst[written+1] = 0xBF
-							dst[written+2] = 0xBD
-							written += 3
+							return -2, -1 // Invalid surrogate pair
 						}
-					} else if codepoint >= 0xDC00 && codepoint <= 0xDFFF {
-						// Lone low surrogate - emit replacement char
-						dst[written] = 0xEF
-						dst[written+1] = 0xBF
-						dst[written+2] = 0xBD
-						written += 3
 					} else {
-						// Regular unicode character
-						writeUTF8(dst, &written, codepoint)
+						return -2, -1 // Unpaired high surrogate
 					}
+				} else if codepoint >= 0xDC00 && codepoint <= 0xDFFF {
+					return -2, -1 // Lone low surrogate
+				} else {
+					// Regular unicode character
+					writeUTF8(dst, &written, codepoint)
 				}
 			default:
-				// Unknown escape - emit as-is
-				dst[written] = src[i]
-				written++
+				return -2, -1 // Unknown escape sequence
 			}
 		} else {
 			dst[written] = src[i]

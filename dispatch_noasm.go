@@ -26,3 +26,104 @@ func findBlockMasksASM(src *byte) (quoteMask uint32, slashMask uint32) {
 func parseStringBlockASM(src *byte, dst *byte) (consumed int, written int, status int) {
 	return parseStringBlockScalar(src, dst)
 }
+
+// parseJSONStringCompleteASM finds the closing quote, decodes all escapes,
+// and writes the complete decoded string to dst in one call. Returns (written, consumed).
+func parseJSONStringCompleteASM(src []byte, dst []byte) (int64, int64) {
+	// Scalar implementation for non-amd64 architectures
+	end, _ := scanJSONStringScalar(src)
+	if end < 0 {
+		return -1, -1
+	}
+	written := 0
+	for i := 0; i < end; i++ {
+		if src[i] == '\\' && i+1 < end {
+			i++
+			switch src[i] {
+			case 'n':
+				dst[written] = '\n'
+				written++
+			case '"':
+				dst[written] = '"'
+				written++
+			case '\\':
+				dst[written] = '\\'
+				written++
+			case 'r':
+				dst[written] = '\r'
+				written++
+			case 't':
+				dst[written] = '\t'
+				written++
+			case '/':
+				dst[written] = '/'
+				written++
+			case 'b':
+				dst[written] = '\b'
+				written++
+			case 'f':
+				dst[written] = '\f'
+				written++
+			case 'u':
+				// Unicode escape: \uXXXX
+				if i+6 > end {
+					return -1, -1 // Truncated unicode escape
+				}
+				codepoint, ok := parseHex4(src[i+1 : i+5])
+				if !ok {
+					return -3, -1 // Invalid hex digit
+				}
+				if codepoint >= 0xD800 && codepoint <= 0xDBFF && i+12 <= end {
+					// High surrogate - check for low surrogate
+					if src[i+7] == '\\' && src[i+8] == 'u' {
+						lowCodepoint, ok := parseHex4(src[i+9 : i+13])
+						if ok && lowCodepoint >= 0xDC00 && lowCodepoint <= 0xDFFF {
+							// Valid surrogate pair - combine
+							codepoint = 0x10000 + ((codepoint-0xD800)<<10) + (lowCodepoint - 0xDC00)
+							i += 6 // Skip the low surrogate escape
+							writeUTF8(dst, &written, codepoint)
+						} else {
+							return -2, -1 // Invalid surrogate pair
+						}
+					} else {
+						return -2, -1 // Unpaired high surrogate
+					}
+				} else if codepoint >= 0xDC00 && codepoint <= 0xDFFF {
+					return -2, -1 // Lone low surrogate
+				} else {
+					// Regular unicode character
+					writeUTF8(dst, &written, codepoint)
+				}
+			default:
+				return -2, -1 // Unknown escape sequence
+			}
+		} else {
+			dst[written] = src[i]
+			written++
+		}
+	}
+	return int64(written), int64(end + 1)
+}
+
+// writeUTF8 encodes a codepoint as UTF-8 and writes it to dst, updating written.
+func writeUTF8(dst []byte, written *int, codepoint rune) {
+	if codepoint <= 0x7F {
+		dst[*written] = byte(codepoint)
+		*written++
+	} else if codepoint <= 0x7FF {
+		dst[*written] = byte(0xC0 | (codepoint >> 6))
+		dst[*written+1] = byte(0x80 | (codepoint & 0x3F))
+		*written += 2
+	} else if codepoint <= 0xFFFF {
+		dst[*written] = byte(0xE0 | (codepoint >> 12))
+		dst[*written+1] = byte(0x80 | ((codepoint >> 6) & 0x3F))
+		dst[*written+2] = byte(0x80 | (codepoint & 0x3F))
+		*written += 3
+	} else {
+		dst[*written] = byte(0xF0 | (codepoint >> 18))
+		dst[*written+1] = byte(0x80 | ((codepoint >> 12) & 0x3F))
+		dst[*written+2] = byte(0x80 | ((codepoint >> 6) & 0x3F))
+		dst[*written+3] = byte(0x80 | (codepoint & 0x3F))
+		*written += 4
+	}
+}
