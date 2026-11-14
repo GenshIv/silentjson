@@ -3,6 +3,7 @@ package silentjson
 import (
 	"fmt"
 	"math"
+	"math/bits"
 	"reflect"
 	"strconv"
 	"unicode"
@@ -636,89 +637,199 @@ func decodeEscapedString(src []byte) ([]byte, int64, error) {
 //   - content: the decoded bytes s points to (useful for key matching)
 //   - consumed: number of input bytes read, including the closing quote
 func readJSONString(src []byte, copyStrings bool) (s string, content []byte, consumed int64, err error) {
-	// Use AVX2 to find the first quote or escape in one pass
-	idx, isEscape := findQuoteOrEscapeAVX2(src)
-	if idx < 0 {
-		return "", nil, 0, ErrUnexpectedEOF
-	}
+	// Block-by-block processing using SIMD masks.
+	// For each 32-byte block, compute quote and backslash masks in one pass.
+	// If no special characters, skip the block (fast path).
+	// When an escape is found, switch to byte-by-byte processing from that point.
+	
+	var buf []byte
+	i := 0
 
-	if !isEscape {
-		// No escapes — closing quote found. Zero-copy fast path.
-		consumed = int64(idx + 1)
-		content = src[:idx]
-		if copyStrings {
-			return string(content), content, consumed, nil
-		}
-		return unsafe.String(unsafe.SliceData(content), idx), content, consumed, nil
-	}
-
-	// Escape found at src[idx]. Process all escapes from here using byte-by-byte loop.
-	buf := make([]byte, 0, len(src)/4)
-	// Copy bytes before the first escape
-	buf = append(buf, src[:idx]...)
-
-	j := idx
 	for {
-		if j >= len(src) {
+		remaining := len(src) - i
+		if remaining == 0 {
 			return "", nil, 0, ErrUnexpectedEOF
 		}
 
-		c := src[j]
+		if remaining < 32 {
+			// Tail: less than a full block — use scalar scan
+			// Pass the offset where skipped blocks ended so the tail can
+			// return a zero-copy string of the entire content if no escapes
+			// were encountered.
+			return readJSONStringTail(src, i, buf, copyStrings)
+		}
+
+		// Compute masks for this 32-byte block
+		blockPtr := unsafe.SliceData(src[i:])
+		quoteMask, slashMask := findBlockMasksASM(blockPtr)
+
+		if quoteMask == 0 && slashMask == 0 {
+			// No special characters in this block — skip it (fast path)
+			i += 32
+			continue
+		}
+
+		// Special character(s) found. Find the first one.
+		firstQuote := trailingZeroBits(quoteMask)
+		firstSlash := trailingZeroBits(slashMask)
+
+		if quoteMask != 0 && (slashMask == 0 || firstQuote < firstSlash) {
+			// Quote comes first — this is the closing quote
+			end := i + firstQuote
+			consumed = int64(end + 1) // include the quote byte, from start of string
+			if buf != nil {
+				// Copy remaining bytes before the quote
+				buf = append(buf, src[i:end]...)
+				return unsafe.String(unsafe.SliceData(buf), len(buf)), buf, consumed, nil
+			}
+			// No escapes encountered — zero-copy fast path for the entire string
+			content = src[:end]
+			if copyStrings {
+				return string(content), content, consumed, nil
+			}
+			return unsafe.String(unsafe.SliceData(content), end), content, consumed, nil
+		}
+
+		// Backslash comes first — escape found at position i + firstSlash
+		escapePos := i + firstSlash
+
+		if buf == nil {
+			buf = make([]byte, 0, len(src))
+			// Copy all bytes before the escape (including skipped blocks)
+			buf = append(buf, src[:escapePos]...)
+		} else {
+			buf = append(buf, src[i:escapePos]...)
+		}
+
+		// Process escapes from this point using byte-by-byte loop
+		s, content, relConsumed, err := processEscapesFrom(src[escapePos:], buf, copyStrings)
+		if err != nil {
+			return "", nil, 0, err
+		}
+		consumed = int64(escapePos) + relConsumed
+		return s, content, consumed, nil
+	}
+}
+
+// trailingZeroBits returns the index of the lowest set bit in mask.
+// If mask is zero, returns 32 (out of range). Uses CTZ instruction via math/bits.
+func trailingZeroBits(mask uint32) int {
+	if mask == 0 {
+		return 32
+	}
+	return bits.TrailingZeros32(mask)
+}
+
+// readJSONStringTail handles the sub-32-byte tail of a JSON string.
+// offset is the position in src where the main loop left off (after skipping
+// blocks with no special characters). If buf is nil and no escapes are found
+// in the tail, returns a zero-copy string from src[0:offset+i].
+func readJSONStringTail(src []byte, offset int, buf []byte, copyStrings bool) (s string, content []byte, consumed int64, err error) {
+	// Scan for first special character in the tail
+	for i := 0; i < len(src)-offset; i++ {
+		c := src[offset+i]
 		if c == '"' {
-			consumed = int64(j + 1)
+			// Closing quote found
+			totalEnd := offset + i
+			consumed = int64(totalEnd + 1)
+			if buf != nil {
+				buf = append(buf, src[offset:totalEnd]...)
+				return unsafe.String(unsafe.SliceData(buf), len(buf)), buf, consumed, nil
+			}
+			// No escapes encountered — zero-copy fast path for the entire string
+			content = src[:totalEnd]
+			if copyStrings {
+				return string(content), content, consumed, nil
+			}
+			return unsafe.String(unsafe.SliceData(content), totalEnd), content, consumed, nil
+		}
+		if c == '\\' {
+			// Escape found — switch to byte-by-byte processing from here
+			escapePos := offset + i
+			if buf == nil {
+				buf = make([]byte, 0, len(src))
+				buf = append(buf, src[:escapePos]...)
+			} else {
+				buf = append(buf, src[offset:escapePos]...)
+			}
+			// processEscapesFrom returns consumed relative to its input slice;
+			// add escapePos to get the offset relative to the original src.
+			s, content, relConsumed, err := processEscapesFrom(src[escapePos:], buf, copyStrings)
+			if err != nil {
+				return "", nil, 0, err
+			}
+			consumed = int64(escapePos) + relConsumed
+			return s, content, consumed, nil
+		}
+	}
+	return "", nil, 0, ErrUnexpectedEOF
+}
+
+// processEscapesFrom processes escape sequences starting from position 0 of src.
+// It handles all remaining content byte by byte until the closing quote is found.
+func processEscapesFrom(src []byte, buf []byte, copyStrings bool) (s string, content []byte, consumed int64, err error) {
+	i := 0
+	for {
+		if i >= len(src) {
+			return "", nil, 0, ErrUnexpectedEOF
+		}
+
+		c := src[i]
+		if c == '"' {
+			consumed = int64(i + 1)
 			return unsafe.String(unsafe.SliceData(buf), len(buf)), buf, consumed, nil
 		}
 		if c != '\\' {
 			buf = append(buf, c)
-			j++
+			i++
 			continue
 		}
 
-		// Process escape sequence at src[j] (backslash)
-		if j+1 >= len(src) {
+		// Process escape sequence at position i
+		if i+1 >= len(src) {
 			return "", nil, 0, ErrUnexpectedEOF
 		}
 
-		switch src[j+1] {
+		switch src[i+1] {
 		case '"':
 			buf = append(buf, '"')
-			j += 2
+			i += 2
 		case '\\':
 			buf = append(buf, '\\')
-			j += 2
+			i += 2
 		case '/':
 			buf = append(buf, '/')
-			j += 2
+			i += 2
 		case 'n':
 			buf = append(buf, '\n')
-			j += 2
+			i += 2
 		case 't':
 			buf = append(buf, '\t')
-			j += 2
+			i += 2
 		case 'r':
 			buf = append(buf, '\r')
-			j += 2
+			i += 2
 		case 'b':
 			buf = append(buf, '\b')
-			j += 2
+			i += 2
 		case 'f':
 			buf = append(buf, '\f')
-			j += 2
+			i += 2
 		case 'u':
-			if j+6 >= len(src) {
+			if i+6 >= len(src) {
 				return "", nil, 0, ErrUnexpectedEOF
 			}
-			cp, ok := parseHex4(src[j+2 : j+6])
+			cp, ok := parseHex4(src[i+2 : i+6])
 			if !ok {
 				return "", nil, 0, fmt.Errorf("%w: invalid \\u escape", ErrTypeMismatch)
 			}
 			r := cp
 			surrogateDecoded := false
-			if utf16.IsSurrogate(r) && j+12 <= len(src) && src[j+6] == '\\' && src[j+7] == 'u' {
-				if cp2, ok2 := parseHex4(src[j+8 : j+12]); ok2 {
+			if utf16.IsSurrogate(r) && i+12 <= len(src) && src[i+6] == '\\' && src[i+7] == 'u' {
+				if cp2, ok2 := parseHex4(src[i+8 : i+12]); ok2 {
 					if dec := utf16.DecodeRune(r, cp2); dec != unicode.ReplacementChar {
 						buf = utf8.AppendRune(buf, dec)
-						j += 12
+						i += 12
 						surrogateDecoded = true
 					}
 				}
@@ -728,10 +839,10 @@ func readJSONString(src []byte, copyStrings bool) (s string, content []byte, con
 					r = utf8.RuneError
 				}
 				buf = utf8.AppendRune(buf, r)
-				j += 6
+				i += 6
 			}
 		default:
-			return "", nil, 0, fmt.Errorf("%w: invalid escape sequence \\%c", ErrTypeMismatch, src[j+1])
+			return "", nil, 0, fmt.Errorf("%w: invalid escape sequence \\%c", ErrTypeMismatch, src[i+1])
 		}
 	}
 }

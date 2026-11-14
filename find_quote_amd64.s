@@ -1770,3 +1770,34 @@ fqoe_ret:
     MOVQ R9, idx+24(FP)
     MOVB R10, isEscape+32(FP)
     RET
+
+
+// findBlockMasksAVX2 computes quote and backslash masks for a 32-byte block.
+// ABI: src (*byte) in at +0(FP), returns (quoteMask uint32, slashMask uint32)
+// written to stack at +8(FP) and +12(FP). Caller must guarantee src points
+// to at least 32 bytes of valid memory.
+TEXT ·findBlockMasksAVX2(SB), NOSPLIT, $0-16
+    MOVQ src+0(FP), SI
+
+    // Load the 32-byte block
+    VMOVDQU (SI), Y0
+
+    // Compare against '"' (0x22)
+    MOVQ $0x2222222222222222, R8
+    MOVQ R8, X1
+    VPBROADCASTQ X1, Y1
+    VPCMPEQB Y1, Y0, Y2
+    VPMOVMSKB Y2, AX          // quoteMask in EAX
+
+    // Compare against '\' (0x5C)
+    MOVQ $0x5c5c5c5c5c5c5c5c, R8
+    MOVQ R8, X3
+    VPBROADCASTQ X3, Y3
+    VPCMPEQB Y3, Y0, Y4
+    VPMOVMSKB Y4, DX          // slashMask in EDX
+
+    VZEROUPPER
+    // Write return values to stack slots
+    MOVL AX, quoteMask+8(FP)
+    MOVL DX, slashMask+12(FP)
+    RET
