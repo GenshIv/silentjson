@@ -683,15 +683,24 @@ func readJSONStringWithBuf(src []byte, copyStrings bool, dst []byte) (s string, 
 func readJSONString(src []byte, copyStrings bool) (s string, content []byte, consumed int64, err error) {
 	// Empty string: src starts with the closing quote
 	if len(src) > 0 && src[0] == '"' {
-		content = []byte{}
+		content = nil
 		consumed = 1
 		s = ""
 		return s, content, consumed, nil
 	}
 
-	// Always use AVX2 assembly for full decoding with proper copying.
-	// No zero-copy optimization - strings are always copied to owned memory.
-	buf := make([]byte, len(src))
+	// Determine upper bound length via quote/escape scan to allocate exact buffer size.
+	// This avoids allocating len(src) for short strings embedded in large JSON documents.
+	quoteIdx, hasEscape := findQuoteOrEscapeASM(src)
+	var buf []byte
+	if !hasEscape && quoteIdx >= 0 {
+		// No escapes — decoded length equals raw length minus closing quote
+		buf = make([]byte, quoteIdx+1) // +1 for safety margin
+	} else {
+		// Has escapes or quote not found — allocate full src length (safe fallback)
+		buf = make([]byte, len(src))
+	}
+
 	written, c := parseJSONStringCompleteASM(src, buf)
 	if written < 0 {
 		switch written {
