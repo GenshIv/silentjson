@@ -57,18 +57,18 @@ Every parser decodes the identical ~16 MB payload: 100,000 `Employee` records in
 
 | Library | Objects/sec | Throughput (MB/s) | Latency (ms/op) | Allocated | Allocs/op |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **SilentJSON** (Parallel) | **19.4M** 👑 | **3161** 👑 | **5.1** 👑 | **~0.2 MB** 👑 | ~1150 (fewest: goccy, ~2, at 17 MB) |
-| Goccy | 4.2M | 687 | 23.9 | 17.0 MB | 2 |
+| **SilentJSON** (Parallel) | **21.7M** 👑 | **2101** 👑 | **4.7** 👑 | **~0.2 MB** 👑 | ~1150 (fewest: goccy, ~2, at 17 MB) |
+| Goccy | 4.2M | 664 | 23.9 | 17.0 MB | 2 |
 | Jsoniter | 3.1M | 512 | 39.1 | 3.1 MB | 431k |
-| **SilentJSON** (Serial) | 2.2M | 621 | 25.9 | **~130 KB** 👑 | ~1030 |
-| Easyjson (codegen) | 2.0M | 322 | 50.7 | 15.4 MB | 534k |
-| Standard (`encoding/json`) | 1.3M | 212 | 77.9 | 1.6 MB | 108k |
-| simdjson-go (AST + manual extraction) | 1.0M | 171 | 95.6 | 306 MB | 1.4M |
-| Sonic* | 1.0M | 159 | 103.1 | 67.8 MB | 108k |
+| **SilentJSON** (Serial) | 2.2M | 327 | 24.5 | **~130 KB** 👑 | ~1030 |
+| Easyjson (codegen) | 2.0M | 311 | 50.7 | 15.4 MB | 534k |
+| Standard (`encoding/json`) | 1.3M | 205 | 77.9 | 1.6 MB | 108k |
+| simdjson-go (AST + manual extraction) | 1.0M | 162 | 95.6 | 306 MB | 1.4M |
+| Sonic* | 1.0M | 155 | 103.1 | 67.8 MB | 108k |
 
 \* fallback mode on this machine.
 
-On a clean payload (`BenchmarkLargeScaleComparison`, 100k records): **SilentJSON Parallel 2985 MB/s** vs Protobuf 246, Standard 202, buger/jsonparser 178, Sonic* 159.
+On a clean payload (`BenchmarkLargeScaleComparison`, 100k records): **SilentJSON Parallel 2016 MB/s** vs Protobuf 235, Standard 205, buger/jsonparser 177, Sonic* 159.
 
 > [!NOTE]
 > **What about `simdjson-go`?**
@@ -85,8 +85,8 @@ On a clean payload (`BenchmarkLargeScaleComparison`, 100k records): **SilentJSON
 xychart-beta
     title "Parsing Speed: 100k Chaos Objects (MB/s, Higher is Better)"
     x-axis ["SilentJSON Par", "Goccy", "Jsoniter", "Easyjson", "SilentJSON", "Standard", "simdjson", "Sonic*"]
-    y-axis "MB/s" 0 --> 3400
-    bar [3161, 687, 512, 317, 626, 212, 169, 159]
+    y-axis "MB/s" 0 --> 2300
+    bar [2101, 664, 512, 311, 327, 205, 162, 155]
 ```
 
 #### Payload flavors: what do escapes and UTF-8 actually cost?
@@ -95,9 +95,9 @@ The same 100k-record array rendered three ways (`BenchmarkPayloadFlavors`) separ
 
 | Flavor (100k records) | SilentJSON Serial | SilentJSON Parallel | Standard |
 | :--- | :--- | :--- | :--- |
-| clean (plain ASCII) | 648 MB/s | 3630 MB/s | 208 MB/s |
-| escaped (10% of strings contain `\"`/`\\`) | 624 MB/s | 3492 MB/s | 205 MB/s |
-| utf8 (multibyte runes: `Варшава_中央_łąka`) | 658 MB/s | 3247 MB/s | 207 MB/s |
+| clean (plain ASCII) | 326 MB/s | 1968 MB/s | 206 MB/s |
+| escaped (10% of strings contain `\"`/`\\`) | 321 MB/s | 1976 MB/s | 204 MB/s |
+| utf8 (multibyte runes: `Варшава_中央_łąka`) | 315 MB/s | 1990 MB/s | 204 MB/s |
 
 Takeaways, measured: escapes cost throughput nothing on this parser (they only add allocations for the decoded strings — ~1.2 MB per 16 MB payload), multibyte UTF-8 is free (the scanner looks for `"` and `\` bytes only), and the pre-audit tree could not even complete the escaped row — it failed with a chunk-boundary error (see the splitter fix in the CHANGELOG).
 
