@@ -16,6 +16,10 @@ TEXT ·parseJSONStringCompleteAVX2(SB), NOSPLIT, $0-64
 
     XORQ CX, CX                   // Read position (CX)
     XORQ DX, DX                   // Write position (DX)
+    
+    // Initialize return values to 0
+    MOVQ $0, written+48(FP)
+    MOVQ $0, consumed+56(FP)
 
 main_loop:
     CMPQ CX, BX
@@ -39,7 +43,7 @@ main_loop:
     MOVQ R9, X2
     VPBROADCASTQ X2, Y3
     VPCMPEQB Y3, Y0, Y4
-    VPMOVMSKB Y4, DX              // slash mask (temporarily in DX)
+    VPMOVMSKB Y4, R12             // slash mask (temporarily in R12)
 
     TESTL AX, AX
     JZ  main_no_quotes            // No quotes in this block
@@ -48,22 +52,31 @@ main_loop:
     BSFL AX, R10                  // R10 = bit index of first quote
 
 main_no_quotes:
-    TESTL DX, DX
-    JZ  main_block_done           // No slashes either -> plain run
+    TESTQ R12, R12
+    JZ  check_quotes_only         // No slashes - check if there are quotes
 
     // Slashes exist - find the first one
-    BSFL DX, R12                  // R12 = bit index of first slash
+    BSFL R12, R13                 // R13 = bit index of first slash
 
     // Compare positions: quote vs slash
     TESTL AX, AX
     JZ  main_slash_first          // No quotes -> slash comes first
+    
+    CMPQ R10, R13
+    JL  main_quote_first          // Quote bit is lower -> quote comes first
 
-    CMPQ R10, R12
+check_quotes_only:
+    // No slashes, but there might be quotes
+    TESTL AX, AX
+    JZ  main_block_done           // No quotes either -> plain run
+    JMP main_quote_first          // Quote exists -> handle it
+
+    CMPQ R10, R13
     JL  main_quote_first          // Quote bit is lower -> quote comes first
 
 main_slash_first:
     MOVQ CX, R11
-    ADDQ R12, R11                 // Absolute position of first backslash
+    ADDQ R13, R11                 // Absolute position of first backslash
 
     // Copy plain bytes before the escape with vector store
     CMPQ CX, R11
@@ -357,16 +370,15 @@ main_quote_first:
     MOVQ CX, R11
     ADDQ R10, R11                 // Absolute position of first quote
 
-    // Copy plain bytes before the quote with vector store
+    // Copy plain bytes before the quote byte-by-byte (debug version)
+copy_plain_before_quote:
     CMPQ CX, R11
-    JE  main_at_quote             // No plain bytes to copy
-
-    MOVQ R11, R8
-    SUBQ CX, R8                   // Count of plain bytes
-    VMOVDQU (SI)(CX*1), Y5
-    VMOVDQU Y5, (DI)(DX*1)        // Copy with vector store
-    ADDQ R8, DX
-    MOVQ R11, CX
+    JGE main_at_quote             // No more plain bytes to copy
+    MOVB (SI)(CX*1), AL
+    MOVB AL, (DI)(DX*1)
+    INCQ CX
+    INCQ DX
+    JMP copy_plain_before_quote
 
 main_at_quote:
     // Found the closing quote - done!
