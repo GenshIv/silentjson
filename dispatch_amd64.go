@@ -76,15 +76,18 @@ func parseJSONStringCompleteASM(src []byte, dst []byte) (int64, int64) {
 				}
 				if codepoint >= 0xD800 && codepoint <= 0xDBFF && i+12 <= len(src) {
 					// High surrogate - check for low surrogate
-					if src[i+6] == '\\' && src[i+7] == 'u' {
-						lowCodepoint, ok := parseHex4(src[i+8 : i+12])
-						if ok && lowCodepoint >= 0xDC00 && lowCodepoint <= 0xDFFF {
+					if src[i+5] == '\\' && src[i+6] == 'u' {
+						lowCodepoint, ok := parseHex4(src[i+7 : i+11])
+						if !ok {
+							return -3, -1 // Invalid hex digit in low surrogate
+						}
+						if lowCodepoint >= 0xDC00 && lowCodepoint <= 0xDFFF {
 							// Valid surrogate pair - combine
 							codepoint = 0x10000 + ((codepoint-0xD800)<<10) + (lowCodepoint - 0xDC00)
-							i += 6 // Skip the low surrogate escape
+							i += 10 // Skip past the low surrogate escape
 							writeUTF8(dst, &written, codepoint)
 						} else {
-							return -2, -1 // Invalid surrogate pair
+							return -2, -1 // Invalid low surrogate range
 						}
 					} else {
 						return -2, -1 // Unpaired high surrogate
