@@ -650,12 +650,12 @@ func readJSONString(src []byte, copyStrings bool) (s string, content []byte, con
 		return unsafe.String(unsafe.SliceData(content), idx), content, int64(idx + 1), nil
 	}
 
-	// Slow path: string contains escapes — find each escape and process it
+	// Slow path: string contains escapes — process escapes in order
 	buf := make([]byte, 0, len(src))
 	i := 0
 
 	for {
-		// Find next special character (escape or closing quote)
+		// Find next special character (escape or closing quote) starting from current position
 		idx, isEsc := findQuoteOrEscapeASM(src[i:])
 		if idx < 0 {
 			return "", nil, 0, ErrUnexpectedEOF
