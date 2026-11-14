@@ -76,19 +76,20 @@ main_slash_first:
     MOVQ CX, R11
     ADDQ R13, R11                 // Absolute position of first backslash
 
-    // Copy plain bytes before the escape with vector store
+    // Copy plain bytes before the escape (byte-by-byte for safety)
+copy_plain_before_escape:
     CMPQ CX, R11
-    JE  main_at_escape            // No plain bytes to copy
-
-    MOVQ R11, R8
-    SUBQ CX, R8                   // Count of plain bytes
-    VMOVDQU (SI)(CX*1), Y5
-    VMOVDQU Y5, (DI)(DX*1)        // Copy with vector store
-    ADDQ R8, DX
-    MOVQ R11, CX
+    JGE main_at_escape            // No more plain bytes to copy
+    MOVB (SI)(CX*1), AL
+    MOVB AL, (DI)(DX*1)
+    INCQ CX
+    INCQ DX
+    JMP copy_plain_before_escape
 
 main_at_escape:
     INCQ CX                       // Skip backslash
+    CMPQ CX, BX                   // Check bounds before reading escape char
+    JGE parse_hex_invalid         // No more bytes - invalid escape
     MOVB (SI)(CX*1), AL
     INCQ CX
 
@@ -199,7 +200,7 @@ handle_high_surrogate:
 
     MOVB (SI)(CX*1), AL
     CMPB AL, $0x75                 // 'u'?
-    JNE  emit_high_surrogate_replacement  // Not \u - invalid surrogate pair
+    JNE  high_surrogate_no_pair     // Not \u - emit replacement and process next escape
     INCQ CX
 
     // Parse low surrogate hex digits into R10
@@ -244,9 +245,9 @@ parse_low_digit_done:
 
     // Validate low surrogate range (U+DC00 to U+DFFF)
     CMPQ R10, $0xDC00
-    JB  emit_high_surrogate_replacement_then_char
+    JB  high_surrogate_invalid_low
     CMPQ R10, $0xDFFF
-    JA  emit_high_surrogate_replacement_then_char
+    JA  high_surrogate_invalid_low
 
     // Combine surrogates: codepoint = 0x10000 + ((high-0xD800)<<10) + (low-0xDC00)
     MOVQ R14, R12
@@ -259,6 +260,18 @@ parse_low_digit_done:
     MOVQ R13, R14
     JMP emit_unicode_char
 
+high_surrogate_no_pair:
+    // Emit U+FFFD for unpaired high surrogate, then process next escape
+    MOVB $0xEF, (DI)(DX*1)
+    INCQ DX
+    MOVB $0xBF, (DI)(DX*1)
+    INCQ DX
+    MOVB $0xBD, (DI)(DX*1)
+    INCQ DX
+    // Don't consume the escape character - let main loop process it
+    DECQ CX
+    JMP main_loop
+
 emit_high_surrogate_replacement:
     // Emit U+FFFD for unpaired high surrogate, then continue processing
     MOVB $0xEF, (DI)(DX*1)
@@ -267,6 +280,18 @@ emit_high_surrogate_replacement:
     INCQ DX
     MOVB $0xBD, (DI)(DX*1)
     INCQ DX
+    JMP main_loop
+
+high_surrogate_invalid_low:
+    // High surrogate followed by non-surrogate escape - emit U+FFFD and process next escape
+    MOVB $0xEF, (DI)(DX*1)
+    INCQ DX
+    MOVB $0xBF, (DI)(DX*1)
+    INCQ DX
+    MOVB $0xBD, (DI)(DX*1)
+    INCQ DX
+    // Rewind to process the next escape sequence
+    SUBQ $6, CX
     JMP main_loop
 
 emit_high_surrogate_replacement_then_char:
@@ -372,14 +397,18 @@ emit_replacement_char:
 
 
 parse_hex_invalid:
-    // Invalid hex digit - emit replacement character U+FFFD
-    MOVQ $0xFFFD, R14
-    JMP emit_utf8_3bytes
+    // Invalid hex digit - return error code -3
+    MOVQ $-3, written+48(FP)
+    MOVQ CX, consumed+56(FP)
+    VZEROUPPER
+    RET
 
 emit_unknown_escape:
-    MOVB AL, (DI)(DX*1)           // Unknown escape - emit as-is
-    INCQ DX
-    JMP main_loop
+    // Unknown escape sequence - return error code -2
+    MOVQ $-2, written+48(FP)
+    MOVQ CX, consumed+56(FP)
+    VZEROUPPER
+    RET
 
 emit_newline:
     MOVB $0x0A, (DI)(DX*1)
@@ -458,6 +487,8 @@ main_scalar_tail:
     JMP main_scalar_tail
 
 handle_escape_scalar:
+    CMPQ CX, BX                   // Check bounds before reading escape char
+    JGE parse_hex_invalid_scalar  // No more bytes - invalid escape
     MOVB (SI)(CX*1), AL
     INCQ CX
     CMPB AL, $0x6E
@@ -567,7 +598,7 @@ handle_high_surrogate_scalar:
 
     MOVB (SI)(CX*1), AL
     CMPB AL, $0x75                 // 'u'?
-    JNE  emit_high_surrogate_replacement_scalar  // Not \u - invalid surrogate pair
+    JNE  high_surrogate_no_pair_scalar  // Not \u - emit replacement and process next escape
     INCQ CX
 
     // Parse low surrogate hex digits into R10
@@ -612,9 +643,9 @@ parse_low_digit_done_scalar:
 
     // Validate low surrogate range (U+DC00 to U+DFFF)
     CMPQ R10, $0xDC00
-    JB  emit_high_surrogate_replacement_then_char_scalar
+    JB  high_surrogate_invalid_low_scalar
     CMPQ R10, $0xDFFF
-    JA  emit_high_surrogate_replacement_then_char_scalar
+    JA  high_surrogate_invalid_low_scalar
 
     // Combine surrogates: codepoint = 0x10000 + ((high-0xD800)<<10) + (low-0xDC00)
     MOVQ R14, R12
@@ -627,6 +658,18 @@ parse_low_digit_done_scalar:
     MOVQ R13, R14
     JMP emit_unicode_char_scalar
 
+high_surrogate_no_pair_scalar:
+    // Emit U+FFFD for unpaired high surrogate, then process next escape
+    MOVB $0xEF, (DI)(DX*1)
+    INCQ DX
+    MOVB $0xBF, (DI)(DX*1)
+    INCQ DX
+    MOVB $0xBD, (DI)(DX*1)
+    INCQ DX
+    // Don't consume the escape character - let main loop process it
+    DECQ CX
+    JMP main_scalar_tail
+
 emit_high_surrogate_replacement_scalar:
     // Emit U+FFFD for unpaired high surrogate, then continue processing
     MOVB $0xEF, (DI)(DX*1)
@@ -635,6 +678,18 @@ emit_high_surrogate_replacement_scalar:
     INCQ DX
     MOVB $0xBD, (DI)(DX*1)
     INCQ DX
+    JMP main_scalar_tail
+
+high_surrogate_invalid_low_scalar:
+    // High surrogate followed by non-surrogate escape - emit U+FFFD and process next escape
+    MOVB $0xEF, (DI)(DX*1)
+    INCQ DX
+    MOVB $0xBF, (DI)(DX*1)
+    INCQ DX
+    MOVB $0xBD, (DI)(DX*1)
+    INCQ DX
+    // Rewind to process the next escape sequence
+    SUBQ $6, CX
     JMP main_scalar_tail
 
 emit_high_surrogate_replacement_then_char_scalar:
@@ -666,13 +721,16 @@ emit_unicode_char_scalar:
     JMP emit_utf8_4bytes          // U+10000 to U+10FFFF
 
 parse_hex_invalid_scalar:
-    MOVQ $0xFFFD, R14
-    JMP emit_utf8_3bytes
+    // Invalid hex digit - return error code -3
+    MOVQ $-3, written+48(FP)
+    MOVQ CX, consumed+56(FP)
+    RET
 
 emit_unknown_escape_scalar:
-    MOVB AL, (DI)(DX*1)
-    INCQ DX
-    JMP main_scalar_tail
+    // Unknown escape sequence - return error code -2
+    MOVQ $-2, written+48(FP)
+    MOVQ CX, consumed+56(FP)
+    RET
 
 found_quote_scalar:
     // Found the closing quote - done!

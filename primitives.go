@@ -641,25 +641,74 @@ func decodeEscapedString(src []byte) ([]byte, int64, error) {
 // or just after it; both forms are accepted for compatibility with existing callers.
 // Uses single-pass AVX2 assembly implementation for optimal performance.
 func readJSONString(src []byte, copyStrings bool) (s string, content []byte, consumed int64, err error) {
-	// The AVX2 assembly expects input starting just after the opening quote.
-	// If the caller passed the full JSON string including the opening quote, strip it.
-	start := 0
-	if len(src) > 1 && src[0] == '"' {
-		start = 1
+	// Handle empty string case: caller already skipped opening quote,
+	// so src starts with the closing quote.
+	if len(src) > 0 && src[0] == '"' {
+		// Check if this is a closing quote (empty string) or opening quote.
+		// If there's content after this quote that isn't another quote, it's an opening quote.
+		// If the next char is also a quote or we're at end of meaningful content, it's closing.
+		isClosing := true
+		if len(src) > 1 {
+			if src[1] != '"' && src[1] != '}' && src[1] != ',' && src[1] != ']' {
+				isClosing = false
+			}
+		}
+		if isClosing {
+			// Empty string: just the closing quote
+			content = []byte{}
+			consumed = 1
+			s = ""
+			return s, content, consumed, nil
+		}
+		// Opening quote - strip it
+		src = src[1:]
 	}
 
-	contentSrc := src[start:]
+	// Fast path: check if there are any escape sequences or closing quote
+	// If not, we can return a slice of the original buffer without copying
+	hasEscapes := false
+	end := -1
+	for i, b := range src {
+		if b == '\\' {
+			hasEscapes = true
+			break
+		}
+		if b == '"' {
+			end = i
+			break
+		}
+	}
 
-	// Allocate destination buffer (worst case: same size as input)
-	buf := make([]byte, len(contentSrc))
+	if !hasEscapes && end >= 0 {
+		// No escapes - zero-copy path
+		content = src[:end]
+		consumed = int64(end) + 1
+		if copyStrings {
+			s = string(content)
+		} else {
+			s = unsafe.String(unsafe.SliceData(content), len(content))
+		}
+		return s, content, consumed, nil
+	}
 
-	written, c := parseJSONStringCompleteASM(contentSrc, buf)
+	// Slow path: use AVX2 assembly for full decoding
+	buf := make([]byte, len(src))
+	written, c := parseJSONStringCompleteASM(src, buf)
 	if written < 0 {
-		return "", nil, -1, ErrUnexpectedEOF
+		switch written {
+		case -1:
+			return "", nil, -1, ErrUnexpectedEOF
+		case -2:
+			return "", nil, -1, fmt.Errorf("%w: invalid escape sequence", ErrTypeMismatch)
+		case -3:
+			return "", nil, -1, fmt.Errorf("%w: invalid hex digit in unicode escape", ErrTypeMismatch)
+		default:
+			return "", nil, -1, ErrUnexpectedEOF
+		}
 	}
 
 	content = buf[:written]
-	consumed = int64(start) + c
+	consumed = c
 
 	if copyStrings {
 		s = string(content)

@@ -32,7 +32,7 @@ func parseJSONStringCompleteASM(src []byte, dst []byte) (int64, int64) {
 	if hasAVX2 {
 		return parseJSONStringCompleteAVX2(src, dst)
 	}
-	// Scalar fallback: find quote, then decode
+	// Scalar fallback: find quote, then decode with full escape handling
 	end, _ := scanJSONStringScalar(src)
 	if end < 0 {
 		return -1, -1
@@ -44,30 +44,112 @@ func parseJSONStringCompleteASM(src []byte, dst []byte) (int64, int64) {
 			switch src[i] {
 			case 'n':
 				dst[written] = '\n'
+				written++
 			case '"':
 				dst[written] = '"'
+				written++
 			case '\\':
 				dst[written] = '\\'
+				written++
 			case 'r':
 				dst[written] = '\r'
+				written++
 			case 't':
 				dst[written] = '\t'
+				written++
 			case '/':
 				dst[written] = '/'
+				written++
 			case 'b':
 				dst[written] = '\b'
+				written++
 			case 'f':
 				dst[written] = '\f'
+				written++
+			case 'u':
+				// Unicode escape: \uXXXX
+				if i+6 > end {
+					// Not enough bytes - emit replacement char
+					dst[written] = 0xEF
+					dst[written+1] = 0xBF
+					dst[written+2] = 0xBD
+					written += 3
+				} else {
+					codepoint, ok := parseHex4(src[i+1 : i+5])
+					if !ok {
+						// Invalid hex - emit replacement char
+						dst[written] = 0xEF
+						dst[written+1] = 0xBF
+						dst[written+2] = 0xBD
+						written += 3
+					} else if codepoint >= 0xD800 && codepoint <= 0xDBFF && i+12 <= end {
+						// High surrogate - check for low surrogate
+						if src[i+7] == '\\' && src[i+8] == 'u' {
+							lowCodepoint, ok := parseHex4(src[i+9 : i+13])
+							if ok && lowCodepoint >= 0xDC00 && lowCodepoint <= 0xDFFF {
+								// Valid surrogate pair - combine
+								codepoint = 0x10000 + ((codepoint-0xD800)<<10) + (lowCodepoint - 0xDC00)
+								i += 6 // Skip the low surrogate escape
+								writeUTF8(dst, &written, codepoint)
+							} else {
+								// Invalid low surrogate - emit replacement char
+								dst[written] = 0xEF
+								dst[written+1] = 0xBF
+								dst[written+2] = 0xBD
+								written += 3
+							}
+						} else {
+							// No low surrogate - emit replacement char
+							dst[written] = 0xEF
+							dst[written+1] = 0xBF
+							dst[written+2] = 0xBD
+							written += 3
+						}
+					} else if codepoint >= 0xDC00 && codepoint <= 0xDFFF {
+						// Lone low surrogate - emit replacement char
+						dst[written] = 0xEF
+						dst[written+1] = 0xBF
+						dst[written+2] = 0xBD
+						written += 3
+					} else {
+						// Regular unicode character
+						writeUTF8(dst, &written, codepoint)
+					}
+				}
 			default:
+				// Unknown escape - emit as-is
 				dst[written] = src[i]
+				written++
 			}
-			written++
 		} else {
 			dst[written] = src[i]
 			written++
 		}
 	}
 	return int64(written), int64(end + 1)
+}
+
+// writeUTF8 encodes a codepoint as UTF-8 and writes it to dst, updating written.
+func writeUTF8(dst []byte, written *int, codepoint rune) {
+	if codepoint <= 0x7F {
+		dst[*written] = byte(codepoint)
+		*written++
+	} else if codepoint <= 0x7FF {
+		dst[*written] = byte(0xC0 | (codepoint >> 6))
+		dst[*written+1] = byte(0x80 | (codepoint & 0x3F))
+		*written += 2
+	} else if codepoint <= 0xFFFF {
+		dst[*written] = byte(0xE0 | (codepoint >> 12))
+		dst[*written+1] = byte(0x80 | ((codepoint >> 6) & 0x3F))
+		dst[*written+2] = byte(0x80 | (codepoint & 0x3F))
+		*written += 3
+	} else {
+		dst[*written] = byte(0xF0 | (codepoint >> 18))
+		dst[*written+1] = byte(0x80 | ((codepoint >> 12) & 0x3F))
+		dst[*written+2] = byte(0x80 | ((codepoint >> 6) & 0x3F))
+		dst[*written+3] = byte(0x80 | (codepoint & 0x3F))
+		*written += 4
+	}
 }
 
 func findQuoteAsm(data []byte) (index int) {
