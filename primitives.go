@@ -636,40 +636,44 @@ func decodeEscapedString(src []byte) ([]byte, int64, error) {
 //   - content: the decoded bytes s points to (useful for key matching)
 //   - consumed: number of input bytes read, including the closing quote
 func readJSONString(src []byte, copyStrings bool) (s string, content []byte, consumed int64, err error) {
-	// Fast path: scan entire string for any special characters
-	idx, isEsc := findQuoteOrEscapeASM(src)
-	if idx < 0 {
-		return "", nil, 0, ErrUnexpectedEOF
-	}
-	if !isEsc {
-		// No escapes before closing quote — zero-copy fast path
-		content = src[:idx]
-		if copyStrings {
-			return string(content), content, int64(idx + 1), nil
-		}
-		return unsafe.String(unsafe.SliceData(content), idx), content, int64(idx + 1), nil
-	}
-
-	// Slow path: string contains escapes — process escapes in order
-	buf := make([]byte, 0, len(src))
+	// Single unified implementation: use SIMD to efficiently find the next
+	// special character (escape or closing quote), process it, and continue.
+	// No pre-checking of the entire string — discover escapes as we encounter them.
+	var buf []byte
 	i := 0
 
 	for {
-		// Find next special character (escape or closing quote) starting from current position
+		// Use SIMD to find the next escape or closing quote from current position
 		idx, isEsc := findQuoteOrEscapeASM(src[i:])
 		if idx < 0 {
 			return "", nil, 0, ErrUnexpectedEOF
 		}
 
-		// Copy bytes before the special character
-		buf = append(buf, src[i:i+idx]...)
-		i += idx
-
 		if !isEsc {
 			// Closing quote found — end of string
-			consumed = int64(i + 1)
+			consumed = int64(i + idx + 1)
+			if buf == nil {
+				// No escapes encountered — zero-copy fast path
+				content = src[:i+idx]
+				if copyStrings {
+					return string(content), content, consumed, nil
+				}
+				return unsafe.String(unsafe.SliceData(content), i+idx), content, consumed, nil
+			}
+			// Copy remaining bytes before closing quote
+			buf = append(buf, src[i:i+idx]...)
 			return unsafe.String(unsafe.SliceData(buf), len(buf)), buf, consumed, nil
 		}
+
+		// Escape found — allocate buffer if needed and process
+		if buf == nil {
+			buf = make([]byte, 0, len(src))
+			// Copy bytes before the escape
+			buf = append(buf, src[i:i+idx]...)
+		} else {
+			buf = append(buf, src[i:i+idx]...)
+		}
+		i += idx
 
 		// Process escape sequence
 		if i+1 >= len(src) {
